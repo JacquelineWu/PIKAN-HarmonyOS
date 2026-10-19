@@ -1,0 +1,12 @@
+{
+  "modelVersion": "5.0.0",
+  "name": "heicviewer",
+  "version": "1.0.0",
+  "description": "HEIC 看图 - 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {},
+  "devDependencies": {},
+  "dynamicDependencies": {}
+}

@@ -1,0 +1,27 @@
+# ---- 构建产物 ----
+build/
+entry/build/
+entry/.preview/
+entry/default/
+.hvigor/
+.hvigorwrapper/
+hvigor/.hvigor/
+oh_modules/
+node_modules/
+*.hap
+*.hsp
+*.har
+*.app
+*.map
+*.js.map
+
+# ---- DevEco / IDE ----
+.idea/
+.vscode/
+*.iml
+.bitfun/.deveco/
+local.properties
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db

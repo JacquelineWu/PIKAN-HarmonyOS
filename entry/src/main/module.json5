@@ -1,0 +1,55 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": [
+      "tablet",
+      "2in1"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    /* ------------------------------------------------------------------
+     * ⚠️ ohos.permission.READ_IMAGEVIDEO 是「受限开放权限」。
+     * 只要在这里声明它，用 DevEco 自动生成的 debug 签名安装就会直接失败：
+     *   code: 9568289  install failed due to grant request permissions failed
+     * 因为 debug 签名里没有该权限的授权。
+     *
+     * 所以默认**不声明**：此时「全部图库」按钮会走降级分支
+     * （动态申请返回 2 = 请求无效 → 自动回退到图库选择器，上限 500 张），功能依然可用。
+     *
+     * 若你已在 AGC 申请到该权限证书并配置了正式签名，把下面这段注释取消即可启用全量扫描：
+     *
+     * "requestPermissions": [
+     *   {
+     *     "name": "ohos.permission.READ_IMAGEVIDEO",
+     *     "reason": "$string:permission_reason_read_imagevideo",
+     *     "usedScene": {
+     *       "abilities": ["EntryAbility"],
+     *       "when": "always"
+     *     }
+     *   }
+     * ],
+     * ------------------------------------------------------------------ */
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:app_icon",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:app_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "skills": [
+          {
+            "entities": ["entity.system.home"],
+            "actions": ["action.system.home"]
+          }
+        ]
+      }
+    ]
+  }
+}
