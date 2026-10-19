@@ -22,6 +22,15 @@ node_modules/
 .bitfun/.deveco/
 local.properties
 
+# ---- 本机签名材料 ----
+# build-profile.json5 含本机证书绝对路径与加密口令，不可入库；
+# 模板见 build-profile.json5.example
+build-profile.json5
+*.p12
+*.p7b
+*.cer
+*.keystore
+
 # ---- 系统 ----
 .DS_Store
 Thumbs.db

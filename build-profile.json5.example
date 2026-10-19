@@ -1,0 +1,66 @@
+// ============================================================
+//  构建配置模板 —— 请勿直接修改本文件
+//
+//  真正的 build-profile.json5 含本机证书绝对路径和签名口令，
+//  已列入 .gitignore，不入版本库。
+//
+//  新环境初始化步骤：
+//    1. 复制本文件为 build-profile.json5
+//    2. 用 DevEco Studio 打开工程
+//    3. File > Project Structure > Signing Configs
+//       勾选 "Automatically generate signature"
+//    4. IDE 会把本机证书/密钥库路径和加密口令自动写入
+//
+//  下面 material 里的值只是占位符，不指向任何真实文件。
+// ============================================================
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "<YOUR_HOME>/.ohos/config/<PROJECT>-<HASH>.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "<ENCRYPTED_PASSWORD>",
+          "profile": "<YOUR_HOME>/.ohos/config/<PROJECT>-<HASH>.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "<YOUR_HOME>/.ohos/config/<PROJECT>-<HASH>.p12",
+          "storePassword": "<ENCRYPTED_PASSWORD>"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "compileSdkVersion": "26.0.0",
+        "compatibleSdkVersion": "26.0.0",
+        "targetSdkVersion": "26.0.0",
+        "runtimeOS": "HarmonyOS",
+        "signingConfig": "default"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}
