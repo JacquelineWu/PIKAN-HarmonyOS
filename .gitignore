@@ -19,8 +19,9 @@ node_modules/
 .idea/
 .vscode/
 *.iml
-.bitfun/.deveco/
+.bitfun/
 local.properties
+# .bitfun/project.json 记录的是生成工程的绝对路径，公开仓库无需携带
 
 # ---- 本机签名材料 ----
 # build-profile.json5 含本机证书绝对路径与加密口令，不可入库；
