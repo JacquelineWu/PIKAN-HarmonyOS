@@ -1,7 +1,7 @@
 {
   "string": [
-    { "name": "module_desc", "value": "鸿蒙 PC 原生 HEIC/JPG 看图软件：ACDSee 风格布局 / 滚轮翻页 / GPU 合成渲染" },
-    { "name": "EntryAbility_desc", "value": "HEIC 看图 入口" },
+    { "name": "module_desc", "value": "PIKAN 鸿蒙 PC 原生 HEIC/JPG 看图软件：ACDSee 风格布局 / 滚轮翻页 / GPU 合成渲染" },
+    { "name": "EntryAbility_desc", "value": "PIKAN 入口" },
     { "name": "permission_reason_read_imagevideo", "value": "用于一次性载入图库中的全部图片，建立图像档案列表" }
   ]
 }

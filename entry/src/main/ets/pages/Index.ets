@@ -2402,7 +2402,7 @@ struct Index {
       // ============================== 顶栏（全屏时整条隐藏）==============================
       if (!this.fullscreen) {
         Row() {
-          Text('HEIC 看图')
+          Text('PIKAN')
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
             .fontColor('#f2f5fa')
