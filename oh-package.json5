@@ -1,8 +1,8 @@
 {
   "modelVersion": "5.0.0",
-  "name": "heicviewer",
+  "name": "pikan",
   "version": "1.0.0",
-  "description": "HEIC 看图 - 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）",
+  "description": "PIKAN 鸿蒙版 - 原生 HEIC/JPG 看图软件（ACDSee 风格）",
   "main": "",
   "author": "",
   "license": "",
