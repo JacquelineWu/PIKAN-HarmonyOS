@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "description": "PIKAN 鸿蒙版 - 原生 HEIC/JPG 看图软件（ACDSee 风格）",
   "main": "",
-  "author": "",
-  "license": "",
+  "author": "JacquelineWu (flyercat)",
+  "license": "MIT",
   "dependencies": {},
   "devDependencies": {},
   "dynamicDependencies": {}

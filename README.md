@@ -1,4 +1,6 @@
-# HEIC 看图 · 鸿蒙 PC 原生看图软件（ACDSee 风格）
+# PIKAN · 鸿蒙 PC 原生看图软件（ACDSee 风格）
+
+> **开源许可：[MIT](./LICENSE)** · Copyright (c) 2026 JacquelineWu (flyercat)
 
 基于 **HarmonyOS SDK（ArkTS + ArkUI）** 开发的 PC 端看图软件，界面布局仿 ACDSee：
 
@@ -40,7 +42,7 @@
 
 ## 在 DevEco Studio 打开并编译
 
-1. 用 **DevEco Studio（支持 HarmonyOS 6 / API 26 的版本，如 DevEco Studio 6.x）** 打开本目录（`heicviewer`）作为工程。
+1. 用 **DevEco Studio（支持 HarmonyOS 6 / API 26 的版本，如 DevEco Studio 6.x）** 打开本目录（`PIKAN-HarmonyOS`）作为工程。
    系统已安装 DevEco Studio 且**自带 API 26 SDK**，直接打开即可，无需再下载。
 
    > **本工程有意不带 `local.properties`**。该文件是机器生成的产物（通常应放进 `.gitignore`），
@@ -89,9 +91,9 @@ WARN 分别是 `preferences` 调用需处理异常（5 条）、`getAssets` 需�
 ## 工程结构
 
 ```
-heicviewer/
+PIKAN-HarmonyOS/
 ├── AppScope/
-│   ├── app.json5                          bundleName: com.workbuddy.heicviewer
+│   ├── app.json5                          bundleName: com.workbuddy.heicviewer（保持未改，见下方说明）
 │   └── resources/base/element/string.json
 ├── entry/
 │   ├── build-profile.json5                stageMode，无 native 配置
@@ -639,3 +641,55 @@ HiLog 上看 `openPicker: select begin` → `openPicker: got N uris`。
 >   写 `abilityAccessCtrl.PermissionRequestResult` 会报 "no exported member"；
 >   本工程改用 `await`（由 Promise 推导类型）彻底绕开这个类型名。
 > - `FetchResult` 的类型参数写法在各版本不一，故同样用 `await` 而非手写泛型。
+
+---
+
+## 开源许可
+
+本项目以 **[MIT License](./LICENSE)** 开源。
+
+```
+Copyright (c) 2026 JacquelineWu (flyercat)
+```
+
+### 你可以做什么
+
+| 事项 | 是否允许 |
+|---|---|
+| 个人使用、学习、修改 | ✅ |
+| 商业使用（含闭源、收费） | ✅ |
+| 二次分发、再许可、出售副本 | ✅ |
+| 改名后发布 | ✅（需保留版权与许可声明） |
+| 要求作者提供质量保证 | ❌（按「原样」提供，无任何担保） |
+
+唯一义务：**在所有副本或实质性部分中保留版权声明与 MIT 许可文本**。
+除此之外不需要署名、不需要开源你的衍生作品、不需要通知原作者。
+
+### 免责声明
+
+软件按「AS IS」提供，不含任何明示或暗示的担保（包括对特定用途适用性、不侵权的默示担保）。
+作者不对任何索赔、损害或其他责任负责——详见 [LICENSE](./LICENSE) 全文。
+
+### 第三方依赖与商标
+
+- 本工程为**纯 ArkTS / ArkUI** 实现，**未引入任何第三方开源库或 native 代码**，
+  解码能力全部来自 HarmonyOS 系统自带的图片 codec。
+- `HarmonyOS`、`ArkTS`、`ArkUI`、`DevEco Studio` 均为华为技术有限公司的商标或注册商标。
+  本项目是**独立的第三方开源项目**，与华为无任何隶属、代理或背书关系。
+- 界面风格参考 ACDSee 的布局习惯（左列表 + 右预览），仅为交互布局上的借鉴，
+  **不含 ACDSee 的任何代码、资源或商标素材**；ACDSee 是 ACD Systems 的商标。
+
+### 关于 bundleName
+
+`bundleName` 仍为 `com.workbuddy.heicviewer`（早期命名遗留）。
+改名会使真机上已安装的版本被系统视为另一个应用、无法平滑升级，因此**刻意保持未改**。
+如果你要作为全新产品分发，可自行改为自己的包名并重新签名。
+
+### 反馈与贡献
+
+Issue 与 PR 欢迎提交到：
+
+- GitHub：https://github.com/JacquelineWu/PIKAN-HarmonyOS
+- Gitee：https://gitee.com/flyercat/PIKAN-HarmonyOS
+
+提交 PR 即表示同意你的贡献同样以 MIT 许可对外提供。
