@@ -699,6 +699,11 @@ struct Index {
   // ---- 后台预载缓存（不用 @State：靠 @State cur / viewPixelMap 变化触发重建即可）----
   private previews: PreviewEntry[] = [];              // 简易 LRU：命中移到队尾，超容量从队头淘汰
   private preloadBytes: number = 0;                   // 当前缓存估算占用
+  /** 右下角角标要显示的缓存账目（镜像）。
+   *  真正的账本是上面两个普通字段（预载每解一张就动一次，做成 @State 会让整棵树反复重建），
+   *  只在「入缓存 / 淘汰 / 清空」三个口子上 sync 一次给 UI —— 频率最多几十次/轮，够看又不抖。 */
+  @State cacheCount: number = 0;
+  @State cacheBytes: number = 0;
   private preloadSeq: number = 0;                     // 预载任务代号，切换图片时自增使旧链作废
   private preloadBusy: boolean = false;
   // ↓↓ 排查用计数器：只喂给 hilog，不参与任何逻辑判断。定位完可整块删掉。
@@ -1805,6 +1810,13 @@ struct Index {
         hilog.warn(DOMAIN, TAG, 'release preview skipped');
       }
     }
+    this.syncCacheStat();
+  }
+
+  /** 把缓存账目同步给右下角角标。改动落在三处口子上：pushPreview / evictOutside / clearPreviews。 */
+  private syncCacheStat(): void {
+    this.cacheCount = this.previews.length;
+    this.cacheBytes = this.preloadBytes;
   }
 
   /** 释放「窗口外」的缓存 —— 让缓存真正跟着位置滑动。
@@ -1831,6 +1843,7 @@ struct Index {
         hilog.warn(DOMAIN, TAG, 'release preview skipped');
       }
     }
+    this.syncCacheStat();
   }
 
   /** uri 是否落在「当前位置前后各 PRELOAD_BACK / PRELOAD_FWD 张」这个窗口里。
@@ -1871,6 +1884,7 @@ struct Index {
     }
     this.previews = [];
     this.preloadBytes = 0;
+    this.syncCacheStat();
     // 缓存被清空后，当前显示的若正是缓存里的那张，就不能再指向它
     this.viewPixelMap = undefined;
     this.releaseViewOwned();
@@ -2726,19 +2740,40 @@ struct Index {
           .padding(12)
           .hitTestBehavior(HitTestMode.Transparent)
 
-          // 右下角缩放角标
-          Row() {
-            Text(Math.round(this.zoom * 100) + ' %')
-              .fontSize(12)
-              .fontColor('#dfe5ef')
-              .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-              .backgroundColor('#cc12161c')
-              .borderRadius(4)
+          // 右下角角标：缓存账目 + 缩放倍率
+          Column() {
+            // 缓存：驻留张数 / 估算占用（圆括号里是张数上限与字节上限，便于看窗口是否填满）
+            Row() {
+              Text('缓存 ' + this.cacheCount + ' / ' + PRELOAD_COUNT + ' 张')
+                .fontSize(11)
+                .fontColor('#9aa5b8')
+              Text(fmtBytes(this.cacheBytes))
+                .fontSize(12)
+                .fontColor('#dfe5ef')
+                .margin({ left: 8 })
+              Text('/ ' + fmtBytes(PRELOAD_MAX_BYTES))
+                .fontSize(10)
+                .fontColor('#5a6272')
+                .margin({ left: 4 })
+            }
+            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+            .backgroundColor('#cc12161c')
+            .borderRadius(4)
+
+            Row() {
+              Text(Math.round(this.zoom * 100) + ' %')
+                .fontSize(12)
+                .fontColor('#dfe5ef')
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .backgroundColor('#cc12161c')
+                .borderRadius(4)
+            }
+            .margin({ top: 6 })
           }
           .width('100%')
           .height('100%')
           .justifyContent(FlexAlign.End)
-          .alignItems(VerticalAlign.Bottom)
+          .alignItems(HorizontalAlign.End)
           .padding(12)
           .hitTestBehavior(HitTestMode.Transparent)
 
