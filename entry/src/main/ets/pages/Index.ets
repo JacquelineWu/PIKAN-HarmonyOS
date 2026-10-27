@@ -91,7 +91,6 @@ const PRELOAD_BACK: number = 20;
 /** 缓存条目上限（LRU 容量）。窗口 41 张，留 7 张余量：
  *  容量必须 > 窗口大小，否则每入一张就淘汰一张、又被预载链加回来，会来回抖动。 */
 const PRELOAD_COUNT: number = 48;
-/** 预载预览图的长边上限（像素）。768px 时单张约 1.7MB（768×576×4），
 /** 未命中缓存时的低清占位档位（单张约 1.7MB）—— 只为「不空白」，不是拿来显示的 */
 const QUICK_EDGE: number = 768;
 /** 预载档位（长边像素）的下限 / 上限，实际取值由 preloadEdge() 按画布尺寸动态算。
@@ -2176,7 +2175,14 @@ struct Index {
     }
     if (target.length === 0) {
       this.preloadBusy = false; // 窗口内都预载好了
-      hilog.info(DOMAIN, TAG, 'preload: window full, stopped at tick %{public}d', this.probeTick);
+      // 窗口理论容量 = 前 span + 后 span + 当前张；不足说明有图解不开，或被字节上限挤掉。
+      const want: number = Math.min(n, fwdSpan + backSpan + 1);
+      hilog.info(DOMAIN, TAG,
+        'preload: window full, cached %{public}d/%{public}d, %{public}d MB, failed=%{public}d, tick %{public}d',
+        this.previews.length, want, Math.round(this.preloadBytes / (1024 * 1024)), this.failed.size, this.probeTick);
+      if (this.previews.length < want && this.previews.length > 0) {
+        hilog.warn(DOMAIN, TAG, 'preload: window NOT full — 多为坏图黑名单，或 PRELOAD_MAX_BYTES 上限挤出');
+      }
       return;
     }
     this.probeTick++;
