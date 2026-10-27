@@ -92,13 +92,37 @@ const PRELOAD_BACK: number = 20;
  *  容量必须 > 窗口大小，否则每入一张就淘汰一张、又被预载链加回来，会来回抖动。 */
 const PRELOAD_COUNT: number = 48;
 /** 预载预览图的长边上限（像素）。768px 时单张约 1.7MB（768×576×4），
- *  41 张 ≈ 70MB；若提到 1024 则 41 张约 127MB —— 内存允许的话可提，预览会更细。 */
-const PRELOAD_EDGE: number = 768;
-/** 预载缓存的总字节上限（双重保险，防 OOM）。窗口内 41 张约 70MB，给到 96MB 留些余量 */
-const PRELOAD_MAX_BYTES: number = 96 * 1024 * 1024;
-/** 主视图解码的长边下限 / 上限（像素）。按「画布长边 × 2」取，放大到 200% 仍清晰 */
-const VIEW_EDGE_MIN: number = 1600;
+/** 未命中缓存时的低清占位档位（单张约 1.7MB）—— 只为「不空白」，不是拿来显示的 */
+const QUICK_EDGE: number = 768;
+/** 预载档位（长边像素）的下限 / 上限，实际取值由 preloadEdge() 按画布尺寸动态算。
+ *
+ *  ⚠️ 关键教训（Win64 版实测，10-27 提交 51ac4d3）：**必须向上量化**。
+ *  早先把 1133 向下量化成 1024，结果档位反而小于屏幕实际要显示的 1196 像素，
+ *  于是每张命中缓存的图都还得再解一次全清才能看 —— 大图那一次能解到 1.5 秒，
+ *  切图卡顿就是这么来的。缓存要存「可直接显示」的清晰度，命中就上屏，不再补解码。 */
+const PRELOAD_MIN_EDGE: number = 1024;
+const PRELOAD_MAX_EDGE: number = 1536;
+/** 预载档位 = 画布长边 × 该系数，再向上量化到 PRELOAD_QUANT 的倍数（留一点放大余量） */
+const PRELOAD_EDGE_FACTOR: number = 1.15;
+const PRELOAD_QUANT: number = 256;
+/** 预载缓存的总字节上限（双重保险，防 OOM）。
+ *  窗口 41 张 × 1536 档位（约 7MB/张）≈ 290MB —— 与 Win64 版同一量级，给到 320MB 留余量 */
+const PRELOAD_MAX_BYTES: number = 320 * 1024 * 1024;
+/** 主视图解码：长边 = 画布长边 × 该系数，并夹在 [VIEW_EDGE_MIN, VIEW_EDGE_MAX] 内。
+ *  系数取 1.5 而不是 2（Win64 版实测）：×2 时一张大图能解到 1.5 秒，
+ *  而屏幕实际只需要约 1.0 倍像素 —— 多出来的既不显示又拖慢切图。 */
+const VIEW_EDGE_FACTOR: number = 1.5;
+const VIEW_EDGE_MIN: number = 1200;
 const VIEW_EDGE_MAX: number = 4096;
+/** 预载命中后，停手多久才补一张全清（ms）。
+ *  连续翻页时这一步会被下一切图作废，所以延迟执行能省掉大量无用解码。 */
+const UPGRADE_DELAY_MS: number = 250;
+/** 是否还播「低清 + 大模糊 → 分档对焦 → 淡出」的切图动画。
+ *
+ *  默认 **false**（与 Win64 版 10-27 提交 042d2fe 一致）：命中缓存即刻上屏、瞬时替换最跟手，
+ *  而早期加模糊是为了掩盖「切图要等解码」—— 如今解码已在后台预载完成，掩盖对象不存在了。
+ *  想看回老效果把它改回 true 即可，代码都在（startFocus / finishFocus / BLUR_* 常量）。 */
+const FOCUS_BLUR: boolean = false;
 
 /** 切图过渡（动态模糊 → 对焦 → 清晰）：
  *  切到新图时先盖一层「低清预览 + 大模糊」，然后分几档把模糊半径收下来（对焦感），
@@ -118,6 +142,13 @@ const BLUR_FADE_STEP_MS: number = 22; // 每档间隔 → 淡出约 88ms（原 1
 /** 滚轮：一个物理刻度会连发多个轴事件，该窗口内「同方向」的事件只算一步（去抖）。
  *  若实机上一个刻度仍被算成两步，把这个值调大（如 100）。 */
 const WHEEL_NOTCH_MS: number = 60;
+/** ⚠️ 已废弃（不再做定时节流），保留常量仅为说明历史做法。
+ *
+ *  旧实现：攒下的步数要等一个 120ms 的定时器才落到渲染上。那是早期防
+ *  「滚动快过解码 → 队列堆积 → 图片错位」加的。Win64 版实测（10-27 提交 649a79c）：
+ *  快速连滚时每次切换被推迟 40~125ms，还会攒成一次跳 2~3 张，明显比键盘慢。
+ *  现在预载存的已是「可直接显示」的清晰度、命中即刻上屏，
+ *  防堆积交给「代号校验作废在途回调」，不再靠翻页节流兜底。 */
 /** 收到轴事件后多久内「不接受拖拽平移」（ms）。
  *
  *  这是修「快速滚动时大图整体上下跑」的关键：在 PC / 2in1 上，滚轮与触控板滚动会被 ArkUI
@@ -125,9 +156,7 @@ const WHEEL_NOTCH_MS: number = 60;
  *  向上滚 = 大图下移，与实测现象完全吻合。滚轮期间屏蔽平移即可，手指/鼠标真实拖拽不受影响
  *  （它们不会产生轴事件）。 */
 const WHEEL_PAN_GUARD_MS: number = 300;
-/** 滚轮：两次「实际切换」的最小间隔。窗口内攒下的步数合并成一次跳转，
- *  只渲染最终落点那一张 —— 中间张根本不解码，避免解码队列堆积导致的闪烁 / 图片错位 */
-const WHEEL_STEP_MS: number = 120;
+/** @deprecated 见 WHEEL_NOTCH_MS 上方注释：滚轮翻页已去掉定时节流。 */
 
 /** 左侧档案列表中的一项 */
 interface ImageItem {
@@ -136,13 +165,14 @@ interface ImageItem {
   size: number;  // 字节数（未知为 -1）
 }
 
-/** 解码结果：uri + 已解码的 PixelMap + 原图宽高 + 估算占用字节 */
+/** 解码结果：uri + 已解码的 PixelMap + 原图宽高 + 解码档位 + 估算占用字节 */
 interface PreviewEntry {
   uri: string;
   px: image.PixelMap;
   bytes: number;
-  w: number;   // 原图宽（用于 1:1 与信息栏，非 PixelMap 宽）
-  h: number;   // 原图高
+  w: number;    // 原图宽（用于 1:1 与信息栏，非 PixelMap 宽）
+  h: number;    // 原图高
+  edge: number; // 解码时的长边档位 —— 用来判断「这张够不够直接上主视图」
 }
 
 /** 受支持的图片后缀 */
@@ -307,8 +337,8 @@ interface ThumbTask {
 }
 
 /** 按给定长边上限解码一张图。失败返回 undefined（不影响正常显示路径）。
- *  edge = PRELOAD_EDGE 得到低清预览；edge = 画布长边×2 得到主视图用的清晰图；
- *  edge = THUMB_EDGE 得到列表用的缩略图。三种场景共用同一套系统 codec。 */
+ *  edge = QUICK_EDGE 得到低清占位；edge = preloadEdge() 得到「可显示清晰度」的预载；
+ *  edge = viewEdge() 得到全清图；edge = THUMB_EDGE 得到列表缩略图。共用同一套系统 codec。 */
 async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
@@ -329,7 +359,7 @@ async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undef
       return undefined;
     }
     const px: image.PixelMap = await src.createPixelMap({ desiredSize: { width: dw, height: dh } });
-    const entry: PreviewEntry = { uri: uri, px: px, bytes: dw * dh * 4, w: w, h: h };
+    const entry: PreviewEntry = { uri: uri, px: px, bytes: dw * dh * 4, w: w, h: h, edge: edge };
     return entry;
   } catch (e) {
     return undefined;
@@ -820,7 +850,7 @@ struct Index {
   private warmLast(uri: string): void {
     setTimeout(() => {
       const t0: number = Date.now();
-      this.decodeTo(uri, PRELOAD_EDGE)
+      this.decodeTo(uri, this.preloadEdge())
         .then((e: PreviewEntry | undefined) => {
           if (e === undefined) {
             hilog.warn(DOMAIN, TAG, 'warm: decode failed');
@@ -1428,18 +1458,15 @@ struct Index {
     this.flushWheel();
   }
 
-  /** 合并后的跳转至少间隔 WHEEL_STEP_MS，给解码留出时间 */
+  /** 攒够一步就**立刻**翻，不做任何定时节流（Win64 版 10-27 提交 649a79c）。
+   *
+   *  早先是「每 120ms 最多翻一张」，实测快速连滚时每次切换被推迟 40~125ms，
+   *  还会攒成一次跳 2~3 张，滚轮明显比键盘慢（键盘是直接 go()）。
+   *  现在预载存的已是「可直接显示」的清晰度、命中即刻上屏，切图不再等解码，
+   *  「怕解码堆积」就交给代号校验（在途回调一律作废）兜底，不必牺牲跟手感。 */
   private flushWheel(): void {
-    if (this.pendingDelta === 0 || this.wheelTimer !== -1) {
-      return; // 没有待消费的步数，或已经排了一个定时任务
-    }
-    const wait: number = Math.max(0, WHEEL_STEP_MS - (Date.now() - this.lastSwitchMs));
-    if (wait > 0) {
-      this.wheelTimer = setTimeout(() => {
-        this.wheelTimer = -1;
-        this.flushWheel();
-      }, wait);
-      return;
+    if (this.pendingDelta === 0) {
+      return; // 没有待消费的步数
     }
     const d: number = this.pendingDelta;
     this.pendingDelta = 0;
@@ -1724,17 +1751,22 @@ struct Index {
   // ------------------------------------------------------------------
   // 后台预载（低清预览缓存）
   //
-  // 思路（与 ACDSee 的「先出缩略预览再 sharpen」一致）：
-  //   · 后台把当前位置「前后各 20 张」解码成「低清预览 PixelMap」并缓存；
-  //   · 切到某张时，若缓存命中就立刻把预览画上去，原图解码完成后再覆盖掉预览。
-  //   · 窗口是**跟着当前位置滑动**的（evictOutside）：翻到哪就缓存哪附近，
-  //     远处那些立刻释放 —— 翻一整个大图库内存也不会一路涨上去。
-  //   · 预载图长边压到 PRELOAD_EDGE（768px）—— 多张同时驻留内存的前提，
-  //     若按原图分辨率预载，几十张就是几个 GB，必然 OOM。
+  // 思路（2026-10-27 参照 Win64 版实测重写，旧版是「预载低清 + 切图再解全清」）：
+  //   · 后台把当前位置「前后各 20 张」按**可直接显示的清晰度**解码并缓存（preloadEdge()）；
+  //   · 切到某张时命中缓存 → **立刻上主视图，不再解码**；
+  //     只有放大到缓存档位不够时才停手 250ms 补一张全清（连续翻页会被下一切图作废）。
+  //   · 未命中 → 768 低清占位（只是不空白）+ 立刻解可显示清晰度。
+  //   · 窗口**跟着当前位置滑动且环绕**（evictOutside / inWindow）：
+  //     翻到哪缓存哪附近，跨首尾也不重解；翻一整个大图库内存不会一路涨上去。
+  //   · 档位不能按原图分辨率预载（几十张就是几个 GB），故夹在 [1024, 1536]。
+  //
+  //  ⚠️ 旧版把预载定为 768px「仅供模糊占位」，于是每张命中缓存的图都还要再解一次
+  //  「画布长边×2」的全清 —— 大图那一次能解到 1 秒以上，切图卡顿就是这么来的。
   // ------------------------------------------------------------------
 
   /** 按给定长边上限解码一张图。失败返回 undefined（不影响正常显示路径）。
-   *  edge = PRELOAD_EDGE 时得到低清预览；edge = 画布长边×2 时得到主视图用的清晰图。 */
+   *  edge = QUICK_EDGE(768) 得到低清占位；edge = preloadEdge() 得到「可显示清晰度」的预载；
+   *  edge = viewEdge() 得到放大时用的全清图。三种场景共用同一套系统 codec。 */
   private decodeTo(uri: string, edge: number): Promise<PreviewEntry | undefined> {
     // 抽离到模块级 decodePx：列表缩略图也用同一份解码逻辑（同一套系统 codec）
     return decodePx(uri, edge);
@@ -1783,11 +1815,9 @@ struct Index {
     if (this.cur < 0) {
       return;
     }
-    const lo: number = this.cur - PRELOAD_BACK;
-    const hi: number = this.cur + PRELOAD_FWD;
     for (let i = this.previews.length - 1; i >= 0; i--) {
       const e: PreviewEntry = this.previews[i];
-      if (this.inWindow(e.uri, lo, hi)) {
+      if (this.inWindow(e.uri)) {
         continue;
       }
       // 正在显示 / 正在做过渡的那张不能 release，否则画面变黑或花屏
@@ -1804,17 +1834,31 @@ struct Index {
     }
   }
 
-  /** uri 是否落在 [lo, hi] 这段位置上（端点按列表范围裁剪） */
-  private inWindow(uri: string, lo: number, hi: number): boolean {
+  /** uri 是否落在「当前位置前后各 PRELOAD_BACK / PRELOAD_FWD 张」这个窗口里。
+   *
+   *  ⚠️ 窗口是**环绕**的（Win64 版 10-27 提交 8cde542）：go() 本来就按模运算循环，
+   *  翻过最后一张就回到第一张，缓存窗口若还按线性截断，每次跨过首尾都要重新解码一批图 ——
+   *  绕回第一张时会明显卡一下。图库比窗口小时取 min(span, n-1)，避免绕整圈重复。 */
+  private inWindow(uri: string): boolean {
     const n: number = this.items.length;
-    const from: number = lo < 0 ? 0 : lo;
-    const to: number = hi > n - 1 ? n - 1 : hi;
-    for (let i = from; i <= to; i++) {
+    if (n === 0 || this.cur < 0) {
+      return false;
+    }
+    const back: number = Math.min(PRELOAD_BACK, n - 1);
+    const fwd: number = Math.min(PRELOAD_FWD, n - 1);
+    for (let k: number = -back; k <= fwd; k++) {
+      const i: number = ((this.cur + k) % n + n) % n;
       if (this.items[i].uri === uri) {
         return true;
       }
     }
     return false;
+  }
+
+  /** 环绕取第 cur+k 张的下标（k 可负、可越界） */
+  private wrapIndex(k: number): number {
+    const n: number = this.items.length;
+    return ((this.cur + k) % n + n) % n;
   }
 
   private clearPreviews(): void {
@@ -1859,12 +1903,46 @@ struct Index {
     const uri: string = this.items[idx].uri;
     const hit: PreviewEntry | undefined = this.previewEntry(uri);
     if (hit !== undefined) {
-      this.startFocus(hit); // 缓存命中：立刻出现模糊层，随后逐档对焦
+      // ① 命中缓存 → 那张已经是「可显示清晰度」，直接上主视图，不等解码（翻页快的关键）
+      this.showDecoded(hit);
+      const need: number = this.showNeed(hit);
+      // ② 档位不够（多半是放大了）才停手后补一张全清；够就不必再解
+      //    ——早先不管够不够都解一次全清，每张多花几百毫秒，切图卡顿就是这么来的
+      if (need <= 0 || hit.edge < need) {
+        this.loadView(uri, token, UPGRADE_DELAY_MS);
+      }
     } else {
-      this.clearBlur();     // 没有低清可过渡：先空着，等 loadQuick 解回来再对焦
+      // ③ 未命中 → 768 低清占位（避免空白）+ 立刻解可显示清晰度
+      this.clearBlur();
       this.loadQuick(uri, token);
+      this.loadView(uri, token, 0);
     }
-    this.loadView(uri, token);
+  }
+
+  /** 把一张已解码的图放上主视图（预载命中走这里）。
+   *
+   *  注意所有权：这张 PixelMap 归缓存所有，不能交给 viewOwned（那是「自己解的、要自己 release」）；
+   *  缓存侧已有保护（pushPreview / evictOutside 都不会淘汰正被显示的这张），不会花屏。 */
+  private showDecoded(e: PreviewEntry): void {
+    this.noteShown(e.uri); // 画面已经出来了 → 这张算「成功显示过」
+    this.viewPixelMap = e.px;
+    this.imgW = e.w;
+    this.imgH = e.h;
+    this.clearBlur();      // FOCUS_BLUR 关掉后不再有过渡层，这里只是把状态归零
+  }
+
+  /** 这张图按当前 zoom 实际要占多少像素（长边），再留 5% 余量。
+   *  用来判断「缓存里这张够不够看」，够就不必再解全清。
+   *  原图本身就小于需求时按原图长边算 —— 再解也不会更清楚。 */
+  private showNeed(e: PreviewEntry): number {
+    const canvasLong: number = Math.max(this.canvasW, this.canvasH);
+    const long: number = Math.max(e.w, e.h);
+    if (canvasLong <= 0 || long <= 0) {
+      return 0;
+    }
+    const z: number = this.zoom > 0 ? this.zoom : 1;
+    const need: number = Math.ceil(canvasLong * z * 1.05);
+    return Math.min(need, long);
   }
 
   // ---- 过渡动画 ----
@@ -1953,7 +2031,7 @@ struct Index {
 
   /** 低清占位：与主视图解码并行，谁先回来谁先顶上（都是「当前这张」，不会串图） */
   private async loadQuick(uri: string, token: number): Promise<void> {
-    const q: PreviewEntry | undefined = await this.decodeTo(uri, PRELOAD_EDGE);
+    const q: PreviewEntry | undefined = await this.decodeTo(uri, QUICK_EDGE);
     if (token !== this.curToken) {
       if (q !== undefined) {
         try {
@@ -1967,15 +2045,34 @@ struct Index {
     if (q === undefined) {
       return;
     }
-    // 清晰图还没就绪 → 用它起一段「模糊 → 对焦」过渡（同一张图，只是分辨率低）
-    if (this.viewOwned === undefined) {
-      this.startFocus(q);
+    // 清晰图还没就绪 → 先把它放上去（同一张图，只是分辨率低）
+    if (this.viewPixelMap === undefined) {
+      if (FOCUS_BLUR) {
+        this.startFocus(q);
+      } else {
+        this.showDecoded(q); // 不做动画：直接顶上，瞬时替换
+      }
     }
     this.pushPreview(q);
   }
 
-  /** 主视图解码：按画布尺寸决定目标分辨率，解码完成后校验代号再替换 */
-  private async loadView(uri: string, token: number): Promise<void> {
+  /** 主视图解码：按画布尺寸决定目标分辨率，解码完成后校验代号再替换。
+   *  delay > 0 时先等一会儿再解 —— 连续翻页时这次解码会被下一切图作废，
+   *  延迟执行能省掉大量「解完就丢」的无效工作（Win64 版 UpgradeDelayMs 同思路）。 */
+  private loadView(uri: string, token: number, delay: number): void {
+    if (delay > 0) {
+      setTimeout(() => {
+        this.loadViewNow(uri, token);
+      }, delay);
+      return;
+    }
+    this.loadViewNow(uri, token);
+  }
+
+  private async loadViewNow(uri: string, token: number): Promise<void> {
+    if (token !== this.curToken) {
+      return; // 排队期间又切了图 → 这次升级没必要了
+    }
     const edge: number = this.viewEdge();
     hilog.info(DOMAIN, TAG, 'loadView: begin edge=%{public}d', edge);
     const ret: PreviewEntry | undefined = await this.decodeTo(uri, edge);
@@ -1995,7 +2092,11 @@ struct Index {
       // 自己解码失败（例如某些 uri 打不开）→ 标记失败，让 UI 回退到 Image(uri) 由系统解码
       this.viewPixelMap = undefined;
       this.viewFailed = true;
-      this.finishFocus(); // 兜底图由系统解码，过渡层照常淡出
+      if (FOCUS_BLUR) {
+        this.finishFocus(); // 兜底图由系统解码，过渡层照常淡出
+      } else {
+        this.clearBlur();
+      }
       return;
     }
     this.noteShown(uri); // 清晰图到位 → 这张确实显示成功，下次启动预热它
@@ -2004,14 +2105,33 @@ struct Index {
     this.viewPixelMap = ret.px;
     this.imgW = ret.w;
     this.imgH = ret.h;
-    this.finishFocus(); // 清晰图到位 → 低清模糊层淡出（这才是「动态模糊」的收尾）
+    if (FOCUS_BLUR) {
+      this.finishFocus(); // 清晰图到位 → 低清模糊层淡出（这才是「动态模糊」的收尾）
+    } else {
+      this.clearBlur();
+    }
   }
 
-  /** 主视图解码的长边：画布长边 × 2（放大到 200% 仍清晰），并夹在 [1600, 4096] 内控制内存 */
+  /** 主视图解码的长边：画布长边 × VIEW_EDGE_FACTOR，并夹在 [1200, 4096] 内控制内存。
+   *  系数从 2 降到 1.5：×2 时一张大图能解 1 秒多，而屏幕实际只需要约 1 倍像素。 */
   private viewEdge(): number {
     const base: number = Math.max(this.canvasW, this.canvasH);
-    const e: number = Math.round(base * 2);
+    const e: number = Math.round(base * VIEW_EDGE_FACTOR);
     return Math.max(VIEW_EDGE_MIN, Math.min(VIEW_EDGE_MAX, e));
+  }
+
+  /** 预载档位：按画布尺寸动态取，向上量化到 PRELOAD_QUANT 的倍数。
+   *
+   *  ⚠️ 必须是 ceil 不是 floor：向下量化会让档位小于屏幕实际要显示的像素，
+   *  于是每张命中缓存的图都还要再解一次全清 —— 那正是切图卡顿的真正来源。
+   *  缓存存的是「可直接显示」的清晰度，命中即上屏（见 showPreviewOf）。 */
+  private preloadEdge(): number {
+    const base: number = Math.max(this.canvasW, this.canvasH);
+    if (base <= 0) {
+      return PRELOAD_MIN_EDGE;
+    }
+    const v: number = Math.ceil(base * PRELOAD_EDGE_FACTOR / PRELOAD_QUANT) * PRELOAD_QUANT;
+    return Math.max(PRELOAD_MIN_EDGE, Math.min(PRELOAD_MAX_EDGE, Math.round(v)));
   }
 
   /** 启动后台预载。已在跑就只自增代号，让现有链自动跟到最新位置，避免并发多条链。 */
@@ -2031,14 +2151,14 @@ struct Index {
       this.preloadNext(this.preloadSeq); // 跟到最新位置继续跑
       return;
     }
+    const n: number = this.items.length;
     let target: string = '';
+    // 窗口环绕：末尾的「前方」绕回开头，与 go() 的模运算一致（否则跨首尾要重解一批）
+    const fwdSpan: number = Math.min(PRELOAD_FWD, n - 1);
+    const backSpan: number = Math.min(PRELOAD_BACK, n - 1);
     // 先补「前方」（主要浏览方向）
-    for (let k = 1; k <= PRELOAD_FWD; k++) {
-      const i: number = this.cur + k;
-      if (i >= this.items.length) {
-        break;
-      }
-      const u: string = this.items[i].uri;
+    for (let k = 1; k <= fwdSpan; k++) {
+      const u: string = this.items[this.wrapIndex(k)].uri;
       if (this.previewEntry(u) === undefined && !this.failed.has(u)) {
         target = u;
         break;
@@ -2046,12 +2166,8 @@ struct Index {
     }
     // 再补「后方」：否则快速往回滚时一张都命中不了缓存，退化成全靠原图解码
     if (target.length === 0) {
-      for (let k = 1; k <= PRELOAD_BACK; k++) {
-        const i: number = this.cur - k;
-        if (i < 0) {
-          break;
-        }
-        const u: string = this.items[i].uri;
+      for (let k = 1; k <= backSpan; k++) {
+        const u: string = this.items[this.wrapIndex(-k)].uri;
         if (this.previewEntry(u) === undefined && !this.failed.has(u)) {
           target = u;
           break;
@@ -2067,7 +2183,7 @@ struct Index {
     if (this.probeTick % 20 === 0) {
       hilog.info(DOMAIN, TAG, 'preload: tick %{public}d, target=%{public}s', this.probeTick, target);
     }
-    this.decodeTo(target, PRELOAD_EDGE)
+    this.decodeTo(target, this.preloadEdge())
       .then((entry: PreviewEntry | undefined) => {
         if (seq !== this.preloadSeq) {
           this.preloadNext(this.preloadSeq); // 期间又切了图 → 跟到最新位置继续，别把链断掉
