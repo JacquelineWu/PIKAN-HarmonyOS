@@ -44,11 +44,46 @@ import abilityAccessCtrl from '@ohos.abilityAccessCtrl';
 import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
+import util from '@ohos.util';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
 const TAG = 'HeicViewer';
 const DOMAIN = 0x0000;
+
+/** 版本号（与 AppScope/app.json5 的 versionName 保持一致），用于窗口标题栏。
+ *  Win64 版 3ea7419 起标题栏带版本号；鸿蒙没有「读取程序集版本」的等价物，故用常量。 */
+const APP_VERSION: string = '1.0.4';
+/** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
+ *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
+const CANVAS_BG: string = '#5F5F5F';
+/** 缩放角标的口径：true = 相对「原图像素」的倍率（100% = 1:1，与 ACDSee / Photoshop 一致）；
+ *  false = 相对「适应窗口」的倍率（旧行为，适应窗口时显示 100%）。 */
+const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;
+/** 左栏是否隐藏以 . 开头的档案名 / 目录名（Win64 4600bcc） */
+const HIDE_DOT_FILES: boolean = true;
+/** 是否启用「竖图对开」（连续两张竖图左右并排）。对应 Win64 6347756。
+ *  关掉它 = 永远单页显示，翻页 / 预载逻辑完全不变。 */
+const SPREAD_PORTRAIT: boolean = true;
+/** 当前目录的变动自检间隔（ms）。鸿蒙 SDK 26 没有 @ohos.file.fileObserver，
+ *  没法挂 inotify 式的文件系统监听，只能退化为「定时比对目录 mtime」；
+ *  检测到变化后去抖重扫，并保持当前张不闪（Win64 2bcbbb1 的变形实现）。 */
+const DIR_POLL_MS: number = 1500;
+const DIR_RESCAN_DEBOUNCE_MS: number = 900;
+
+/** 全屏时顶栏自动隐藏（Win64 4666 / 4670）：鼠标压到窗口最上面 TOPBAR_EDGE_PX 个像素
+ *  才把顶栏浮出来，顶栏高度 52 + 下方 TOPBAR_KEEP_PX 之内保持显示。
+ *  鸿蒙收不到「鼠标移出窗口」事件，故另加一个「停手 2s 自动收起」的兜底。
+ *  顶栏用 Stack + position 浮在画布上，不占布局，出现/消失都不会把预览区挤一下。 */
+const TOPBAR_EDGE_PX: number = 10;
+const TOPBAR_KEEP_PX: number = 8;
+const TOPBAR_H: number = 52;
+const TOPBAR_HIDE_MS: number = 2000;
+/** 左栏宽度：展开 / 收起（Win64 收起态 224~360 按最长名伸缩，鸿蒙取固定下限 224，
+ *  已足够并排放下抬头那三个按钮；见 README「平台变形实现」）。分隔条中间的 « 按钮常驻。 */
+const LIST_W: number = 280;
+const LIST_COLLAPSED_W: number = 224;
+const SPLIT_W: number = 14;
 
 const MIN_SCALE: number = 0.05;
 const MAX_SCALE: number = 16.0;
@@ -75,22 +110,27 @@ const GALLERY_USE_PHOTO_PICKER: boolean = true;
 /** 直接扫描图库时的安全上限，避免超大图库一次性吃满内存 */
 const SCAN_CAP: number = 20000;
 
-/** 鼠标键缩放倍率（相对步进）：左键放大 50%（×1.5），右键放大 100%（×2.0）。
- *  若想要「绝对档位」（左键直接到 50%、右键直接到 100%），把 zoomAt 换成 setZoomTo 即可。 */
+/** 鼠标键缩放倍率（相对步进）：左键放大 50%（×1.5）。
+ *  Win64 84adb7a 起右键改为「还原」（回到适应窗口并归位），不再放大 —— 与 ACDSee 一致。
+ *  ZOOM_RIGHT 保留仅为兼容旧配置，当前路径不使用。 */
 const ZOOM_LEFT: number = 1.5;
 const ZOOM_RIGHT: number = 2.0;
 /** 按下到抬起若移动超过该距离（vp）就判定为「拖拽平移」，不触发点击缩放 */
 const CLICK_MOVE_TOL: number = 4;
+/** 双击判定窗口（ms）：在这个时间内的单击放大，会被随后的双击「撤销」掉，
+ *  保证「双击进出全屏，画面保持原样」（Win64 84adb7a）。 */
+const DBL_CLICK_UNDO_MS: number = 400;
 
-/** 预载窗口：当前位置「往后」的张数（主要浏览方向） */
-const PRELOAD_FWD: number = 20;
+/** 预载窗口：当前位置「往后」的张数（主要浏览方向）。
+ *  Win64 版 c111e2c 起由 20 扩到 50 张 —— 悬停缩略图要能立刻命中，长图库连翻也更稳。 */
+const PRELOAD_FWD: number = 50;
 /** 预载窗口：当前位置「往前」的张数 —— 没有它的话，快速往回滚就一张都命中不了缓存。
  *  改这两个常量就等于改窗口大小；缓存是**跟着当前位置滑动**的（见 evictOutside），
- *  所以前后各 20 意味着最多同时驻留 41 张，而不是越翻越多。 */
-const PRELOAD_BACK: number = 20;
-/** 缓存条目上限（LRU 容量）。窗口 41 张，留 7 张余量：
+ *  所以前后各 50 意味着最多同时驻留 101 张，而不是越翻越多。 */
+const PRELOAD_BACK: number = 50;
+/** 缓存条目上限（LRU 容量）。窗口 101 张，留 11 张余量：
  *  容量必须 > 窗口大小，否则每入一张就淘汰一张、又被预载链加回来，会来回抖动。 */
-const PRELOAD_COUNT: number = 48;
+const PRELOAD_COUNT: number = 112;
 /** 未命中缓存时的低清占位档位（单张约 1.7MB）—— 只为「不空白」，不是拿来显示的 */
 const QUICK_EDGE: number = 768;
 /** 预载档位（长边像素）的下限 / 上限，实际取值由 preloadEdge() 按画布尺寸动态算。
@@ -105,8 +145,10 @@ const PRELOAD_MAX_EDGE: number = 1536;
 const PRELOAD_EDGE_FACTOR: number = 1.15;
 const PRELOAD_QUANT: number = 256;
 /** 预载缓存的总字节上限（双重保险，防 OOM）。
- *  窗口 41 张 × 1536 档位（约 7MB/张）≈ 290MB —— 与 Win64 版同一量级，给到 320MB 留余量 */
-const PRELOAD_MAX_BYTES: number = 320 * 1024 * 1024;
+ *  窗口 101 张 × 1536 档位（约 7MB/张）≈ 700MB，与 Win64 版（768MB）同一量级。
+ *  ⚠️ 鸿蒙设备内存普遍小于 PC，这里给 512MB：一旦触顶会按 LRU 淘汰，
+ *     窗口实际驻留张数会小于 101，右下角角标的「N / 112 张」能直接看出来。 */
+const PRELOAD_MAX_BYTES: number = 512 * 1024 * 1024;
 /** 主视图解码：长边 = 画布长边 × 该系数，并夹在 [VIEW_EDGE_MIN, VIEW_EDGE_MAX] 内。
  *  系数取 1.5 而不是 2（Win64 版实测）：×2 时一张大图能解到 1.5 秒，
  *  而屏幕实际只需要约 1.0 倍像素 —— 多出来的既不显示又拖慢切图。 */
@@ -157,12 +199,23 @@ const WHEEL_NOTCH_MS: number = 60;
 const WHEEL_PAN_GUARD_MS: number = 300;
 /** @deprecated 见 WHEEL_NOTCH_MS 上方注释：滚轮翻页已去掉定时节流。 */
 
-/** 左侧档案列表中的一项 */
+/** 左侧档案列表中的一项。
+ *  对齐 Win64 的双集合设计：`items` 是纯图片翻页序列，`rows` 是左栏显示行
+ *  （可能多出「..」、子文件夹、不支持预览的文件），靠 itemIndex 单向挂钩。 */
 interface ImageItem {
   uri: string;   // 文件 / 图库 URI（可直接喂给 Image 组件）
-  name: string;  // 显示文件名
+  name: string;  // 显示文件名（已做乱码修复，仅显示用）
   size: number;  // 字节数（未知为 -1）
+  mtime?: number;      // 修改时间（ms），左栏「日期」列用
+  kind?: number;       // 0=图片 1=上级「..」 2=子文件夹 3=不支持预览的文件
+  itemIndex?: number;  // 图片行对应 items 的下标；非图片行 = -1
 }
+
+/** 左栏行种类 */
+const ROW_IMAGE: number = 0;
+const ROW_UP: number = 1;
+const ROW_FOLDER: number = 2;
+const ROW_OTHER: number = 3;
 
 /** 解码结果：uri + 已解码的 PixelMap + 原图宽高 + 解码档位 + 估算占用字节 */
 interface PreviewEntry {
@@ -176,6 +229,21 @@ interface PreviewEntry {
 
 /** 受支持的图片后缀 */
 const IMAGE_SUFFIXES: Array<string> = ['.heic', '.heif', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'];
+
+/** 文件名是否是可预览图片（大小写不敏感）。 */
+function isImageName(name: string): boolean {
+  const dot: number = name.lastIndexOf('.');
+  if (dot < 0) {
+    return false;
+  }
+  const ext: string = name.substring(dot).toLowerCase();
+  for (let i = 0; i < IMAGE_SUFFIXES.length; i++) {
+    if (ext === IMAGE_SUFFIXES[i]) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** 文件选择器「格式」下拉项。写法是系统约定的 `'显示名|后缀1,后缀2,…'`：
  *  竖线左边是下拉里给人看的文字，右边是实际过滤的后缀（多个用英文逗号分隔）；
@@ -232,6 +300,177 @@ function extOf(name: string): string {
   return name.substring(i + 1).toUpperCase();
 }
 
+// --------------------------------------------------------------------
+// 文件名显示层工具（对齐 PIKAN-Win64 11-04）
+// --------------------------------------------------------------------
+
+/** 自然序比较：把连续数字当成一个整数比大小，而不是逐字符比。
+ *  IMG_2 会排在 IMG_10 前面（逐字符比会把 10 排到 2 前）。
+ *  对应 Win64 的 StrCmpLogicalW（FsEntry.cs），鸿蒙无等价 API，自己实现。 */
+function naturalCompare(a: string, b: string): number {
+  const la: string = a.toLowerCase();
+  const lb: string = b.toLowerCase();
+  let i: number = 0;
+  let j: number = 0;
+  while (i < la.length && j < lb.length) {
+    const ca: number = la.charCodeAt(i);
+    const cb: number = lb.charCodeAt(j);
+    const da: boolean = ca >= 48 && ca <= 57;
+    const db: boolean = cb >= 48 && cb <= 57;
+    if (da && db) {
+      // 跳过前导零后取数字段，按「数值 + 段长」比较（2 < 10；02 与 2 相等时 02 靠前）
+      let ia: number = i;
+      while (ia < la.length && la.charCodeAt(ia) >= 48 && la.charCodeAt(ia) <= 57) {
+        ia++;
+      }
+      let jb: number = j;
+      while (jb < lb.length && lb.charCodeAt(jb) >= 48 && lb.charCodeAt(jb) <= 57) {
+        jb++;
+      }
+      const na: number = parseInt(la.substring(i, ia), 10);
+      const nb: number = parseInt(lb.substring(j, jb), 10);
+      if (na !== nb) {
+        return na < nb ? -1 : 1;
+      }
+      if ((ia - i) !== (jb - j)) {
+        return (ia - i) < (jb - j) ? -1 : 1;
+      }
+      i = ia;
+      j = jb;
+      continue;
+    }
+    if (ca !== cb) {
+      return ca < cb ? -1 : 1;
+    }
+    i++;
+    j++;
+  }
+  if (i >= la.length && j >= lb.length) {
+    return 0;
+  }
+  return i >= la.length ? -1 : 1;
+}
+
+/** 判一个字符是否为「表意文字 / 假名 /  Hangul」——用来给解码结果打分。 */
+function isIdeograph(c: number): boolean {
+  return (c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3400 && c <= 0x4dbf) ||
+    (c >= 0x3040 && c <= 0x30ff) || (c >= 0xac00 && c <= 0xd7af);
+}
+
+/** 解码结果打分：连续表意文字加分，替换字符 / 控制字符 / 私用区直接判负。 */
+function readableScore(s: string): number {
+  let score: number = 0;
+  let run: number = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c: number = s.charCodeAt(i);
+    if (c === 0xfffd || c < 0x20 || (c >= 0xe000 && c <= 0xf8ff)) {
+      return -1; // 解坏了，直接淘汰
+    }
+    if (isIdeograph(c)) {
+      run++;
+      score += 2 + Math.min(run, 4); // 连续汉字更像正常词
+    } else {
+      run = 0;
+      if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) ||
+        c === 32 || c === 46 || c === 45 || c === 95 || c === 40 || c === 41) {
+        score += 1;
+      } else if (c >= 0x00c0 && c <= 0x024f) {
+        score -= 2; // 又冒出一批拉丁扩展字符，多半没解对
+      }
+    }
+  }
+  return score;
+}
+
+/** 文件名乱码还原（Win64 AnsiCodec.cs 的鸿蒙变形版）。
+ *
+ *  成因：某环节把 GBK / Big5 / Shift-JIS / UTF-8 字节用 Latin-1（或 cp1252）解成了 Unicode，
+ *  于是磁盘上存的是一串「拉丁扩展字符」。还原 = 先按「字节值 = 码位」回推成字节，
+ *  再用候选编码重新解码，取「最像人话」且优于原样的那个。
+ *
+ *  安全边界（与 Win64 一致）：**只影响显示**，读文件、拼路径、位置记忆一律用原始 name/uri。
+ *  探测很保守：含正常 CJK / 假名 / Hangul 的名字直接原样返回，不会误伤。
+ *  鸿蒙用 util.TextDecoder（支持 gbk / gb18030 / big5 / euc-jp / utf-8），无需第三方码表。 */
+const MOJIBAKE_ENCODINGS: Array<string> = ['gb18030', 'gbk', 'big5', 'euc-jp', 'utf-8'];
+
+function repairMojibake(name: string): string {
+  // 前置筛选：至少要有一批「拉丁扩展 / 希腊 / 西里尔」这类典型的乱码码位
+  let odd: number = 0;
+  for (let i = 0; i < name.length; i++) {
+    const c: number = name.charCodeAt(i);
+    if (isIdeograph(c)) {
+      return name; // 已有正常汉字 → 不是乱码，别动
+    }
+    if (c >= 0x0080) {
+      odd++;
+      if (c > 0xffff) {
+        return name; // 代理对，回推会丢信息
+      }
+    }
+  }
+  if (odd < 2) {
+    return name;
+  }
+  const raw: number = readableScore(name);
+  const bytes: Uint8Array = new Uint8Array(name.length);
+  for (let i = 0; i < name.length; i++) {
+    const c: number = name.charCodeAt(i);
+    if (c > 0xff) {
+      return name; // 回推不回去（例如 cp1252 的 0x80→U+20AC），放弃
+    }
+    bytes[i] = c;
+  }
+  let best: string = name;
+  let bestScore: number = raw;
+  for (let k = 0; k < MOJIBAKE_ENCODINGS.length; k++) {
+    try {
+      const dec: util.TextDecoder = util.TextDecoder.create(MOJIBAKE_ENCODINGS[k]);
+      const s: string = dec.decodeToString(bytes);
+      const sc: number = readableScore(s);
+      // 必须明显优于原样才采纳，且解出来的长度不能缩得离谱
+      if (sc > bestScore + 3 && s.length >= 1) {
+        bestScore = sc;
+        best = s;
+      }
+    } catch (e) {
+      // 该编码不认识这串字节，跳过
+    }
+  }
+  return best;
+}
+
+/** 路径中间省略：保住开头的盘符/根目录与末尾的目录名（Win64 3f92173）。 */
+function ellipsizeMiddle(s: string, max: number): string {
+  if (s.length <= max) {
+    return s;
+  }
+  const tail: number = Math.floor(max * 0.55);
+  const head: number = max - tail - 1;
+  return s.substring(0, head) + '…' + s.substring(s.length - tail);
+}
+
+/** 从 uri / 路径里抠出所在目录（用于标题栏显示） */
+function dirOf(path: string): string {
+  let s = path;
+  const q = s.indexOf('?');
+  if (q >= 0) {
+    s = s.substring(0, q);
+  }
+  const i = s.lastIndexOf('/');
+  return i > 0 ? s.substring(0, i) : s;
+}
+
+/** 时间戳 → 'YY-MM-DD HH:mm'，用于左栏「日期」列（Win64 三栏档案列表）。 */
+function fmtDate(ms: number): string {
+  if (ms <= 0) {
+    return '--';
+  }
+  const d: Date = new Date(ms);
+  const p = (v: number): string => (v < 10 ? '0' + v : '' + v);
+  return (d.getFullYear() % 100).toString().padStart(2, '0') + '-' + p(d.getMonth() + 1) + '-' +
+    p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
 
 // --------------------------------------------------------------------
 // 缩略图基础设施
@@ -248,6 +487,10 @@ function extOf(name: string): string {
 
 /** 缩略图长边（像素）。列表显示区是 56×42，取 128 在高分屏下依然清晰 */
 const THUMB_EDGE: number = 128;
+/** 悬停缩略图（Win64 51 行）：220 DIP 浮层，用 384px 档解码，
+ *  自己的 24 张 LRU、同时只解一个，不挤占行内缩略图 / 主预载缓存。 */
+const HOVER_EDGE: number = 384;
+const HOVER_MAX_COUNT: number = 24;
 /** 缩略图 LRU 缓存条目上限：128px 时单张约 60KB，600 张 ≈ 36MB */
 const THUMB_MAX_COUNT: number = 600;
 /** 缩略图解码并发上限。HEIC 解码较重，同时开太多会瞬间吃满内存 —— 必须限流 */
@@ -386,14 +629,30 @@ async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undef
  *  而 LRU 总是淘汰「最久没人用」的条目 —— 那时对应的行早已离开屏幕。
  *  上限 36MB 对常驻内存完全无所谓，没必要为此冒险。 */
 class ThumbLoader {
-  private static inst: ThumbLoader = new ThumbLoader();
+  /** 行内缩略图与悬停大图各跑一个实例：档位、LRU 上限、并发数都不同，互不挤占。
+   *  Win64 51 行：悬停用自己的 24 张小缓存，且解码同时最多一个在跑。 */
+  private static rowInst: ThumbLoader = new ThumbLoader(THUMB_EDGE, THUMB_MAX_COUNT, THUMB_CONCURRENCY);
+  private static hoverInst: ThumbLoader = new ThumbLoader(HOVER_EDGE, HOVER_MAX_COUNT, 1);
   private cache: Map<string, PreviewEntry> = new Map();
   private order: string[] = [];   // 最近使用顺序，队头最旧
   private pending: ThumbTask[] = [];
   private active: number = 0;
+  private edge: number;
+  private maxCount: number;
+  private concurrency: number;
+
+  constructor(edge: number, maxCount: number, concurrency: number) {
+    this.edge = edge;
+    this.maxCount = maxCount;
+    this.concurrency = concurrency;
+  }
 
   static get(): ThumbLoader {
-    return ThumbLoader.inst;
+    return ThumbLoader.rowInst;
+  }
+
+  static hover(): ThumbLoader {
+    return ThumbLoader.hoverInst;
   }
 
   /** 同步查缓存；命中则刷新最近使用位置 */
@@ -422,7 +681,7 @@ class ThumbLoader {
 
   /** 按并发上限取任务执行 */
   private pump(): void {
-    while (this.active < THUMB_CONCURRENCY && this.pending.length > 0) {
+    while (this.active < this.concurrency && this.pending.length > 0) {
       const t: ThumbTask | undefined = this.pending.shift();
       if (t === undefined) {
         break;
@@ -431,7 +690,7 @@ class ThumbLoader {
         continue; // 行已经划出屏幕了，这个请求作废
       }
       this.active++;
-      decodePx(t.uri, THUMB_EDGE)
+      decodePx(t.uri, this.edge)
         .then((e: PreviewEntry | undefined) => {
           this.active--;
           if (e !== undefined) {
@@ -452,7 +711,7 @@ class ThumbLoader {
   private put(uri: string, e: PreviewEntry): void {
     this.cache.set(uri, e);
     this.touch(uri);
-    while (this.order.length > THUMB_MAX_COUNT) {
+    while (this.order.length > this.maxCount) {
       const oldest: string = this.order[0];
       this.order.splice(0, 1);
       const victim: PreviewEntry | undefined = this.cache.get(oldest);
@@ -491,21 +750,45 @@ struct ArchiveRow {
   //    （'.size({ ... })'），会报 "not assignable to ... (value: SizeOptions) => CommonAttribute"。
   //    同类雷区还有 width / height / scale / rotate / translate（本文件因此用 zoom 表示缩放）。
   @Prop bytes: number = -1;
+  @Prop mtime: number = 0;      // 修改时间，日期列用
+  @Prop kind: number = 0;       // 0=图片 1=上级 2=目录 3=不支持预览
   @Prop idx: number = 0;
   @Prop selected: boolean = false;
+  @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
   // ⚠️ 回调也不能加 private：ArkTS 会报
   //    "Property 'onTap' is private and can not be initialized through the component constructor"。
   onTap: (idx: number) => void = () => {};
+  onDblTap: (idx: number) => void = () => {};
   @State thumb: image.PixelMap | undefined = undefined;
+  @State showHover: boolean = false;                       // 悬停浮层是否展开
+  @State hoverPx: image.PixelMap | undefined = undefined;  // 悬停大图（384px 档）
   private alive: boolean = true;
+
+  /** Win64 bac9ff9：图片粉、目录粉蓝、不支持预览的文件灰；上级行用中性色 */
+  private labelColor(): string {
+    if (this.selected) {
+      return '#e8ecf4';
+    }
+    if (this.kind === ROW_FOLDER || this.kind === ROW_UP) {
+      return '#8fb8e8';
+    }
+    if (this.kind === ROW_OTHER) {
+      return '#6b7280';
+    }
+    return '#e2a8cf';
+  }
 
   aboutToAppear(): void {
     this.alive = true;
-    this.load();
+    if (this.kind === ROW_IMAGE) {
+      this.load();
+    }
   }
 
   aboutToDisappear(): void {
     this.alive = false; // 离屏后即使队列轮到自己，也不再回调
+    this.showHover = false; // 行划出屏幕 / 滚动列表：浮层立刻收起
+    this.hoverPx = undefined;
   }
 
   private load(): void {
@@ -522,56 +805,145 @@ struct ArchiveRow {
     });
   }
 
+  /** Win64 51 行：鼠标停在档案名上，旁边浮出小图。
+   *  先查悬停自己的 LRU，命中即同步出图；没命中才后台解一张 384px（同时最多一个）。
+   *  目录行 / 不支持预览的灰行不弹；离屏、点击、划走由 alive / showHover 收起。 */
+  private onHoverChange(on: boolean): void {
+    if (this.kind !== ROW_IMAGE) {
+      return;
+    }
+    if (!on) {
+      this.showHover = false;
+      this.hoverPx = undefined;
+      return;
+    }
+    this.showHover = true;
+    const hit: image.PixelMap | undefined = ThumbLoader.hover().peek(this.uri);
+    if (hit !== undefined) {
+      this.hoverPx = hit;
+      return;
+    }
+    this.hoverPx = undefined;
+    ThumbLoader.hover().request(this.uri, () => this.alive && this.showHover,
+      (p: image.PixelMap | undefined) => {
+        if (this.alive && this.showHover && p !== undefined) {
+          this.hoverPx = p;
+        }
+      });
+  }
+
+  @Builder
+  hoverThumb() {
+    Column() {
+      if (this.hoverPx !== undefined) {
+        Image(this.hoverPx!)
+          .objectFit(ImageFit.Contain)
+          .interpolation(ImageInterpolation.Medium)
+          .width(220)
+          .height(165)
+          .borderRadius(4)
+      } else if (this.thumb !== undefined) {
+        // 悬停大图还没解好：先用行内 128px 缩略图顶一下，不出现空白框
+        Image(this.thumb!)
+          .objectFit(ImageFit.Contain)
+          .interpolation(ImageInterpolation.Low)
+          .width(220)
+          .height(165)
+          .borderRadius(4)
+      } else {
+        Column()
+          .width(220)
+          .height(165)
+          .borderRadius(4)
+          .backgroundColor('#262b34')
+      }
+      Text(this.name)
+        .fontSize(11)
+        .fontColor('#dfe5ef')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width(220)
+        .margin({ top: 6 })
+    }
+    .padding(8)
+    .backgroundColor('#1a1d23')
+    .border({ width: 1, color: '#3a4150' })
+    .borderRadius(6)
+  }
+
   build() {
     Row() {
-      // 命中缓存时用缩略图；未命中先占位灰底，避免按原图分辨率解码（OOM 主因）
-      // 未命中缓存时留深灰占位，绝不退化成 Image(uri) 按原图分辨率解码
-      Stack() {
-        if (this.thumb !== undefined) {
-          Image(this.thumb!)
-            .objectFit(ImageFit.Cover)
-            .interpolation(ImageInterpolation.Low)
-            .width(56)
-            .height(42)
-            .borderRadius(4)
+      // 只有图片行解缩略图；目录 / 灰行给个纯色图标位，避免无谓的解码请求
+      if (this.kind === ROW_IMAGE) {
+        Stack() {
+          if (this.thumb !== undefined) {
+            Image(this.thumb!)
+              .objectFit(ImageFit.Cover)
+              .interpolation(ImageInterpolation.Low)
+              .width(56)
+              .height(42)
+              .borderRadius(4)
+          }
         }
+        .width(56)
+        .height(42)
+        .borderRadius(4)
+        .backgroundColor('#262b34')
+        .border({ width: this.selected ? 2 : 0, color: '#4fd1c5' })
+      } else {
+        Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : '·'))
+          .fontSize(18)
+          .fontColor(this.kind === ROW_OTHER ? '#4b5260' : '#8fb8e8')
+          .width(56)
+          .height(42)
+          .textAlign(TextAlign.Center)
       }
-      .width(56)
-      .height(42)
-      .borderRadius(4)
-      .backgroundColor('#262b34')
-      .border({
-        width: this.selected ? 2 : 0,
-        color: '#4fd1c5'
-      })
 
-      Column() {
-        Text(this.name)
-          .fontSize(12)
-          .fontColor(this.selected ? '#e8ecf4' : '#9fb0c8')
+      Text(this.name)
+        .fontSize(12)
+        .fontColor(this.labelColor())
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+        .padding({ left: 8 })
+        .onHover((isHover: boolean) => {
+          this.onHoverChange(isHover);
+        })
+        .bindPopup(this.showHover, {
+          builder: () => { this.hoverThumb(); },
+          placement: Placement.Right,
+          popupColor: '#1a1d23'
+        })
+
+      // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
+      if (!this.collapsed) {
+        Text(fmtBytes(this.bytes))
+          .fontSize(10)
+          .fontColor('#7f88a8')
+          .width(66)
+          .textAlign(TextAlign.End)
           .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-        Row() {
-          Text(extOf(this.name))
-            .fontSize(10)
-            .fontColor('#5a6272')
-            .margin({ right: 8 })
-          Text(fmtBytes(this.bytes))
-            .fontSize(10)
-            .fontColor('#7f88a8')
-        }
-        .margin({ top: 3 })
+        Text(this.mtime > 0 ? fmtDate(this.mtime) : '--')
+          .fontSize(10)
+          .fontColor('#6b7385')
+          .width(88)
+          .textAlign(TextAlign.End)
+          .maxLines(1)
+          .margin({ left: 6 })
       }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
-      .padding({ left: 8 })
     }
     .width('100%')
     .padding(6)
     .borderRadius(6)
     .backgroundColor(this.selected ? '#1f2730' : 'transparent')
-    .onClick(() => this.onTap(this.idx))
+    .onClick(() => {
+      this.showHover = false; // 鼠标按下选图：浮层立刻收起（Win64 51 行）
+      this.onTap(this.idx);
+    })
+    .gesture(
+      TapGesture({ count: 2 })
+        .onAction(() => this.onDblTap(this.idx))
+    )
   }
 }
 
@@ -622,9 +994,29 @@ struct Index {
   // UI 只需要 itemCount（负责空态与「N 张」文案）和 LazyForEach 的数据源。
   private items: ImageItem[] = [];
   private dataSource: GalleryDataSource = new GalleryDataSource();
+  /** 左栏实际显示的行（Win64 FsEntry）。目录浏览态下会多出「..」、子文件夹、
+   *  不支持预览的文件；非目录态就是 items 的镜像。dataSource 用 rows，不用 items。 */
+  private rows: ImageItem[] = [];
+  // ---- 目录浏览（对齐 Win64 文件浏览器，鸿蒙变形实现）----
+  private browseDir: string = '';          // 当前目录 uri；空 = 非目录浏览态
+  private dirStack: string[] = [];          // 上层目录栈，供「..」/退格回退
+  private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
+  private dirPollTimer: number = -1;        // 目录轮询句柄
+  private rescanTimer: number = -1;         // 变动后去抖重扫句柄
+  private folderBusy: boolean = false;      // 防止导航连点 / 重扫叠加重入
   @State itemCount: number = 0;
   @State source: string = '尚未打开';
   @State cur: number = -1;          // 当前选中索引；-1 表示空
+  /** 当前浏览目录的完整路径（Win64 07c1eee：搬到标题栏）。鸿蒙没有 setWindowTitle，
+   *  就放在顶栏 PIKAN 右边，显示时中间省略保住末尾目录名。 */
+  @State titlePath: string = '';
+  /** 左栏收起态（Ctrl+B / « 按钮）。收起后只留档案名一列，抬头与三个按钮仍保留。 */
+  @State listCollapsed: boolean = false;
+  /** 左栏排序方向：true = 升序（自然序） */
+  @State sortAsc: boolean = true;
+  /** 顶栏自动隐藏（Win64 0cfabb2）：鼠标贴近窗口顶端才浮出，默认不占画面 */
+  @State topbarVisible: boolean = true;
+  private topbarTimer: number = -1;   // 「停手 N 秒自动收起」的兜底计时器
 
   // ---- 视图变换状态 ----
   @State zoom: number = 1;
@@ -653,8 +1045,14 @@ struct Index {
   private timerId: number = -1;
   private baseZoom: number = 1;
   private ctrlDown: boolean = false; // Ctrl + 滚轮 = 缩放，由键盘事件跟踪
+  private shiftDown: boolean = false; // Shift + R/H/V/B 组合键（Win64 10-29 起）
   private baseTx: number = 0;
   private baseTy: number = 0;
+  // 单击放大前的视图快照：双击来临时用它撤销「第一下单击」，保证进出全屏画面不变
+  private clickSnapZoom: number = -1;
+  private clickSnapTx: number = 0;
+  private clickSnapTy: number = 0;
+  private clickSnapAt: number = 0;
 
   /** 进出全屏后画布尺寸会变，需要在尺寸落地后按新尺寸重解一次大图，否则只是把旧分辨率拉大（发虚） */
   private pendingReload: boolean = false;
@@ -722,6 +1120,11 @@ struct Index {
   // 自己解码 + 代号校验后，显示哪一张、什么时候换，完全由我们原子控制，没有竞态。
   @State viewPixelMap: image.PixelMap | undefined = undefined; // 当前实际显示的清晰图像素
   private viewOwned: image.PixelMap | undefined = undefined;   // 自己解码的那张（需 release）
+  /** 对开时的右页：命中预载缓存就直接引用缓存的 PixelMap（所有权仍归缓存），
+   *  否则自己解一张并记在 rightOwned 里。切图 / 换源时按所有权分别释放。 */
+  @State rightPixelMap: image.PixelMap | undefined = undefined;
+  private rightOwned: image.PixelMap | undefined = undefined;
+  private rightToken: number = 0;
   @State viewFailed: boolean = false;                 // 自解码确认失败 → 才回退到 Image(uri)
   @State curToken: number = 0;                        // 当前显示图的代号（每切换一次自增）
 
@@ -732,11 +1135,24 @@ struct Index {
   private focusSeq: number = 0;                       // 对焦动画代号，切图时自增使旧动画作废
 
   aboutToAppear(): void {
+    // Win64「可观测」的鸿蒙变形：启动只打一条常量环境快照，绝不读 preferences / 不枚举磁盘。
+    // 早期 appfreeze 的真根因正是启动路径上的 PreferencesGetValue，这里必须保持极轻。
+    hilog.info(DOMAIN, TAG,
+      'PIKAN %{public}s start · preload %{public}d fwd / %{public}d max · spread=%{public}d · dirPoll=%{public}d',
+      APP_VERSION, PRELOAD_FWD, PRELOAD_COUNT, SPREAD_PORTRAIT ? 1 : 0, DIR_POLL_MS);
     this.readLastPos(); // 异步读，不阻塞首帧
   }
 
   aboutToDisappear(): void {
     this.stopSlide();
+    if (this.dirPollTimer !== -1) {
+      clearInterval(this.dirPollTimer);
+      this.dirPollTimer = -1;
+    }
+    if (this.rescanTimer !== -1) {
+      clearTimeout(this.rescanTimer);
+      this.rescanTimer = -1;
+    }
     if (this.warm !== undefined) {
       // 预热的那张还没被接进缓存（用户没打开任何图），别留着 PixelMap 泄漏
       try {
@@ -749,6 +1165,7 @@ struct Index {
     this.clearPreviews();
     this.releaseViewOwned();
     this.clearWheel();
+    this.clearTopbarTimer();
     this.sizeSeq++; // 作废还在跑的体积补测任务
     this.flushPos(); // 退出前把最后一次位置落盘（async，尽力而为）
     if (this.fullscreen) {
@@ -1104,6 +1521,58 @@ struct Index {
     }
   }
 
+  /** 右页：只有「自己解的」才 release；命中缓存的那张归缓存管（缓存淘汰会跳过它）。 */
+  private releaseRightOwned(): void {
+    const rb: image.PixelMap | undefined = this.rightOwned;
+    this.rightOwned = undefined;
+    if (rb !== undefined) {
+      try {
+        rb.release();
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'release right pixelmap skipped');
+      }
+    }
+  }
+
+  /** 载入对开右页：优先命中预载缓存（同步、零等待），否则后台解一张可显示清晰度。
+   *  代号校验：切图后旧回调一律作废，避免右页显示成上一对的图。 */
+  private loadRightPage(uri: string): void {
+    this.rightToken++;
+    const token: number = this.rightToken;
+    this.releaseRightOwned();   // 上一张右页若是自解码的，先释放
+    const hit: PreviewEntry | undefined = this.previewEntry(uri);
+    if (hit !== undefined) {
+      this.rightOwned = undefined;
+      this.rightPixelMap = hit.px;
+      return;
+    }
+    this.decodeTo(uri, this.preloadEdge())
+      .then((e: PreviewEntry | undefined) => {
+        if (token !== this.rightToken || e === undefined) {
+          if (e !== undefined) {
+            try {
+              e.px.release();
+            } catch (err) {
+              // ignore
+            }
+          }
+          return;
+        }
+        this.rightOwned = e.px;
+        this.rightPixelMap = e.px;
+      })
+      .catch(() => {
+        // 右页解不开就留空，左页照常显示（不把整屏拖成失败态）
+      });
+  }
+
+  /** 单页 / 换源时收掉右页（不动左页） */
+  private clearRightPage(): void {
+    this.rightToken++;
+    this.releaseRightOwned();
+    this.rightPixelMap = undefined;
+  }
+
   /** 丢弃尚未执行的合并跳转，并把滚轮状态复位 */
   private clearWheel(): void {
     if (this.wheelTimer !== -1) {
@@ -1126,6 +1595,16 @@ struct Index {
 
   private curItem(): ImageItem | undefined {
     return this.cur >= 0 && this.cur < this.items.length ? this.items[this.cur] : undefined;
+  }
+
+  /** 信息浮层的档案名：对开时「左名 · 右名」，单页时只有当前名。 */
+  private spreadNames(): string {
+    const a: string = this.curName();
+    const b: number = this.spreadB;
+    if (b >= 0 && b < this.items.length) {
+      return a + '  ·  ' + this.items[b].name;
+    }
+    return a;
   }
 
   private curName(): string {
@@ -1162,37 +1641,57 @@ struct Index {
 
   private nameOf(uri: string, idx: number): string {
     const b = baseName(uri);
-    return b && b.length > 0 ? b : ('图片 ' + (idx + 1));
+    // 乱码修复只作用于显示名：uri 本身保持磁盘原样，IO / 位置记忆一律用原始值
+    const shown: string = repairMojibake(b);
+    return shown && shown.length > 0 ? shown : ('图片 ' + (idx + 1));
   }
 
   /** 载入一组 URI，构建档案列表并默认选中第一张。
-   *  体积刻意留成 -1 交给后台 fillSizes() 补 —— 见那里的注释。 */
+   *  体积刻意留成 -1 交给后台 fillSizes() 补 —— 见那里的注释。
+   *  对齐 Win64：过滤 . 开头的隐藏文件，并按自然序排序（IMG_2 排在 IMG_10 前）。 */
   private setItems(uris: Array<string>, src: string): void {
     hilog.info(DOMAIN, TAG, 'setItems: %{public}d uris from %{public}s', uris.length, src);
     this.source = src;
     const list: ImageItem[] = [];
     for (let i = 0; i < uris.length; i++) {
       const u: string = uris[i];
-      const item: ImageItem = { uri: u, name: this.nameOf(u, i), size: -1 };
+      const raw: string = baseName(u);
+      if (HIDE_DOT_FILES && raw.length > 0 && raw.charAt(0) === '.') {
+        continue;
+      }
+      const item: ImageItem = {
+        uri: u, name: this.nameOf(u, i), size: -1,
+        kind: ROW_IMAGE, itemIndex: i
+      };
       list.push(item);
     }
+    list.sort((a: ImageItem, b: ImageItem) => naturalCompare(a.name, b.name));
     this.applyItems(list, src, '');
   }
 
   /** 统一入口：提交档案列表、刷新计数与数据源、重建预览与预载。
-   *  起始位置：优先恢复到上次浏览的那张（见 restoreIndex），否则从第 1 张开始。 */
-  private applyItems(list: ImageItem[], src: string, capped: string): void {
+   *  起始位置：优先恢复到上次浏览的那张（见 restoreIndex），否则从第 1 张开始。
+   *  目录浏览态会传入 rows（含 .. / 子文件夹 / 灰行），此时 items 仍只含可翻页图片。 */
+  private applyItems(list: ImageItem[], src: string, capped: string, rows?: ImageItem[]): void {
     this.items = list;
+    if (rows !== undefined) {
+      this.rows = rows;
+    } else {
+      this.rows = list; // 非目录态：左栏行就是图片序列本身
+    }
     this.source = src;
     this.itemCount = list.length;
-    this.dataSource.reload(list);
+    this.dataSource.reload(this.rows);
+    // 标题栏路径：目录浏览态用当前目录；否则取首批 uri 的父目录
+    this.titlePath = this.browseDir.length > 0 ? this.browseDir :
+      (list.length > 0 ? dirOf(list[0].uri) : '');
     // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
     const start: number = this.restoreIndex(list);
     this.cur = list.length > 0 ? (start >= 0 ? start : 0) : -1;
     this.resetView();
     if (this.cur >= 0) {
       this.loadMeta(this.cur);
-      this.scroller.scrollToIndex(this.cur, false);
+      this.scroller.scrollToIndex(this.rowOfItem(this.cur), false);
     }
     if (start >= 0) {
       this.resumeHint = ''; // 已经回到上次位置，空态提示不再需要
@@ -1213,6 +1712,7 @@ struct Index {
       hilog.info(DOMAIN, TAG, 'warm: adopted %{public}s', w.uri === at ? 'on current' : 'not current');
     }
     this.showPreviewOf(this.cur);
+    this.refreshSpread();
     this.schedulePreload();
     this.fillSizes();
     this.snapDirty = true; // 列表换了 → 下次写盘时把这一批 uri 存成快照
@@ -1230,11 +1730,23 @@ struct Index {
     const seq: number = this.sizeSeq;
     let i: number = 0;
     let batch: number = 0;
+    let yielded: number = 0;
     const step = (): void => {
       if (seq !== this.sizeSeq || i >= this.items.length) {
         hilog.info(DOMAIN, TAG, 'fillSizes: end at %{public}d / %{public}d', i, this.items.length);
         return; // 换了数据源，这批作废
       }
+      // Win64 2bcbbb1「只在你没翻图 / 没滚动 / 没导航的时候才动磁盘」：
+      // 鸿蒙没有空闲调度器，用 wheelActive / folderBusy / playing 近似，翻页与换目录期间一律让路。
+      // 让路只是把这一批推后重试（序列 i 不变，不会漏算）；设上限避免开着幻灯片时永远不补测。
+      if ((this.wheelActive || this.folderBusy || this.playing) && yielded < 40) {
+        yielded++;
+        setTimeout(() => {
+          step();
+        }, SIZE_YIELD_MS * 4);
+        return;
+      }
+      yielded = 0;
       batch++;
       if (batch % 10 === 0) {
         hilog.info(DOMAIN, TAG, 'fillSizes: %{public}d / %{public}d', i, this.items.length);
@@ -1246,13 +1758,14 @@ struct Index {
           const s: number = this.trySize(this.items[k].uri);
           if (s > 0) {
             this.items[k].size = s;
+            this.setRowSize(this.items[k].uri, s);
             changed = true;
           }
         }
       }
       i = end;
       if (changed) {
-        this.dataSource.reload(this.items); // 通知 LazyForEach 重取 @Prop
+        this.dataSource.reload(this.rows); // 通知 LazyForEach 重取 @Prop
       }
       if (i < this.items.length) {
         setTimeout(() => {
@@ -1287,9 +1800,25 @@ struct Index {
     this.flipV = false;
   }
 
+  /** 对外显示的缩放百分比（Win64 a1d7bca / 38f2093 口径）。
+   *  `100 %` = 一个原图像素对应一个屏幕 vp 像素（1:1），与 ACDSee / Photoshop 一致；
+   *  「适应窗口」通常是 13%~30% 这类小数。内部 zoom 仍是相对适应窗口的倍率，不对外显示。
+   *  不足 10% 给一位小数，否则整数。尺寸未就绪时回退到内部倍率，避免显示 0%。 */
+  private zoomPercentText(): string {
+    if (!ZOOM_PCT_RELATIVE_TO_PIXEL) {
+      return Math.round(this.zoom * 100) + ' %';
+    }
+    const f: number = this.fitFactor();
+    if (f <= 0) {
+      return Math.round(this.zoom * 100) + ' %';
+    }
+    const pct: number = this.zoom * f * 100;
+    return (pct < 10 ? pct.toFixed(1) : Math.round(pct).toString()) + ' %';
+  }
+
   private zoomBy(factor: number): void {
     this.zoom = clamp(this.zoom * factor, MIN_SCALE, MAX_SCALE);
-    this.status = '缩放 ' + Math.round(this.zoom * 100) + '%';
+    this.status = '缩放 ' + this.zoomPercentText();
   }
 
   private setZoomTo(v: number): void {
@@ -1322,10 +1851,12 @@ struct Index {
       this.ty = 0;
     }
     this.zoom = next;
-    this.status = '缩放 ' + Math.round(this.zoom * 100) + '%';
+    this.status = '缩放 ' + this.zoomPercentText();
   }
 
-  /** 鼠标按键：左键放大 50% / 右键放大 100%，均以光标为锚点。
+  /** 鼠标按键（对齐 Win64 84adb7a）：
+   *  左键 = 放大 50%（以光标为锚点，连点累积）；右键 = 还原（适应窗口并归位）；
+   *  双击 = 切换全屏，且会**撤销第一下单击的放大**，让进出全屏画面保持原样。
    *  用「按下→抬起位移」区分点击与拖拽：拖拽是平移手势，不应顺带触发缩放。 */
   private onMouseButton(event: MouseEvent): void {
     if (event.action === MouseAction.Press) {
@@ -1354,12 +1885,45 @@ struct Index {
       if (moved) {
         return; // 拖拽平移，不算点击
       }
-      if (btn !== MouseButton.Left && btn !== MouseButton.Right) {
+      if (btn === MouseButton.Right) {
+        // 右键 = 还原（Win64：复位视图 + 归位）
+        this.resetView();
+        this.status = '已还原（适应窗口）';
+        this.clickSnapZoom = -1; // 不需要给双击撤销
         return;
       }
+      if (btn !== MouseButton.Left) {
+        return;
+      }
+      // 记下放大前的状态：若这是「双击的第一下」，随后的双击手势会把它恢复回去
+      this.clickSnapZoom = this.zoom;
+      this.clickSnapTx = this.tx;
+      this.clickSnapTy = this.ty;
+      this.clickSnapAt = Date.now();
       // 立即执行，不做任何延迟 —— 单击放大是最高频操作，延迟会明显发滞
-      this.zoomAt((btn === MouseButton.Left) ? ZOOM_LEFT : ZOOM_RIGHT, event.x, event.y);
+      this.zoomAt(ZOOM_LEFT, event.x, event.y);
     }
+  }
+
+  /** 双击画布：撤销第一下单击的放大 → 切换全屏（Win64 84adb7a / 7ff850d）。 */
+  private onDoubleTapCanvas(): void {
+    if (this.clickSnapZoom >= 0 && Date.now() - this.clickSnapAt <= DBL_CLICK_UNDO_MS) {
+      this.zoom = this.clickSnapZoom;
+      this.tx = this.clickSnapTx;
+      this.ty = this.clickSnapTy;
+    }
+    this.clickSnapZoom = -1;
+    this.toggleFull();
+  }
+
+  /** 撤销最近一次单击放大（供双击档案名复用），不影响其它视图状态。 */
+  private undoLastClickZoom(): void {
+    if (this.clickSnapZoom >= 0 && Date.now() - this.clickSnapAt <= DBL_CLICK_UNDO_MS) {
+      this.zoom = this.clickSnapZoom;
+      this.tx = this.clickSnapTx;
+      this.ty = this.clickSnapTy;
+    }
+    this.clickSnapZoom = -1;
   }
 
   /** 1:1 —— 一个图片像素对应一个 vp 像素 */
@@ -1391,6 +1955,68 @@ struct Index {
     this.status = this.flipV ? '已垂直镜像' : '已取消垂直镜像';
   }
 
+  /** 图片序列下标 → 左栏行下标。目录浏览态下 rows 前面会多出 .. / 子文件夹 / 灰行，
+   *  直接拿 cur 去 scrollToIndex 会滚错行。找不到（理论上不会）就退回原下标。 */
+  private rowOfItem(idx: number): number {
+    if (this.rows === this.items) {
+      return idx;
+    }
+    for (let i = 0; i < this.rows.length; i++) {
+      if (this.rows[i].itemIndex === idx) {
+        return i;
+      }
+    }
+    return idx;
+  }
+
+  /** fillSizes 补测到体积后同步到左栏行（rows 与 items 可能是不同对象） */
+  private setRowSize(uri: string, size: number): void {
+    for (let i = 0; i < this.rows.length; i++) {
+      if (this.rows[i].uri === uri) {
+        this.rows[i].size = size;
+      }
+    }
+  }
+
+  /** 状态栏页码：对开双页时显示「第 1–2 / N 张」，单页时「第 1 / N 张」 */
+  private pageLabel(): string {
+    const n: number = this.items.length;
+    if (n <= 0 || this.cur < 0) {
+      return '还没有图片';
+    }
+    const b: number = this.spreadRight();
+    if (b >= 0) {
+      return '第 ' + (this.cur + 1) + '–' + (b + 1) + ' / ' + n + ' 张';
+    }
+    return '第 ' + (this.cur + 1) + ' / ' + n + ' 张';
+  }
+
+  /** 点左栏某一行：按行的种类分发（图片 / 上级 / 子文件夹 / 不支持预览的文件）。
+   *  对应 Win64 FsEntry 的 ItemIndex 单向挂钩。 */
+  private onRowTap(rowIdx: number): void {
+    if (rowIdx < 0 || rowIdx >= this.rows.length) {
+      return;
+    }
+    const r: ImageItem = this.rows[rowIdx];
+    const kind: number = r.kind ?? ROW_IMAGE;
+    if (kind === ROW_UP) {
+      this.browseUp();
+      return;
+    }
+    if (kind === ROW_FOLDER) {
+      this.openFolder(r.uri, true);
+      return;
+    }
+    if (kind === ROW_OTHER) {
+      this.status = '不支持预览：' + r.name + '（只列出，不进翻页序列）';
+      return;
+    }
+    const idx: number = r.itemIndex ?? rowIdx;
+    if (idx >= 0 && idx < this.items.length) {
+      this.select(idx);
+    }
+  }
+
   private select(idx: number): void {
     if (idx < 0 || idx >= this.items.length) {
       return;
@@ -1399,10 +2025,11 @@ struct Index {
     this.resetView();
     this.loadMeta(idx);
     this.showPreviewOf(idx);
-    this.scroller.scrollToIndex(idx, false);
-    this.status = '第 ' + (idx + 1) + ' / ' + this.items.length + ' 张';
+    this.refreshSpread();
+    this.scroller.scrollToIndex(this.rowOfItem(idx), false);
+    this.status = this.pageLabel();
     // LazyForEach 不会自动感知 selected 变化，通知数据源重取 @Prop（只重建可见的几行）
-    this.dataSource.reload(this.items);
+    this.dataSource.reload(this.rows);
     this.schedulePreload();
     this.markPos(); // 记住位置，下次启动自动回到这里
   }
@@ -1416,11 +2043,12 @@ struct Index {
     this.resetView();
     this.loadMeta(this.cur);
     this.showPreviewOf(this.cur);
+    this.refreshSpread();
     // 第二个参数 smooth=false：快速翻页时不要播滚动动画，否则每次切换都重启一段动画，
     // 左侧列表会一直「追」不上当前项，观感上就是图片和列表错位。
-    this.scroller.scrollToIndex(this.cur, false);
-    this.status = '第 ' + (this.cur + 1) + ' / ' + n + ' 张';
-    this.dataSource.reload(this.items); // 同步左侧高亮（只重建可见的几行）
+    this.scroller.scrollToIndex(this.rowOfItem(this.cur), false);
+    this.status = this.pageLabel();
+    this.dataSource.reload(this.rows); // 同步左侧高亮（只重建可见的几行）
     this.schedulePreload();
     this.markPos(); // 记住位置，下次启动自动回到这里
   }
@@ -1798,8 +2426,8 @@ struct Index {
     while ((this.previews.length > PRELOAD_COUNT || this.preloadBytes > PRELOAD_MAX_BYTES) &&
       this.previews.length > 1) {
       const old: PreviewEntry = this.previews[0];
-      // 正在显示的不能淘汰：它是主视图 / 过渡层的图，release 掉会让画面变黑/花屏
-      if (old.px === this.viewPixelMap || old.px === this.lowPixelMap) {
+      // 正在显示的不能淘汰：主视图 / 过渡层 / 对开右页，release 掉会让画面变黑/花屏
+      if (old.px === this.viewPixelMap || old.px === this.lowPixelMap || old.px === this.rightPixelMap) {
         break;
       }
       this.previews.splice(0, 1);
@@ -1831,8 +2459,8 @@ struct Index {
       if (this.inWindow(e.uri)) {
         continue;
       }
-      // 正在显示 / 正在做过渡的那张不能 release，否则画面变黑或花屏
-      if (e.px === this.viewPixelMap || e.px === this.lowPixelMap) {
+      // 正在显示 / 正在做过渡 / 对开右页的那张不能 release，否则画面变黑或花屏
+      if (e.px === this.viewPixelMap || e.px === this.lowPixelMap || e.px === this.rightPixelMap) {
         continue;
       }
       this.previews.splice(i, 1);
@@ -1888,6 +2516,11 @@ struct Index {
     // 缓存被清空后，当前显示的若正是缓存里的那张，就不能再指向它
     this.viewPixelMap = undefined;
     this.releaseViewOwned();
+    // 对开右页也可能正指着缓存里那张：上面已把整批 px release，
+    // 必须把引用一并撤掉，否则右页会留下一块已释放的 PixelMap（花屏 / 黑块）。
+    this.rightToken++;        // 作废在途的右页解码回调，别让它把旧图盖回来
+    this.rightPixelMap = undefined;
+    this.releaseRightOwned(); // 自解码的右页不进缓存，单独释放
   }
 
   /** 切到第 idx 张时调用。
@@ -1900,7 +2533,12 @@ struct Index {
    *    上层 = 低清图 + blur（只存在于过渡的这几百毫秒）
    *  于是「模糊 → 清晰」是**两层交叉**出来的，而不是对清晰图反复做模糊 ——
    *  后者每帧都要重算大图模糊，代价极高，还会把最终画面也弄糊。
-   *  依然是「代号校验」那一套：任何迟到的回调都盖不到新图上，不会串图、不会残留。 */
+   *  依然是「代号校验」那一套：任何迟到的回调都盖不到新图上，不会串图、不会残留。
+   *
+   *  对开右页刻意不在这里清：所有改变 cur 的路径（select / go / applyItems / 目录重扫）
+   *  都在本函数之后紧跟 refreshSpread() 同步重算右页，ArkUI 状态批量在下一帧生效，
+   *  不会出现「上一对右页残留一帧」。而 onAreaChange 只是进出全屏后按新尺寸重解大图，
+   *  cur 没变，若在这里清右页反而会把好端端的右页抹掉。 */
   private showPreviewOf(idx: number): void {
     this.curToken++;
     const token: number = this.curToken;
@@ -2239,6 +2877,265 @@ struct Index {
   }
 
   /** 任意文件（DocumentViewPicker）：多选文件，默认格式 `*.*`（不过滤）*/
+  /** 当前对开的右页下标（-1 = 单页）。必须是 @State：探测到竖图后才重算，要驱动 UI 重建。 */
+  @State spreadB: number = -1;
+  /** 竖图探测缓存：uri → 是否竖图。只读元数据，不解像素（Win64 ProbeOf 的对应物）。 */
+  private probeCache: Map<string, boolean> = new Map<string, boolean>();
+  private spreadSeq: number = 0;
+
+  /** 读回当前对开右页。pageLabel / UI 都从这里取，保证与 @State 一致。 */
+  private spreadRight(): number {
+    return this.spreadB;
+  }
+
+  /** 重算对开配对（Win64 PairFor / bd5c73a）：
+   *  「点到 / 翻到哪张，哪张就在左边」—— 固定按 [0,1][2,3] 分组会让第 2 张永远选不中，
+   *  所以以当前落点为基准，下一张同为竖图才并排。翻页步长恒为一格（go(±1)）。 */
+  private refreshSpread(): void {
+    if (!SPREAD_PORTRAIT || this.items.length === 0 || this.cur < 0) {
+      this.spreadB = -1;
+      this.clearRightPage();
+      return;
+    }
+    const seq: number = ++this.spreadSeq;
+    const self: string = this.items[this.cur].uri;
+    const next: number = this.cur + 1;
+    if (next >= this.items.length || !this.isPortrait(self)) {
+      this.spreadB = -1;
+      this.clearRightPage();
+      return;
+    }
+    const b: string = this.items[next].uri;
+    const known: boolean | undefined = this.probeCache.get(b);
+    if (known === undefined) {
+      // 还没探到 → 先单页，后台探测完成后再重算（不阻塞切图）
+      this.spreadB = -1;
+      this.clearRightPage();
+      this.probeOne(b, seq);
+      return;
+    }
+    if (!known) {
+      this.spreadB = -1;
+      this.clearRightPage();
+      return;
+    }
+    this.spreadB = next;
+    this.loadRightPage(b);
+  }
+
+  /** 是否竖图：优先查缓存，再查已解码的预载缓存，都没有才异步探元数据。 */
+  private isPortrait(uri: string): boolean {
+    const hit: boolean | undefined = this.probeCache.get(uri);
+    if (hit !== undefined) {
+      return hit;
+    }
+    const e: PreviewEntry | undefined = this.previewEntry(uri);
+    if (e !== undefined && e.w > 0 && e.h > 0) {
+      const v: boolean = e.h > e.w;
+      this.probeCache.set(uri, v);
+      return v;
+    }
+    this.probeOne(uri, this.spreadSeq);
+    return false; // 探测回来后由 refreshSpread 重算
+  }
+
+  /** 异步探一张图的原始宽高（只读 ImageInfo，不解码像素），结果进缓存并触发一次重算。 */
+  private probeOne(uri: string, seq: number): void {
+    if (this.probeCache.has(uri)) {
+      return;
+    }
+    try {
+      const src: image.ImageSource = image.createImageSource(uri);
+      src.getImageInfo(0)
+        .then((info: image.ImageInfo) => {
+          const portrait: boolean = info.size.height > info.size.width;
+          this.probeCache.set(uri, portrait);
+          try {
+            src.release();
+          } catch (e) {
+            // ignore
+          }
+          if (seq === this.spreadSeq) {
+            this.refreshSpread();
+          }
+        })
+        .catch(() => {
+          this.probeCache.set(uri, false);
+          try {
+            src.release();
+          } catch (e) {
+            // ignore
+          }
+          if (seq === this.spreadSeq) {
+            this.refreshSpread();
+          }
+        });
+    } catch (e) {
+      this.probeCache.set(uri, false);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 目录浏览（Win64 文件浏览器在鸿蒙上的变形实现）
+  // ------------------------------------------------------------------
+
+  /** 「选择文件夹」：DocumentViewPicker 的 FOLDER 模式（API 11+ / 2in1 可用）。 */
+  private chooseFolder(): void {
+    try {
+      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+      if (!ctx) {
+        this.status = '无法获取应用上下文';
+        return;
+      }
+      const dv = new picker.DocumentViewPicker(ctx);
+      const opt = new picker.DocumentSelectOptions();
+      opt.selectMode = picker.DocumentSelectMode.FOLDER;
+      opt.maxSelectNumber = 1;
+      dv.select(opt)
+        .then((uris: Array<string>) => {
+          if (!uris || uris.length === 0) {
+            this.status = '已取消选择文件夹';
+            return;
+          }
+          this.dirStack = [];
+          this.openFolder(uris[0], false);
+        })
+        .catch((e: Object) => {
+          this.status = '选择文件夹失败：' + JSON.stringify(e);
+          hilog.error(DOMAIN, TAG, 'chooseFolder rejected: %{public}s', JSON.stringify(e));
+        });
+    } catch (e) {
+      this.status = '选择文件夹不可用：' + JSON.stringify(e);
+    }
+  }
+
+  /** 列一个目录：构造左栏 rows（.. / 子文件夹 / 灰行 / 图片）与可翻页 items（只含图片）。
+   *  push=true 时把当前目录压栈，供「..」回退；重扫（push=false）保持当前张不闪。
+   *  ⚠️ 鸿蒙 DocumentViewPicker 授予的是 URI，fs.listFile / statSync 对它不一定有权限；
+   *     失败时明确提示，不静默吞掉（Win64 走的是真实文件系统路径）。 */
+  private async openFolder(dirUri: string, push: boolean): Promise<void> {
+    if (this.folderBusy) {
+      return;
+    }
+    this.folderBusy = true;
+    const keepUri: string = this.cur >= 0 ? this.items[this.cur].uri : '';
+    try {
+      let names: string[] = [];
+      try {
+        names = await fs.listFile(dirUri, { recursion: false, listNum: 0 });
+      } catch (e) {
+        this.status = '无法列出目录（URI 权限未覆盖子项）：改用顶栏「打开图库」/「选择图片」';
+        hilog.warn(DOMAIN, TAG, 'openFolder listFile failed: %{public}s', JSON.stringify(e));
+        this.folderBusy = false;
+        return;
+      }
+      const imgs: ImageItem[] = [];
+      const dirs: ImageItem[] = [];
+      const others: ImageItem[] = [];
+      for (let i = 0; i < names.length; i++) {
+        const raw: string = names[i];
+        if (raw.length === 0 || (HIDE_DOT_FILES && raw.charAt(0) === '.')) {
+          continue;
+        }
+        const child: string = dirUri + '/' + raw;
+        let size: number = -1;
+        let mtime: number = 0;
+        let isDir: boolean = false;
+        try {
+          const st: fs.Stat = fs.statSync(child);
+          size = st.size;
+          mtime = st.mtime;
+          isDir = st.isDirectory();
+        } catch (e) {
+          // 单条 stat 失败不拖垮整批：当成不支持预览的文件列出
+        }
+        const shown: string = repairMojibake(raw);
+        if (isDir) {
+          dirs.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_FOLDER, itemIndex: -1 });
+        } else if (isImageName(raw)) {
+          imgs.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_IMAGE, itemIndex: -1 });
+        } else {
+          others.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_OTHER, itemIndex: -1 });
+        }
+      }
+      const cmp = (a: ImageItem, b: ImageItem): number => naturalCompare(a.name, b.name);
+      dirs.sort(cmp);
+      imgs.sort(cmp);
+      others.sort(cmp);
+      if (!this.sortAsc) {
+        dirs.reverse();
+        imgs.reverse();
+        others.reverse();
+      }
+      const rows: ImageItem[] = [];
+      rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+      for (let i = 0; i < dirs.length; i++) {
+        rows.push(dirs[i]);
+      }
+      for (let i = 0; i < imgs.length; i++) {
+        imgs[i].itemIndex = i;
+        rows.push(imgs[i]);
+      }
+      for (let i = 0; i < others.length; i++) {
+        rows.push(others[i]);
+      }
+      if (push && this.browseDir.length > 0 && this.browseDir !== dirUri) {
+        this.dirStack.push(this.browseDir);
+      }
+      this.browseDir = dirUri;
+      this.dirMtime = this.tryMtime(dirUri);
+      this.startDirPoll();
+      // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
+      this.applyItems(imgs, baseName(dirUri), '', rows);
+      if (keepUri.length > 0 && !push) {
+        for (let i = 0; i < imgs.length; i++) {
+          if (imgs[i].uri === keepUri) {
+            this.cur = i;
+            this.dataSource.reload(this.rows);
+            break;
+          }
+        }
+      }
+      this.refreshSpread();
+      this.status = '目录 ' + baseName(dirUri) + '：' + imgs.length + ' 张可预览 · ' +
+        dirs.length + ' 个子文件夹';
+    } finally {
+      this.folderBusy = false;
+    }
+  }
+
+  private tryMtime(uri: string): number {
+    try {
+      return fs.statSync(uri).mtime;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  /** SDK 26 没有 fileObserver，只能定时比对目录 mtime。变化后去抖重扫，
+   *  且只在「用户没在翻页」时动手，避免和切图抢主线程。 */
+  private startDirPoll(): void {
+    if (this.dirPollTimer !== -1) {
+      clearInterval(this.dirPollTimer);
+    }
+    this.dirPollTimer = setInterval(() => {
+      if (this.browseDir.length === 0 || this.folderBusy || this.playing) {
+        return;
+      }
+      const m: number = this.tryMtime(this.browseDir);
+      if (m > 0 && this.dirMtime > 0 && m !== this.dirMtime) {
+        this.dirMtime = m;
+        if (this.rescanTimer !== -1) {
+          clearTimeout(this.rescanTimer);
+        }
+        this.rescanTimer = setTimeout(() => {
+          this.rescanTimer = -1;
+          this.openFolder(this.browseDir, false);
+        }, DIR_RESCAN_DEBOUNCE_MS);
+      }
+    }, DIR_POLL_MS);
+  }
+
   private openFiles(): void {
     try {
       // getContext(this) 已废弃，改用 getUIContext().getHostContext()
@@ -2316,6 +3213,33 @@ struct Index {
       case 'files':
         this.openFiles();
         break;
+      case 'folder':
+        this.chooseFolder();
+        break;
+      case 'up':
+        this.browseUp();
+        break;
+      case 'sort':
+        this.sortAsc = !this.sortAsc;
+        this.status = '排序：' + (this.sortAsc ? '升序 ↑' : '降序 ↓');
+        if (this.browseDir.length > 0) {
+          this.openFolder(this.browseDir, false);
+        } else {
+          const copy: ImageItem[] = this.items.slice();
+          copy.sort((a: ImageItem, b: ImageItem) => naturalCompare(a.name, b.name));
+          if (!this.sortAsc) {
+            copy.reverse();
+          }
+          for (let i = 0; i < copy.length; i++) {
+            copy[i].itemIndex = i;
+          }
+          this.rows = copy;
+          this.dataSource.reload(this.rows);
+        }
+        break;
+      case 'collapse':
+        this.listCollapsed = !this.listCollapsed;
+        break;
       case 'resume':
         this.resumeLast();
         break;
@@ -2324,6 +3248,19 @@ struct Index {
         break;
       default:
         break;
+    }
+  }
+
+  /** 回上层目录（Win64 77f7b6b）。批次 C 会替换成真正的目录浏览实现；
+   *  当前不在目录浏览态时给一句状态提示，不吞掉退格键。 */
+  private browseUp(): void {
+    if (this.browseDir.length === 0 || this.dirStack.length === 0) {
+      this.status = '当前是图库 / 文件选择结果，没有上层目录（用「选择文件夹」进入目录浏览）';
+      return;
+    }
+    const parent: string = this.dirStack.pop() ?? '';
+    if (parent.length > 0) {
+      this.openFolder(parent, false);
     }
   }
 
@@ -2361,8 +3298,52 @@ struct Index {
     }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
-    this.status = on ? '全屏模式 · Esc 退出全屏 / F11 切换' : '已退出全屏 · Esc 关闭应用';
+    // 进全屏顶栏立即收起，只有鼠标贴到窗口顶端才浮出；退全屏恢复常驻并撤掉兜底计时
+    this.clearTopbarTimer();
+    this.topbarVisible = !on;
+    this.status = on ? '全屏模式 · 鼠标移到顶端唤出顶栏 · Esc 退出全屏' : '已退出全屏 · Esc 关闭应用';
     this.applyWindowFullScreen(on); // 连系统状态栏 / 导航栏一起处理（失败静默降级）
+  }
+
+  /** 根容器收到鼠标移动：只有全屏态才需要判断顶栏浮出。
+   *  y 是相对根 Stack 的坐标；非全屏时顶栏常驻，不必算。 */
+  private onRootMouse(event: MouseEvent): void {
+    if (!this.fullscreen) {
+      return;
+    }
+    const y: number = Number(event.y);
+    if (y !== y) { // NaN：某些机型 MouseEvent 不给坐标，直接忽略
+      return;
+    }
+    // Win64 TopBarShouldShow：贴顶端才唤出，顶栏内 + 下方 8px 保持
+    const show: boolean = y <= TOPBAR_EDGE_PX + TOPBAR_H + TOPBAR_KEEP_PX;
+    if (show !== this.topbarVisible) {
+      this.topbarVisible = show;
+    }
+    this.armTopbarTimer();
+  }
+
+  /** 每次鼠标移动都重挂计时器：只有「停在顶栏上不动」才会到点收起。
+   *  这是为了补鸿蒙没有 onMouseLeaveWindow 的缺口。 */
+  private armTopbarTimer(): void {
+    if (this.topbarTimer !== -1) {
+      clearTimeout(this.topbarTimer);
+      this.topbarTimer = -1;
+    }
+    if (!this.fullscreen || !this.topbarVisible) {
+      return;
+    }
+    this.topbarTimer = setTimeout(() => {
+      this.topbarTimer = -1;
+      this.topbarVisible = false;
+    }, TOPBAR_HIDE_MS);
+  }
+
+  private clearTopbarTimer(): void {
+    if (this.topbarTimer !== -1) {
+      clearTimeout(this.topbarTimer);
+      this.topbarTimer = -1;
+    }
   }
 
   /** 窗口级沉浸：这才是「上方那条边」消失的关键 —— 应用内隐藏 UI 只管得到自己的三块栏，
@@ -2400,12 +3381,23 @@ struct Index {
 
   private onKey(event: KeyEvent): void {
     const code: number = event.keyCode;
-    // 单独跟踪 Ctrl 键值（供 Ctrl + 滚轮缩放使用），不参与功能快捷键分支
+    const down: boolean = (event.type === KeyType.Down);
+    // 单独跟踪 Ctrl / Shift 键值：供 Ctrl+滚轮缩放、Ctrl+B 收栏、Shift+R/H/V 使用
     if (code === KeyCode.KEYCODE_CTRL_LEFT || code === KeyCode.KEYCODE_CTRL_RIGHT) {
-      this.ctrlDown = (event.type === KeyType.Down);
+      this.ctrlDown = down;
       return;
     }
-    if (event.type !== KeyType.Down) {
+    if (code === KeyCode.KEYCODE_SHIFT_LEFT || code === KeyCode.KEYCODE_SHIFT_RIGHT) {
+      this.shiftDown = down;
+      return;
+    }
+    if (!down) {
+      return;
+    }
+    // Ctrl+B：收起 / 展开左栏（Win64 c38318f）。必须放在通用分支之前，避免 B 被吞掉。
+    if (this.ctrlDown && code === KeyCode.KEYCODE_B) {
+      this.listCollapsed = !this.listCollapsed;
+      this.status = this.listCollapsed ? '已收起左栏（Ctrl+B 展开）' : '已展开左栏';
       return;
     }
     switch (code) {
@@ -2425,7 +3417,18 @@ struct Index {
         this.toggleSlide();
         break;
       case KeyCode.KEYCODE_R:
-        this.rotateBy(90);
+        // Win64 a1d7bca：R 右旋、Shift+R 左旋
+        this.rotateBy(this.shiftDown ? -90 : 90);
+        break;
+      case KeyCode.KEYCODE_H:
+        if (this.shiftDown) {
+          this.toggleFlipH();
+        }
+        break;
+      case KeyCode.KEYCODE_V:
+        if (this.shiftDown) {
+          this.toggleFlipV();
+        }
         break;
       case KeyCode.KEYCODE_F:
         this.zoomPixelPerfect();
@@ -2433,6 +3436,11 @@ struct Index {
       case KeyCode.KEYCODE_0:
         this.resetView();
         this.status = '已复位视图';
+        break;
+      case KeyCode.KEYCODE_DEL:
+      case KeyCode.KEYCODE_BACK:
+        // 退格 = 回上层目录（Win64 77f7b6b）；不在目录浏览态时给一句提示
+        this.browseUp();
         break;
       case KeyCode.KEYCODE_F11:
         this.toggleFull();
@@ -2475,14 +3483,14 @@ struct Index {
    *  （`const pm = this.viewPixelMap` 会报 "Only UI component syntax can be written here"），
    *  因此这里直接读状态字段、用 `!` 做非空断言。 */
   @Builder
-  previewImage(uri: string, token: number) {
+  previewImage(uri: string, token: number, w: number) {
     Stack() {
       if (this.viewPixelMap !== undefined) {
         Image(this.viewPixelMap!)          // 自解码结果：清晰，且一定是当前这张
           .objectFit(ImageFit.Contain)
           .interpolation(ImageInterpolation.High)
           .draggable(false)
-          .width(this.frameW())
+          .width(w)
           .height(this.frameH())
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
       } else if (this.viewFailed) {
@@ -2492,7 +3500,7 @@ struct Index {
           .objectFit(ImageFit.Contain)
           .interpolation(ImageInterpolation.High)
           .draggable(false)
-          .width(this.frameW())
+          .width(w)
           .height(this.frameH())
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
           .onComplete((ev) => {
@@ -2515,7 +3523,7 @@ struct Index {
           .objectFit(ImageFit.Contain)
           .interpolation(ImageInterpolation.Medium)
           .draggable(false)
-          .width(this.frameW())
+          .width(w)
           .height(this.frameH())
           .scale({
             x: this.zoom * (this.flipH ? -1 : 1) * this.focusZoom(),
@@ -2525,7 +3533,34 @@ struct Index {
           .opacity(this.lowOpacity)
       }
     }
-    .width(this.frameW())
+    .width(w)
+    .height(this.frameH())
+  }
+
+  /** 对开右页：优先用命中缓存的 PixelMap；未就绪时留中灰占位，不阻塞左页。
+   *  刻意不用 Image(uri) 兜底 —— 那会让系统按原图尺寸再解一遍大图（HEIC 尤其慢），
+   *  与左页「解码期间不画原图」是同一条约束（见 previewImage 的 viewFailed 分支）。 */
+  @Builder
+  rightPageImage(uri: string, w: number) {
+    Stack() {
+      if (this.rightPixelMap !== undefined) {
+        Image(this.rightPixelMap!)
+          .objectFit(ImageFit.Contain)
+          .interpolation(ImageInterpolation.High)
+          .draggable(false)
+          .width(w)
+          .height(this.frameH())
+          .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
+      } else {
+        // 右页还在解码：只占住这一半画布，不触发任何原图解码。
+        // 底色与主预览区一致，视觉上就是「这一页还没到」，不会有上一对的残影。
+        Column()
+          .width(w)
+          .height(this.frameH())
+          .backgroundColor(CANVAS_BG)
+      }
+    }
+    .width(w)
     .height(this.frameH())
   }
 
@@ -2533,50 +3568,59 @@ struct Index {
   // 主构建
   // ------------------------------------------------------------------
 
+  /** 顶栏：非全屏时常驻；全屏时由 Stack 以绝对定位浮层复用同一份 Builder（见 build）。
+   *  「打开图库 / 选择图片 / 回到上次」三个挑图入口是用户明确要求保留的，不随 Win64 对齐删掉。 */
+  @Builder
+  topBar() {
+    Row() {
+      Text('PIKAN ' + APP_VERSION)
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#f2f5fa')
+      Text('·')
+        .fontSize(14)
+        .fontColor('#4a5262')
+        .margin({ left: 8, right: 8 })
+      // Win64 07c1eee / 3f92173：完整路径放标题栏，放不下时中间省略、保住末尾目录名
+      Text(ellipsizeMiddle(this.titlePath.length > 0 ? this.titlePath : this.curName(), 52))
+        .fontSize(13)
+        .fontColor('#9fb0c8')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+
+      this.toolBtn('打开图库', 'gallery', false)
+      this.toolBtn('选择图片', 'files', false)
+      this.toolBtn('回到上次', 'resume', false)
+      this.toolBtn('全屏', 'full', false)
+      Button(this.playing ? '暂停' : '幻灯片')
+        .type(ButtonType.Normal)
+        .fontSize(13)
+        .fontColor(this.playing ? '#101216' : '#e8ecf4')
+        .backgroundColor(this.playing ? '#f6c85f' : '#2a2f3a')
+        .borderRadius(6)
+        .height(32)
+        .padding({ left: 12, right: 12 })
+        .margin({ left: 4 })
+        .onClick(() => this.doAction('play'))
+    }
+    .width('100%')
+    .height(TOPBAR_H)
+    .padding({ left: 16, right: 12 })
+    .backgroundColor('#1a1d23')
+    .border({ width: { bottom: 1 }, color: '#2a2f3a' })
+  }
+
   build() {
-    Column() {
-      // ============================== 顶栏（全屏时整条隐藏）==============================
-      if (!this.fullscreen) {
-        Row() {
-          Text('PIKAN')
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .fontColor('#f2f5fa')
-          Text('·')
-            .fontSize(14)
-            .fontColor('#4a5262')
-            .margin({ left: 8, right: 8 })
-          Text(this.curName())
-            .fontSize(13)
-            .fontColor('#9fb0c8')
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
-
-          this.toolBtn('打开图库', 'gallery', false)
-          this.toolBtn('选择图片', 'files', false)
-          this.toolBtn('回到上次', 'resume', false)
-          this.toolBtn('全屏', 'full', false)
-          Button(this.playing ? '暂停' : '幻灯片')
-            .type(ButtonType.Normal)
-            .fontSize(13)
-            .fontColor(this.playing ? '#101216' : '#e8ecf4')
-            .backgroundColor(this.playing ? '#f6c85f' : '#2a2f3a')
-            .borderRadius(6)
-            .height(32)
-            .padding({ left: 12, right: 12 })
-            .margin({ left: 4 })
-            .onClick(() => this.doAction('play'))
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column() {
+        // ============================== 顶栏（非全屏时常驻）==============================
+        if (!this.fullscreen) {
+          this.topBar();
         }
-        .width('100%')
-        .height(52)
-        .padding({ left: 16, right: 12 })
-        .backgroundColor('#1a1d23')
-        .border({ width: { bottom: 1 }, color: '#2a2f3a' })
-      }
 
-      // ============================== 主体 ==============================
-      Row() {
+        // ============================== 主体 ==============================
+        Row() {
         // ---------- 左侧：图像档案列表 ----------
         if (!this.fullscreen) {
           Column() {
@@ -2592,7 +3636,21 @@ struct Index {
             }
             .width('100%')
             .padding({ left: 12, right: 12, top: 10, bottom: 8 })
-  
+
+            // Win64 52de763 / e9f55e7：挑图与导航入口放左栏抬头下面，收起态照样留着
+            Row() {
+              this.toolBtn(this.sortAsc ? '排序 ↑' : '排序 ↓', 'sort', true)
+              this.toolBtn('回上层', 'up', true)
+            }
+            .width('100%')
+            .padding({ left: 6, right: 6, bottom: 4 })
+            Row() {
+              this.toolBtn('选择文件夹', 'folder', true)
+            }
+            .width('100%')
+            .padding({ left: 6, right: 6, bottom: 6 })
+            .border({ width: { bottom: 1 }, color: '#2a2f3a' })
+
             if (this.itemCount === 0) {
               Column() {
                 Text('还没有图片')
@@ -2626,10 +3684,21 @@ struct Index {
                       uri: item.uri,
                       name: item.name,
                       bytes: item.size,
+                      mtime: item.mtime ?? 0,
+                      kind: item.kind ?? ROW_IMAGE,
                       idx: idx,
-                      selected: idx === this.cur,
+                      selected: (item.itemIndex ?? idx) === this.cur,
+                      collapsed: this.listCollapsed,
                       onTap: (i: number) => {
-                        this.select(i);
+                        this.onRowTap(i);
+                      },
+                      onDblTap: (i: number) => {
+                        // Win64 7ff850d：双击档案名切换全屏（只对图片行生效）
+                        const r: ImageItem | undefined = this.rows[i];
+                        if (r !== undefined && (r.kind ?? ROW_IMAGE) === ROW_IMAGE) {
+                          this.undoLastClickZoom();
+                          this.toggleFull();
+                        }
                       }
                     })
                   }
@@ -2669,17 +3738,50 @@ struct Index {
             .padding({ left: 8, right: 8, top: 6, bottom: 10 })
             .border({ width: { top: 1 }, color: '#2a2f3a' })
           }
-          .width(280)
+          .width(this.listCollapsed ? LIST_COLLAPSED_W : LIST_W)
           .height('100%')
           .backgroundColor('#161a21')
+
+          // 分隔条正中的 « / »（Win64 45~49 行）：与 Ctrl+B 同效。
+          // 收起后按钮仍在原地，再点一下展回来；全屏时随左栏一起整条隐藏。
+          Column() {
+            Button(this.listCollapsed ? '»' : '«')
+              .type(ButtonType.Normal)
+              .fontSize(13)
+              .fontColor('#8b95a8')
+              .backgroundColor('#2a2f3a')
+              .borderRadius(4)
+              .width(SPLIT_W - 2)
+              .height(40)
+              .padding(0)
+              .onClick(() => {
+                this.listCollapsed = !this.listCollapsed;
+                this.status = this.listCollapsed ? '已收起左栏（Ctrl+B / » 展开）' : '已展开左栏';
+              })
+          }
+          .width(SPLIT_W)
+          .height('100%')
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .backgroundColor('#1a1d23')
         }
 
         // ---------- 右侧：大图预览（GPU 合成渲染）----------
         Stack({ alignContent: Alignment.Center }) {
           if (this.cur >= 0) {
-            // 外层 Column：拖拽 + 旋转；内层 Image：缩放 + 镜像
+            // 外层 Column：拖拽 + 旋转；内层 Image：缩放 + 镜像。
+            // 对开时两页各占一半宽、等高并排（Win64 6347756）；翻页步长仍恒为一格。
             Column() {
-              this.previewImage(this.curItem()!.uri, this.curToken)
+              if (this.spreadB >= 0 && this.spreadB < this.items.length) {
+                Row() {
+                  this.previewImage(this.curItem()!.uri, this.curToken, this.frameW() / 2)
+                  this.rightPageImage(this.items[this.spreadB].uri, this.frameW() / 2)
+                }
+                .justifyContent(FlexAlign.Center)
+                .alignItems(VerticalAlign.Center)
+              } else {
+                this.previewImage(this.curItem()!.uri, this.curToken, this.frameW())
+              }
             }
             .width('100%')
             .height('100%')
@@ -2711,10 +3813,10 @@ struct Index {
             .alignItems(HorizontalAlign.Center)
           }
 
-          // 左上角信息浮层
+          // 左上角信息浮层（Win64 015464f：只留档案名；对开时两个数并列）
           Row() {
             Column() {
-              Text(this.curName())
+              Text(this.spreadNames())
                 .fontSize(12)
                 .fontColor('#e8ecf4')
                 .maxLines(1)
@@ -2761,7 +3863,7 @@ struct Index {
             .borderRadius(4)
 
             Row() {
-              Text(Math.round(this.zoom * 100) + ' %')
+              Text(this.zoomPercentText())
                 .fontSize(12)
                 .fontColor('#dfe5ef')
                 .padding({ left: 8, right: 8, top: 4, bottom: 4 })
@@ -2800,7 +3902,7 @@ struct Index {
         }
         .layoutWeight(1)
         .height('100%')
-        .backgroundColor('#0a0b0d')
+        .backgroundColor(CANVAS_BG)
         .clip(true)
         .onAreaChange((oldV: Area, newV: Area) => {
           const w = newV.width as number;
@@ -2827,7 +3929,7 @@ struct Index {
           // 约定：向上滚（负值）＝ 上一张；若实机方向相反，把下面的 v < 0 改成 v > 0
           this.onWheel(v < 0 ? -1 : 1);
         })
-        // 鼠标左键放大 50% / 右键放大 100%（均以光标为锚点）
+        // 左键放大 50%（锚点）/ 右键还原 / 双击切换全屏
         .onMouse((event: MouseEvent) => {
           this.onMouseButton(event);
         })
@@ -2840,7 +3942,7 @@ struct Index {
               this.zoom = clamp(this.baseZoom * event.scale, MIN_SCALE, MAX_SCALE);
             })
             .onActionEnd(() => {
-              this.status = '缩放 ' + Math.round(this.zoom * 100) + '%';
+              this.status = '缩放 ' + this.zoomPercentText();
             })
         )
         .gesture(
@@ -2867,9 +3969,8 @@ struct Index {
         .gesture(
           TapGesture({ count: 2 })
             .onAction(() => {
-              // 双击 = 复位视图（全屏走 F11 / 顶栏按钮 / 右上角退出按钮，不占双击）
-              this.resetView();
-              this.status = '已适应窗口';
+              // Win64 84adb7a：双击 = 切换全屏（并撤销第一下单击的放大）
+              this.onDoubleTapCanvas();
             })
         )
       }
@@ -2885,6 +3986,11 @@ struct Index {
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+          // 可观测（Win64 015464f）：预载 N 张 · xx MB，与右下角角标同源
+          Text('预载 ' + this.cacheCount + ' 张 · ' + fmtBytes(this.cacheBytes))
+            .fontSize(11)
+            .fontColor('#8b95a8')
+            .margin({ right: 12 })
           // 注：这里只标注「GPU 合成」——它是平台 RenderService 默认行为，本工程没有写 GPU 代码，
           //     也没有任何 NPU / AI 推理，故不要在此声称 NPU 加速。runtimeOS 已为 HarmonyOS。
           Text('AArch64 · HarmonyOS · ArkUI GPU 合成')
@@ -2896,12 +4002,27 @@ struct Index {
         .padding({ left: 16, right: 16 })
         .backgroundColor('#12161c')
       }
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#101216')
+      .focusable(true)
+      .defaultFocus(true)
+      .onKeyEvent((event: KeyEvent) => this.onKey(event))
+
+      // 全屏时顶栏浮在画布之上（Win64 0cfabb2）：绝对定位、不占布局，
+      // 鼠标贴到窗口顶端才出现，出现/消失都不会把预览区挤一下。
+      if (this.fullscreen && this.topbarVisible) {
+        Column() {
+          this.topBar();
+        }
+        .width('100%')
+        .position({ x: 0, y: 0 })
+        .zIndex(10)
+      }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#101216')
-    .focusable(true)
-    .defaultFocus(true)
-    .onKeyEvent((event: KeyEvent) => this.onKey(event))
+    .onMouse((event: MouseEvent) => this.onRootMouse(event))
   }
 }
