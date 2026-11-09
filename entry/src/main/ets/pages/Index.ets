@@ -37,6 +37,7 @@
 import common from '@ohos.app.ability.common';
 import picker from '@ohos.file.picker';
 import fs from '@ohos.file.fs';
+import fileUri from '@ohos.file.fileuri';
 import hilog from '@ohos.hilog';
 import photoAccessHelper from '@ohos.file.photoAccessHelper';
 import image from '@ohos.multimedia.image';
@@ -289,6 +290,52 @@ function baseName(path: string): string {
   }
   const i = s.lastIndexOf('/');
   return i >= 0 ? s.substring(i + 1) : s;
+}
+
+/** DocumentViewPicker(FOLDER) 返回的目录标识，在不同设备 / 系统版本上形态并不统一：
+ *    · `file://docs/...` 这类「文档 URI」——`fs.listFile` 往往不接受；
+ *    · 带百分号编码的 `file://` URI（中文目录名、空格会被编码）；
+ *    · 直接的沙箱 / 绝对路径。
+ *  而且 picker 的授权是**逐 URI**的：能列出目录 ≠ 能读子文件，
+ *  所以拼子文件路径时必须用「最终真正能读」的那个 base，不能用原始 uri 硬拼。
+ *  这里把所有可能写法都生成出来，交给 openFolder 逐个试。 */
+function dirCandidates(raw: string): string[] {
+  const out: string[] = [];
+  const seen: Set<string> = new Set<string>();
+  const add = (s: string): void => {
+    if (s.length > 0 && !seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
+  };
+  add(raw);
+  try {
+    add(decodeURIComponent(raw));
+  } catch (e) {
+    // 含非法 % 序列时 decodeURIComponent 会抛，忽略即可
+  }
+  try {
+    const u: fileUri.FileUri = new fileUri.FileUri(raw);
+    add(u.path);           // 解码后的真实路径
+    add(u.toString());     // 规范化后的 uri
+  } catch (e) {
+    hilog.warn(DOMAIN, TAG, 'FileUri parse failed: %{public}s', JSON.stringify(e));
+  }
+  // 手工兜底：file://docs/storage/... → /storage/...
+  if (raw.indexOf('file://') === 0) {
+    const rest: string = raw.substring('file://'.length);
+    const slash: number = rest.indexOf('/');
+    if (slash >= 0) {
+      const p: string = rest.substring(slash);
+      add(p);
+      try {
+        add(decodeURIComponent(p));
+      } catch (e) {
+        // ignore
+      }
+    }
+  }
+  return out;
 }
 
 /** 取扩展名（大写），无扩展名返回 RAW */
@@ -604,6 +651,9 @@ async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undef
     const entry: PreviewEntry = { uri: uri, px: px, bytes: dw * dh * 4, w: w, h: h, edge: edge };
     return entry;
   } catch (e) {
+    // ⚠️ 以前这里静默吞掉：图打不开时屏幕全白、日志全无，排查只能靠猜。
+    //    目录浏览的 uri 权限 / 编码问题全靠这一行定位。
+    hilog.warn(DOMAIN, TAG, 'decodePx FAIL uri=%{public}s err=%{public}s', uri, JSON.stringify(e));
     return undefined;
   } finally {
     if (src !== undefined) {
@@ -2980,6 +3030,39 @@ struct Index {
   // ------------------------------------------------------------------
 
   /** 「选择文件夹」：DocumentViewPicker 的 FOLDER 模式（API 11+ / 2in1 可用）。 */
+  /** 目录 URI 授权不覆盖子项时的兜底：开一个以该目录为起点的文件多选选择器。
+   *  每个被选中的文件都会单独拿到 URI 授权，解码一定成功（= 「选择图片」那条通道）。 */
+  private chooseFilesInDir(dirUri: string): void {
+    try {
+      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+      if (!ctx) {
+        this.status = '无法获取应用上下文';
+        return;
+      }
+      const dv = new picker.DocumentViewPicker(ctx);
+      const opt = new picker.DocumentSelectOptions();
+      opt.maxSelectNumber = PICKER_MAX;
+      opt.fileSuffixFilters = FILE_FILTERS;
+      opt.defaultFilePathUri = dirUri;
+      dv.select(opt)
+        .then((uris: Array<string>) => {
+          if (!uris || uris.length === 0) {
+            this.status = '已取消多选（可点顶栏「选择图片」重试）';
+            return;
+          }
+          hilog.info(DOMAIN, TAG, 'folder fallback picked %{public}d files', uris.length);
+          this.setItems(uris, baseName(dirUri) + '（多选）');
+        })
+        .catch((e: Object) => {
+          this.status = '目录内多选失败：' + JSON.stringify(e);
+          hilog.error(DOMAIN, TAG, 'chooseFilesInDir rejected: %{public}s', JSON.stringify(e));
+        });
+    } catch (e) {
+      this.status = '目录内多选不可用：' + JSON.stringify(e);
+      hilog.error(DOMAIN, TAG, 'chooseFilesInDir failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
   private chooseFolder(): void {
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
@@ -2997,6 +3080,7 @@ struct Index {
             this.status = '已取消选择文件夹';
             return;
           }
+          hilog.info(DOMAIN, TAG, 'chooseFolder picked uri=%{public}s', uris[0]);
           this.dirStack = [];
           this.openFolder(uris[0], false);
         })
@@ -3020,14 +3104,54 @@ struct Index {
     this.folderBusy = true;
     const keepUri: string = this.cur >= 0 ? this.items[this.cur].uri : '';
     try {
+      // picker 的 FOLDER 模式返回的 uri 形态不统一，且 URI 授权是**逐项**的：
+      // 能 listFile 不代表能读子文件。逐个候选试，优先挑「子文件真能 open」的那个 base。
+      const candidates: string[] = dirCandidates(dirUri);
+      hilog.info(DOMAIN, TAG, 'openFolder raw=%{public}s candidates=%{public}d',
+        dirUri, candidates.length);
+      let base: string = '';
       let names: string[] = [];
-      try {
-        names = await fs.listFile(dirUri, { recursion: false, listNum: 0 });
-      } catch (e) {
-        this.status = '无法列出目录（URI 权限未覆盖子项）：改用顶栏「打开图库」/「选择图片」';
-        hilog.warn(DOMAIN, TAG, 'openFolder listFile failed: %{public}s', JSON.stringify(e));
+      let childReadable: boolean = false;
+      let fallbackBase: string = '';
+      let lastErr: string = '';
+      for (let c = 0; c < candidates.length; c++) {
+        const cand: string = candidates[c];
+        try {
+          const n: string[] = await fs.listFile(cand, { recursion: false, listNum: 0 });
+          hilog.info(DOMAIN, TAG, 'listFile OK [%{public}d] %{public}s → %{public}d entries',
+            c, cand, n.length);
+          if (fallbackBase.length === 0) {
+            fallbackBase = cand;
+            names = n;
+          }
+          if (n.length > 0 && this.probeChild(cand, n)) {
+            base = cand;
+            names = n;
+            childReadable = true;
+            hilog.info(DOMAIN, TAG, 'openFolder using candidate [%{public}d] %{public}s', c, cand);
+            break;
+          }
+        } catch (e) {
+          lastErr = JSON.stringify(e);
+          hilog.warn(DOMAIN, TAG, 'listFile FAIL [%{public}d] %{public}s → %{public}s',
+            c, cand, lastErr);
+        }
+      }
+      if (base.length === 0 && fallbackBase.length > 0) {
+        // 目录能列、但子文件一个都打不开：列表照样显示，日志里说清楚是授权问题
+        base = fallbackBase;
+        hilog.error(DOMAIN, TAG,
+          'openFolder: listed but NO child file can be opened (per-item URI authorization). base=%{public}s',
+          base);
+      }
+      if (base.length === 0) {
+        this.status = '无法列出该目录 · ' + lastErr + '；可先用「选择图片」多选图片';
+        hilog.error(DOMAIN, TAG, 'openFolder all candidates failed: %{public}s', lastErr);
         this.folderBusy = false;
         return;
+      }
+      if (names.length > 0) {
+        hilog.info(DOMAIN, TAG, 'openFolder base=%{public}s first=%{public}s', base, names[0]);
       }
       const imgs: ImageItem[] = [];
       const dirs: ImageItem[] = [];
@@ -3037,7 +3161,8 @@ struct Index {
         if (raw.length === 0 || (HIDE_DOT_FILES && raw.charAt(0) === '.')) {
           continue;
         }
-        const child: string = dirUri + '/' + raw;
+        // names 里通常只是文件名；某些实现直接给完整路径 / URI，就别再拼一次
+        const child: string = raw.indexOf('/') >= 0 ? raw : base + '/' + raw;
         let size: number = -1;
         let mtime: number = 0;
         let isDir: boolean = false;
@@ -3086,7 +3211,17 @@ struct Index {
       this.dirMtime = this.tryMtime(dirUri);
       this.startDirPoll();
       // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
-      this.applyItems(imgs, baseName(dirUri), '', rows);
+      // 兜底：目录能列、图片也在，但子文件一个都打不开 —— picker 的目录授权是逐 URI 的，
+      // 拼出来的子路径没权限。这时别给用户留一屏空白，直接开一个「以该目录为起点」的
+      // 文件多选选择器，Ctrl+A 全选即可看图（每个选中文件都单独授权，解码一定成功）。
+      if (imgs.length > 0 && !childReadable) {
+        this.status = '目录 ' + baseName(base) + '：子文件无读取授权 · 已打开文件选择器，请全选图片';
+        hilog.warn(DOMAIN, TAG, 'openFolder: fallback to multi-select, imgs=%{public}d', imgs.length);
+        this.chooseFilesInDir(dirUri);
+        this.folderBusy = false;
+        return;
+      }
+      this.applyItems(imgs, baseName(base), '', rows);
       if (keepUri.length > 0 && !push) {
         for (let i = 0; i < imgs.length; i++) {
           if (imgs[i].uri === keepUri) {
@@ -3097,11 +3232,44 @@ struct Index {
         }
       }
       this.refreshSpread();
-      this.status = '目录 ' + baseName(dirUri) + '：' + imgs.length + ' 张可预览 · ' +
-        dirs.length + ' 个子文件夹';
+      if (imgs.length === 0) {
+        this.status = '目录 ' + baseName(base) + '：没找到受支持的图片（条目 ' + names.length +
+          ' 个）· 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
+        hilog.warn(DOMAIN, TAG, 'openFolder: 0 images among %{public}d entries', names.length);
+      } else {
+        this.status = '目录 ' + baseName(base) + '：' + imgs.length + ' 张可预览 · ' +
+          dirs.length + ' 个子文件夹';
+      }
+      hilog.info(DOMAIN, TAG, 'openFolder done: %{public}d imgs, base=%{public}s', imgs.length, base);
     } finally {
       this.folderBusy = false;
     }
+  }
+
+  /** 抽查目录里第一张图片能否真的 open —— FOLDER 授权是逐 URI 的，
+   *  「能列目录」和「能读子文件」是两回事，这一步用来挑出真正可用的 base。 */
+  private probeChild(base: string, names: string[]): boolean {
+    let tried: number = 0;
+    for (let i = 0; i < names.length && i < 12; i++) {
+      const n: string = names[i];
+      if (n.length === 0 || n.charAt(0) === '.' || !isImageName(n)) {
+        continue;
+      }
+      const child: string = n.indexOf('/') >= 0 ? n : base + '/' + n;
+      try {
+        const f: fs.File = fs.openSync(child, fs.OpenMode.READ_ONLY);
+        fs.closeSync(f);
+        return true;
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'probeChild FAIL %{public}s → %{public}s', child, JSON.stringify(e));
+        // 别一张坏图就判死刑：连试 3 张都打不开才认定这个 base 不可用
+        tried++;
+        if (tried >= 3) {
+          return false;
+        }
+      }
+    }
+    return false;
   }
 
   private tryMtime(uri: string): number {

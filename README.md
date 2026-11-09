@@ -507,6 +507,52 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 「选择文件夹」读不出图片（2026-11-09 修复）
+
+复现：选 `/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/编号202601 模特 猫`
+（40 张 `DSC*.jpg`，每张 18–30MB）后，列表 / 主视图一片空白。
+
+### 为什么会这样
+
+`DocumentViewPicker` 的 **FOLDER 模式返回的目录标识形态不统一**：
+
+- 可能是 `file://docs/...` 这类文档 URI（`fs.listFile()` 往往不接受）；
+- 可能带百分号编码（中文目录名、空格被 `%XX` 化）；
+- 也可能是直接的沙箱 / 绝对路径。
+
+而 picker 的授权是**逐 URI**的：**能列出目录 ≠ 能读子文件**。旧实现只拿原始 uri
+硬拼 `dirUri + '/' + name`，拼出来的子路径既可能形态不对、也可能没有授权；
+偏偏 `decodePx()` 的 `catch` 是静默 `return undefined`，于是屏幕全白、日志全无，
+排查全靠猜 —— 这才是这个 bug 最难缠的地方，不是显示层的问题。
+
+### 修法
+
+| 改动 | 作用 |
+|---|---|
+| `dirCandidates(raw)` | 生成候选写法：原始 uri、`decodeURIComponent`、`new fileUri.FileUri(raw).path`（解码后的真实路径）、`u.toString()`、手工剥掉 `file://<authority>` 前缀；去重后逐个试 |
+| `probeChild(base, names)` | 对每个候选抽查前 3 张图片能否 `fs.openSync()` —— 能列目录不算数，**能读子文件才算**；连试 3 张避免被单张坏图误判 |
+| `openFolder()` 自动选 base | 优先用「子文件真能打开」的那个候选，并用它拼所有 child；某些实现直接返回完整路径时不再重复拼接 |
+| `chooseFilesInDir()` 兜底 | 若所有候选都读不了子文件，自动弹一个以该目录为 `defaultFilePathUri` 的 **FILE 多选选择器**，`Ctrl+A` 全选即可看图（每个文件单独授权，解码一定成功） |
+| `decodePx` catch 不再静默 | 打 `decodePx FAIL uri=... err=...`；`chooseFolder` / `listFile` / `probeChild` / `openFolder done` 全链路打点 |
+| 状态栏 | 「0 张可预览」时列出支持后缀；授权失败时明确写「子文件无读取授权」，不再假装载入成功 |
+
+### 立即可用的绕路
+
+顶栏 **「选择图片」** → 多选这 40 张 JPG（`DocumentViewPicker` FILE 模式，一次最多 500 个），
+每个文件都会单独拿到 URI 授权，一定能显示。
+
+### 如果还不行
+
+把状态栏那行字 + HiLog 贴回来即可定位，日志 TAG 为 `HeicViewer`：
+
+```
+hilog | grep HeicViewer        # 或 hdc shell "hilog | grep HeicViewer"
+```
+
+重点看这几行：`chooseFolder picked uri=`（系统到底给了什么形态）、
+`listFile OK/FAIL [n]`（哪种写法能列）、`probeChild FAIL`（子文件为什么打不开）、
+`decodePx FAIL uri=`（最后卡在哪一步）。
+
 ## 移植自 Win64 版的四项优化（2026-10-28）
 
 参照 `PIKAN-Win64` 那边的实测结论（10-27 六个提交）回移植。核心是同一条：
