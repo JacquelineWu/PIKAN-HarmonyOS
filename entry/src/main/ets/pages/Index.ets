@@ -525,23 +525,20 @@ function fmtDate(ms: number): string {
 // 为什么必须有它（这是「图片一多就崩」的主因）：
 //   左侧档案列表原本是 Image(item.uri) —— 组件会按**原图分辨率**解码。
 //   一张 4000×3000 的照片解码后是 4000×3000×4 ≈ 48MB；列表里有几十个
-//   可见/缓存项时就是好几个 GB，必然 OOM 崩溃。列表只有 56×42，
-//   为显示它而把整张原图解码进内存是纯粹的浪费。
+//   可见/缓存项时就是好几个 GB，必然 OOM 崩溃。
 //
-//   所以这里统一先解出「小图 PixelMap」再交给 Image 显示：128px 长边时
-//   单张约 60KB，缓存 600 张也不过 36MB —— 比解一张原图还小。
+//   所以这里统一先解出「小图 PixelMap」再交给 Image 显示：384px 长边时
+//   单张约 600KB，24 张 LRU 也不过 15MB —— 比解一张原图还小。
+//
+//   2026-11-09：左栏不再常驻缩略图（用户要求「要 mouse over 才显示」）。
+//   现在整套缩略图只在鼠标悬停某行时才解码，滚动列表时一张都不解，
+//   既省内存也省 CPU，大图库滚动更跟手。
 // --------------------------------------------------------------------
 
-/** 缩略图长边（像素）。列表显示区是 56×42，取 128 在高分屏下依然清晰 */
-const THUMB_EDGE: number = 128;
 /** 悬停缩略图（Win64 51 行）：220 DIP 浮层，用 384px 档解码，
- *  自己的 24 张 LRU、同时只解一个，不挤占行内缩略图 / 主预载缓存。 */
+ *  自己的 24 张 LRU、同时只解一个，不挤占主预载缓存。 */
 const HOVER_EDGE: number = 384;
 const HOVER_MAX_COUNT: number = 24;
-/** 缩略图 LRU 缓存条目上限：128px 时单张约 60KB，600 张 ≈ 36MB */
-const THUMB_MAX_COUNT: number = 600;
-/** 缩略图解码并发上限。HEIC 解码较重，同时开太多会瞬间吃满内存 —— 必须限流 */
-const THUMB_CONCURRENCY: number = 3;
 /** 待处理队列上限。快速滑动列表会堆积大量「已划走」的请求，超了就丢最旧的，
  *  否则一次甩动可能排进上千个任务 */
 const THUMB_QUEUE_MAX: number = 240;
@@ -627,7 +624,7 @@ interface ThumbTask {
 
 /** 按给定长边上限解码一张图。失败返回 undefined（不影响正常显示路径）。
  *  edge = QUICK_EDGE 得到低清占位；edge = preloadEdge() 得到「可显示清晰度」的预载；
- *  edge = viewEdge() 得到全清图；edge = THUMB_EDGE 得到列表缩略图。共用同一套系统 codec。 */
+ *  edge = viewEdge() 得到全清图；edge = HOVER_EDGE 得到悬停缩略图。共用同一套系统 codec。 */
 async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
@@ -679,9 +676,8 @@ async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undef
  *  而 LRU 总是淘汰「最久没人用」的条目 —— 那时对应的行早已离开屏幕。
  *  上限 36MB 对常驻内存完全无所谓，没必要为此冒险。 */
 class ThumbLoader {
-  /** 行内缩略图与悬停大图各跑一个实例：档位、LRU 上限、并发数都不同，互不挤占。
-   *  Win64 51 行：悬停用自己的 24 张小缓存，且解码同时最多一个在跑。 */
-  private static rowInst: ThumbLoader = new ThumbLoader(THUMB_EDGE, THUMB_MAX_COUNT, THUMB_CONCURRENCY);
+  /** 左栏常驻缩略图已取消，只保留悬停这一套：384px 档 / 24 张 LRU / 并发 1。
+   *  Win64 51 行：悬停用自己的小缓存，且解码同时最多一个在跑。 */
   private static hoverInst: ThumbLoader = new ThumbLoader(HOVER_EDGE, HOVER_MAX_COUNT, 1);
   private cache: Map<string, PreviewEntry> = new Map();
   private order: string[] = [];   // 最近使用顺序，队头最旧
@@ -695,10 +691,6 @@ class ThumbLoader {
     this.edge = edge;
     this.maxCount = maxCount;
     this.concurrency = concurrency;
-  }
-
-  static get(): ThumbLoader {
-    return ThumbLoader.rowInst;
   }
 
   static hover(): ThumbLoader {
@@ -787,11 +779,12 @@ class ThumbLoader {
   }
 }
 
-/** 左侧档案列表的一行。
+/** 左侧档案列表的一行（文件浏览器三栏：档案名 / 字节 / 日期）。
  *
- *  拆成独立组件是为了让「缩略图加载成功」只重渲染**这一行** ——
+ *  拆成独立组件是为了让「悬停缩略图解码完成」只重渲染**这一行** ——
  *  若由父组件维护一个全局 map，每张图加载完都要刷新整个列表，几百次不足为惧的
- *  全列表重排会直接拖垮滚动流畅度。 */
+ *  全列表重排会直接拖垮滚动流畅度。
+ *  2026-11-09：行内不再常驻缩略图，只有 mouse over 整行时才解码并浮出小图。 */
 @Component
 struct ArchiveRow {
   @Prop uri: string = '';
@@ -809,12 +802,22 @@ struct ArchiveRow {
   //    "Property 'onTap' is private and can not be initialized through the component constructor"。
   onTap: (idx: number) => void = () => {};
   onDblTap: (idx: number) => void = () => {};
-  @State thumb: image.PixelMap | undefined = undefined;
   @State showHover: boolean = false;                       // 悬停浮层是否展开
   @State hoverPx: image.PixelMap | undefined = undefined;  // 悬停大图（384px 档）
   private alive: boolean = true;
 
   /** Win64 bac9ff9：图片粉、目录粉蓝、不支持预览的文件灰；上级行用中性色 */
+  /** 行首类型标记的颜色（不是缩略图，只是 18vp 的小符号）。 */
+  private iconColor(): string {
+    if (this.kind === ROW_OTHER) {
+      return '#4b5260';
+    }
+    if (this.kind === ROW_IMAGE) {
+      return this.selected ? '#e8ecf4' : '#e2a8cf';
+    }
+    return '#8fb8e8';
+  }
+
   private labelColor(): string {
     if (this.selected) {
       return '#e8ecf4';
@@ -830,9 +833,7 @@ struct ArchiveRow {
 
   aboutToAppear(): void {
     this.alive = true;
-    if (this.kind === ROW_IMAGE) {
-      this.load();
-    }
+    // 刻意不在这里解码任何缩略图：只有 onHover 才触发（见 onHoverChange）
   }
 
   aboutToDisappear(): void {
@@ -841,21 +842,7 @@ struct ArchiveRow {
     this.hoverPx = undefined;
   }
 
-  private load(): void {
-    const hit: image.PixelMap | undefined = ThumbLoader.get().peek(this.uri);
-    if (hit !== undefined) {
-      this.thumb = hit;
-      return;
-    }
-    this.thumb = undefined;
-    ThumbLoader.get().request(this.uri, () => this.alive, (p: image.PixelMap | undefined) => {
-      if (p !== undefined) {
-        this.thumb = p;
-      }
-    });
-  }
-
-  /** Win64 51 行：鼠标停在档案名上，旁边浮出小图。
+  /** Win64 51 行：鼠标停在档案行任意位置，右侧浮出小图（左栏本身不常驻缩略图）。
    *  先查悬停自己的 LRU，命中即同步出图；没命中才后台解一张 384px（同时最多一个）。
    *  目录行 / 不支持预览的灰行不弹；离屏、点击、划走由 alive / showHover 收起。 */
   private onHoverChange(on: boolean): void {
@@ -892,20 +879,18 @@ struct ArchiveRow {
           .width(220)
           .height(165)
           .borderRadius(4)
-      } else if (this.thumb !== undefined) {
-        // 悬停大图还没解好：先用行内 128px 缩略图顶一下，不出现空白框
-        Image(this.thumb!)
-          .objectFit(ImageFit.Contain)
-          .interpolation(ImageInterpolation.Low)
-          .width(220)
-          .height(165)
-          .borderRadius(4)
       } else {
-        Column()
-          .width(220)
-          .height(165)
-          .borderRadius(4)
-          .backgroundColor('#262b34')
+        // 384px 还在解码：给个「读取预览…」占位，不用行内图顶，也不触发原图解码
+        Column() {
+          Text('读取预览…')
+            .fontSize(11)
+            .fontColor('#7f88a8')
+        }
+        .width(220)
+        .height(165)
+        .justifyContent(FlexAlign.Center)
+        .borderRadius(4)
+        .backgroundColor('#262b34')
       }
       Text(this.name)
         .fontSize(11)
@@ -923,31 +908,14 @@ struct ArchiveRow {
 
   build() {
     Row() {
-      // 只有图片行解缩略图；目录 / 灰行给个纯色图标位，避免无谓的解码请求
-      if (this.kind === ROW_IMAGE) {
-        Stack() {
-          if (this.thumb !== undefined) {
-            Image(this.thumb!)
-              .objectFit(ImageFit.Cover)
-              .interpolation(ImageInterpolation.Low)
-              .width(56)
-              .height(42)
-              .borderRadius(4)
-          }
-        }
-        .width(56)
+      // 左栏不再常驻缩略图：统一只给一个 18vp 的类型标记，档案名多出 38vp。
+      // 缩略图只在 mouse over 整行时由 bindPopup 浮出（见 hoverThumb）。
+      Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : '·'))
+        .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
+        .fontColor(this.iconColor())
+        .width(18)
         .height(42)
-        .borderRadius(4)
-        .backgroundColor('#262b34')
-        .border({ width: this.selected ? 2 : 0, color: '#4fd1c5' })
-      } else {
-        Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : '·'))
-          .fontSize(18)
-          .fontColor(this.kind === ROW_OTHER ? '#4b5260' : '#8fb8e8')
-          .width(56)
-          .height(42)
-          .textAlign(TextAlign.Center)
-      }
+        .textAlign(TextAlign.Center)
 
       Text(this.name)
         .fontSize(12)
@@ -956,14 +924,6 @@ struct ArchiveRow {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
         .padding({ left: 8 })
-        .onHover((isHover: boolean) => {
-          this.onHoverChange(isHover);
-        })
-        .bindPopup(this.showHover, {
-          builder: () => { this.hoverThumb(); },
-          placement: Placement.Right,
-          popupColor: '#1a1d23'
-        })
 
       // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
       if (!this.collapsed) {
@@ -986,6 +946,16 @@ struct ArchiveRow {
     .padding(6)
     .borderRadius(6)
     .backgroundColor(this.selected ? '#1f2730' : 'transparent')
+    // hover 绑在整行而不是档案名 Text 上：鼠标划过图标 / 字节 / 日期列也能出图，
+    // 触发面积大得多，PC 上更好按（用户反馈「要 mouse over 才显示」）。
+    .onHover((isHover: boolean) => {
+      this.onHoverChange(isHover);
+    })
+    .bindPopup(this.showHover, {
+      builder: () => { this.hoverThumb(); },
+      placement: Placement.Right,
+      popupColor: '#1a1d23'
+    })
     .onClick(() => {
       this.showHover = false; // 鼠标按下选图：浮层立刻收起（Win64 51 行）
       this.onTap(this.idx);
@@ -1048,8 +1018,11 @@ struct Index {
    *  不支持预览的文件；非目录态就是 items 的镜像。dataSource 用 rows，不用 items。 */
   private rows: ImageItem[] = [];
   // ---- 目录浏览（对齐 Win64 文件浏览器，鸿蒙变形实现）----
-  private browseDir: string = '';          // 当前目录 uri；空 = 非目录浏览态
-  private dirStack: string[] = [];          // 上层目录栈，供「..」/退格回退
+  private browseDir: string = '';          // 当前目录 uri（picker 原始返回值）；空 = 非目录浏览态
+  // openFolder 实测「能 listFile 且子文件能 open」的真实路径。回上层 / 重扫 / mtime 自检
+  // 一律用它：原始 uri 可能是 file://docs/... 或百分号编码，fs.statSync 认不出来。
+  private browseBase: string = '';
+  private dirStack: string[] = [];          // 上层目录栈，存真实路径，供「..」/退格回退
   private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
   private dirPollTimer: number = -1;        // 目录轮询句柄
   private rescanTimer: number = -1;         // 变动后去抖重扫句柄
@@ -1701,6 +1674,20 @@ struct Index {
    *  对齐 Win64：过滤 . 开头的隐藏文件，并按自然序排序（IMG_2 排在 IMG_10 前）。 */
   private setItems(uris: Array<string>, src: string): void {
     hilog.info(DOMAIN, TAG, 'setItems: %{public}d uris from %{public}s', uris.length, src);
+    // 从目录浏览切回「打开图库 / 选择图片」：必须清掉目录态。
+    // 否则 startDirPoll 每 1.5s 还在盯旧目录，一旦 mtime 变化就会把用户刚选的图
+    // 重新覆盖掉；标题栏也会继续挂着上一个目录的路径。
+    this.browseDir = '';
+    this.browseBase = '';
+    this.dirStack = [];
+    if (this.dirPollTimer !== -1) {
+      clearInterval(this.dirPollTimer);
+      this.dirPollTimer = -1;
+    }
+    if (this.rescanTimer !== -1) {
+      clearTimeout(this.rescanTimer);
+      this.rescanTimer = -1;
+    }
     this.source = src;
     const list: ImageItem[] = [];
     for (let i = 0; i < uris.length; i++) {
@@ -1733,8 +1720,10 @@ struct Index {
     this.itemCount = list.length;
     this.dataSource.reload(this.rows);
     // 标题栏路径：目录浏览态用当前目录；否则取首批 uri 的父目录
-    this.titlePath = this.browseDir.length > 0 ? this.browseDir :
-      (list.length > 0 ? dirOf(list[0].uri) : '');
+    // 目录态优先显示真实路径（原始 uri 常是 file://docs/... 或 %XX 编码，读起来像乱码）
+    this.titlePath = this.browseBase.length > 0 ? this.browseBase :
+      (this.browseDir.length > 0 ? this.browseDir :
+        (list.length > 0 ? dirOf(list[0].uri) : ''));
     // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
     const start: number = this.restoreIndex(list);
     this.cur = list.length > 0 ? (start >= 0 ? start : 0) : -1;
@@ -3097,9 +3086,10 @@ struct Index {
    *  push=true 时把当前目录压栈，供「..」回退；重扫（push=false）保持当前张不闪。
    *  ⚠️ 鸿蒙 DocumentViewPicker 授予的是 URI，fs.listFile / statSync 对它不一定有权限；
    *     失败时明确提示，不静默吞掉（Win64 走的是真实文件系统路径）。 */
-  private async openFolder(dirUri: string, push: boolean): Promise<void> {
+  /** 返回是否真的进入了目录浏览态（失败时调用方不该改动目录栈）。 */
+  private async openFolder(dirUri: string, push: boolean): Promise<boolean> {
     if (this.folderBusy) {
-      return;
+      return false; // 上一批还在列，别叠
     }
     this.folderBusy = true;
     const keepUri: string = this.cur >= 0 ? this.items[this.cur].uri : '';
@@ -3147,8 +3137,7 @@ struct Index {
       if (base.length === 0) {
         this.status = '无法列出该目录 · ' + lastErr + '；可先用「选择图片」多选图片';
         hilog.error(DOMAIN, TAG, 'openFolder all candidates failed: %{public}s', lastErr);
-        this.folderBusy = false;
-        return;
+        return false;
       }
       if (names.length > 0) {
         hilog.info(DOMAIN, TAG, 'openFolder base=%{public}s first=%{public}s', base, names[0]);
@@ -3204,23 +3193,26 @@ struct Index {
       for (let i = 0; i < others.length; i++) {
         rows.push(others[i]);
       }
-      if (push && this.browseDir.length > 0 && this.browseDir !== dirUri) {
-        this.dirStack.push(this.browseDir);
-      }
-      this.browseDir = dirUri;
-      this.dirMtime = this.tryMtime(dirUri);
-      this.startDirPoll();
-      // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
       // 兜底：目录能列、图片也在，但子文件一个都打不开 —— picker 的目录授权是逐 URI 的，
       // 拼出来的子路径没权限。这时别给用户留一屏空白，直接开一个「以该目录为起点」的
       // 文件多选选择器，Ctrl+A 全选即可看图（每个选中文件都单独授权，解码一定成功）。
+      // ⚠️ 早退前绝不改 browseDir / browseBase / dirStack：此刻并没有真的进入目录浏览态。
       if (imgs.length > 0 && !childReadable) {
         this.status = '目录 ' + baseName(base) + '：子文件无读取授权 · 已打开文件选择器，请全选图片';
         hilog.warn(DOMAIN, TAG, 'openFolder: fallback to multi-select, imgs=%{public}d', imgs.length);
         this.chooseFilesInDir(dirUri);
-        this.folderBusy = false;
-        return;
+        return false;
       }
+      // 压栈存「真实可列路径」而非原始 uri：回上层时 pop 出来直接能列，
+      // 不必再对 file://docs/... 猜形态。这也是「回上层」以前失效的关键。
+      if (push && this.browseBase.length > 0 && this.browseBase !== base) {
+        this.dirStack.push(this.browseBase);
+      }
+      this.browseDir = dirUri;
+      this.browseBase = base;
+      this.dirMtime = this.tryMtime(base);
+      this.startDirPoll();
+      // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
       this.applyItems(imgs, baseName(base), '', rows);
       if (keepUri.length > 0 && !push) {
         for (let i = 0; i < imgs.length; i++) {
@@ -3233,14 +3225,17 @@ struct Index {
       }
       this.refreshSpread();
       if (imgs.length === 0) {
-        this.status = '目录 ' + baseName(base) + '：没找到受支持的图片（条目 ' + names.length +
-          ' 个）· 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
+        // 回上层常落在「全是子文件夹、本层零图片」的目录（例如百度网盘根目录），
+        // 明确告诉用户去点文件夹，别让他以为又白屏了。
+        this.status = '目录 ' + baseName(base) + '：本层没有图片 · ' + dirs.length +
+          ' 个子文件夹（点文件夹进入）· 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
         hilog.warn(DOMAIN, TAG, 'openFolder: 0 images among %{public}d entries', names.length);
       } else {
         this.status = '目录 ' + baseName(base) + '：' + imgs.length + ' 张可预览 · ' +
           dirs.length + ' 个子文件夹';
       }
       hilog.info(DOMAIN, TAG, 'openFolder done: %{public}d imgs, base=%{public}s', imgs.length, base);
+      return true;
     } finally {
       this.folderBusy = false;
     }
@@ -3287,10 +3282,10 @@ struct Index {
       clearInterval(this.dirPollTimer);
     }
     this.dirPollTimer = setInterval(() => {
-      if (this.browseDir.length === 0 || this.folderBusy || this.playing) {
+      if (this.browseBase.length === 0 || this.folderBusy || this.playing) {
         return;
       }
-      const m: number = this.tryMtime(this.browseDir);
+      const m: number = this.tryMtime(this.browseBase);
       if (m > 0 && this.dirMtime > 0 && m !== this.dirMtime) {
         this.dirMtime = m;
         if (this.rescanTimer !== -1) {
@@ -3298,7 +3293,7 @@ struct Index {
         }
         this.rescanTimer = setTimeout(() => {
           this.rescanTimer = -1;
-          this.openFolder(this.browseDir, false);
+          this.openFolder(this.browseBase, false);
         }, DIR_RESCAN_DEBOUNCE_MS);
       }
     }, DIR_POLL_MS);
@@ -3390,8 +3385,8 @@ struct Index {
       case 'sort':
         this.sortAsc = !this.sortAsc;
         this.status = '排序：' + (this.sortAsc ? '升序 ↑' : '降序 ↓');
-        if (this.browseDir.length > 0) {
-          this.openFolder(this.browseDir, false);
+        if (this.browseBase.length > 0) {
+          this.openFolder(this.browseBase, false);
         } else {
           const copy: ImageItem[] = this.items.slice();
           copy.sort((a: ImageItem, b: ImageItem) => naturalCompare(a.name, b.name));
@@ -3419,17 +3414,42 @@ struct Index {
     }
   }
 
-  /** 回上层目录（Win64 77f7b6b）。批次 C 会替换成真正的目录浏览实现；
-   *  当前不在目录浏览态时给一句状态提示，不吞掉退格键。 */
+  /** 回上层目录（Win64 77f7b6b）。
+   *
+   *  以前只在 dirStack 非空时才动 —— 但 chooseFolder 是 `dirStack = []` + push=false
+   *  进入首个目录的，栈永远是空的，用户选完文件夹点「回上层」必然被一句
+   *  「没有上层目录」拦死。现在改成两条路：
+   *    · 进过子目录 → pop 栈里存的真实路径（必定可列）；
+   *    · 直接选的目录 → 从 browseBase 用 dirOf() 上溯一级真实路径。
+   *  另外先 peek 不 pop、等 openFolder 真成功了再弹栈，失败时栈不丢，可重试。 */
   private browseUp(): void {
-    if (this.browseDir.length === 0 || this.dirStack.length === 0) {
+    if (this.folderBusy) {
+      return; // 正在列目录，别叠（否则 openFolder 会静默返回，栈却被白弹一次）
+    }
+    const base: string = this.browseBase.length > 0 ? this.browseBase : this.browseDir;
+    if (base.length === 0) {
       this.status = '当前是图库 / 文件选择结果，没有上层目录（用「选择文件夹」进入目录浏览）';
       return;
     }
-    const parent: string = this.dirStack.pop() ?? '';
-    if (parent.length > 0) {
-      this.openFolder(parent, false);
+    const fromStack: boolean = this.dirStack.length > 0;
+    const parent: string = fromStack ? this.dirStack[this.dirStack.length - 1] : dirOf(base);
+    if (parent.length === 0 || parent === base) {
+      this.status = '已经是最上层目录 · 可用「选择文件夹」换一个目录';
+      return;
     }
+    hilog.info(DOMAIN, TAG, 'browseUp %{public}s → %{public}s (fromStack=%{public}d)',
+      base, parent, fromStack ? 1 : 0);
+    this.openFolder(parent, false).then((ok: boolean) => {
+      if (ok) {
+        if (fromStack) {
+          this.dirStack.pop();
+        }
+        hilog.info(DOMAIN, TAG, 'browseUp OK → %{public}s', this.browseBase);
+      } else {
+        this.status = '回上层失败（上级目录没有读取授权）· 可点「选择文件夹」重新选择上级目录';
+        hilog.warn(DOMAIN, TAG, 'browseUp FAILED, parent=%{public}s (dirStack kept)', parent);
+      }
+    });
   }
 
   /** 切换全屏：只翻状态位，真正的重解码等 onAreaChange 把新画布尺寸报上来再做 */
