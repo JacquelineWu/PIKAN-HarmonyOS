@@ -133,6 +133,50 @@ export function parentDirOf(path: string): string {
  *   ③ 真实文件系统路径的父 —— 落到 `/storage/...` 形态。
  *  每个候选还会被 openFolder() 里的 dirCandidates() 再展开一次，命中哪个用哪个。
  *  绝不包含「自身」（尾斜杠造成的假父级），避免点了回上层却原地不动。 */
+/** 估算一段文本在给定字号下占的宽度（vp），用于「按档案名长度自适应列宽」。
+ *  ArkUI 的 Text 在 layoutWeight(1) 下拿不到内容宽度，只能自己估：
+ *    · CJK / 全角（>= U+2E80）按 1 个字宽；
+ *    · 数字 / 大写字母按 0.6，其余半角按 0.55，空格按 0.3。
+ *  宁可略微偏大（多一点余量），也不要偏小导致名字被省略号截断。 */
+export function textWidthVp(text: string, fontSize: number): number {
+  let w: number = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c: number = text.charCodeAt(i);
+    if (c >= 0x2E80) {
+      w += fontSize;                       // 中文 / 日文 / 全角符号
+    } else if (c === 0x20) {
+      w += fontSize * 0.3;                 // 空格
+    } else if ((c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5A)) {
+      w += fontSize * 0.6;                 // 数字 / 大写
+    } else {
+      w += fontSize * 0.55;                // 小写 / 半角标点
+    }
+  }
+  return Math.ceil(w);
+}
+
+/** 左栏 Column 的目标宽度：按当前列表里**最长档案名**自适应。
+ *  名字短 → 收到 minWidth（不留多余空白、也保证一行三个按钮不挤）；
+ *  名字长 → 放宽到能完整显示（不再出现省略号）；超过 maxWidth 才截断，
+ *  避免个别超长名字把右侧预览区压没。
+ *
+ *  固定开销（vp）= 行首图标 18 + 名字左 padding 8 + 体积列 66 + 日期列 88
+ *    + 日期列 margin 6 + 行 padding 12 + 列表 padding 16 + 度量余量 12 = 226。 */
+export function listWidthForNames(names: string[], minWidth: number, maxWidth: number): number {
+  let maxText: number = 0;
+  for (let i = 0; i < names.length; i++) {
+    const w: number = textWidthVp(names[i], 12);
+    if (w > maxText) {
+      maxText = w;
+    }
+  }
+  const need: number = Math.ceil(maxText + 226);
+  if (need <= minWidth) {
+    return minWidth;
+  }
+  return need >= maxWidth ? maxWidth : need;
+}
+
 /** 给 DocumentViewPicker.defaultFilePathUri 挑一个安全起点。
  *
  *  逐 URI 授权模型下，picker 只认「已经拿到授权、且带 scheme 的 URI」：

@@ -2,17 +2,19 @@
  * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）
  *
  * 布局（ACDSee 风格）：
- *   · 顶栏：标题 + 当前文件名 + 「选择图片 / 回到上次」+ 幻灯片
- *            （11-10 起按用户要求取消「打开图库」按钮）
- *   · 左侧：图像档案列表（悬停缩略图 + 文件名 + 体积 + 日期），可滚动、点击切换
+ *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
+ *            （11-10 起依次取消「打开图库」「选择图片」「回到上次」三个按钮）
+ *   · 左侧：抬头下「排序 / 回上层 / 选择文件夹」同一行等宽排列；
+ *            图像档案列表（悬停缩略图 + 文件名 + 体积 + 日期），列宽按最长名字自适应、行高紧凑
  *   · 右侧：大图预览（GPU 合成渲染），悬浮信息层 + 缩放角标
  *   · 底栏：状态栏
  *
  * 图片来源：
- *   · 选择图片 —— DocumentViewPicker，任意文件 / 文件夹（主要挑图入口）
- *   · 选择文件夹 —— DocumentViewPicker FOLDER，浏览目录（含中文 / 多级路径）
- *   · 回到上次 —— 恢复上次列表与位置；内部仍复用 getAssets 全量扫描 / uri 快照，
- *                  但「打开图库」不再作为独立入口，见 openGallery() 上的停用说明
+ *   · 选择文件夹 —— DocumentViewPicker FOLDER，浏览目录（含中文 / 多级路径）；
+ *                    现在界面上唯一的目录 / 挑图入口
+ *   · 目录内多选 —— 子文件无授权时自动弹出，每个选中文件单独授权
+ *   · 内部能力（无独立 UI 入口，保留供降级链复用）：openFiles() 文件选择器、
+ *     resumeLast() / loadAllGallery() 全量扫描与 uri 快照恢复、openGallery() 旧图库链
  *
  * 关键能力：
  *   · HEIC / JPG / PNG / WEBP / BMP / GIF 解码 —— 走鸿蒙系统 Image 解码器（系统 codec）
@@ -47,7 +49,7 @@ import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
-import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates, pickerStartOf } from '../common/DirName';
+import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames } from '../common/DirName';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -82,9 +84,13 @@ const TOPBAR_EDGE_PX: number = 10;
 const TOPBAR_KEEP_PX: number = 8;
 const TOPBAR_H: number = 52;
 const TOPBAR_HIDE_MS: number = 2000;
-/** 左栏宽度：展开 / 收起（Win64 收起态 224~360 按最长名伸缩，鸿蒙取固定下限 224，
- *  已足够并排放下抬头那三个按钮；见 README「平台变形实现」）。分隔条中间的 « 按钮常驻。 */
+/** 左栏宽度：展开 / 收起。
+ *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 回上层 / 选择文件夹）等宽并排且不重叠；
+ *  LIST_MAX_W 是上限，避免个别超长档案名把右侧预览区压没。
+ *  实际展开宽度由 listWidthForNames() 按当前列表最长名字在 [LIST_W, LIST_MAX_W] 内自适应。
+ *  收起态仍固定 LIST_COLLAPSED_W（只留档案名一列），保持原有交互不变。 */
 const LIST_W: number = 280;
+const LIST_MAX_W: number = 900;
 const LIST_COLLAPSED_W: number = 224;
 const SPLIT_W: number = 14;
 
@@ -110,7 +116,7 @@ const GALLERY_ALWAYS_PICK: boolean = true;
  *  true  = 系统图库选择器 PhotoViewPicker（界面就是图库，免权限、可多选、上限 500）
  *  false = 文件选择器 DocumentViewPicker + 图片后缀过滤（PC/2in1 上更稳，但要自己走到图片目录）
  *  若你机器上 PhotoViewPicker 打开后**图片选不了**，把它改成 false 立刻可用，其余逻辑不变。
- *  该入口现已取消，此常量只影响停用的 openPicker()，主要挑图入口是「选择图片」。 */
+ *  该入口现已取消，此常量只影响停用的 openPicker()；现在唯一入口是「选择文件夹」。 */
 const GALLERY_USE_PHOTO_PICKER: boolean = true;
 /** 直接扫描图库时的安全上限，避免超大图库一次性吃满内存 */
 const SCAN_CAP: number = 20000;
@@ -907,7 +913,7 @@ struct ArchiveRow {
         .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
         .fontColor(this.iconColor())
         .width(18)
-        .height(42)
+        .height(26)   // 11-10 起压缩行高：42 → 26，配合下方 padding 把每行从 54vp 收到 30vp
         .textAlign(TextAlign.Center)
 
       Text(this.name)
@@ -915,6 +921,10 @@ struct ArchiveRow {
         .fontColor(this.labelColor())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
+        // 左栏已按最长档案名自适应（listWidthForNames），这里再兜一层：
+        // layoutWeight 分配宽度时至少给到名字内容宽，长名字不会被压出省略号；
+        // 极少数超过 LIST_MAX_W 的超长名才由 Ellipsis 截断。
+        .constraintSize({ minWidth: textWidthVp(this.name, 12) + 8 })
         .layoutWeight(1)
         .padding({ left: 8 })
 
@@ -936,7 +946,8 @@ struct ArchiveRow {
       }
     }
     .width('100%')
-    .padding(6)
+    // 11-10 起压缩每一横行的垂直占用：上下 6 → 2，字号保持不变以维持可读性
+    .padding({ left: 6, right: 6, top: 2, bottom: 2 })
     .borderRadius(6)
     .backgroundColor(this.selected ? '#1f2730' : 'transparent')
     // hover 绑在整行而不是档案名 Text 上：鼠标划过图标 / 字节 / 日期列也能出图，
@@ -1045,6 +1056,8 @@ struct Index {
   @State titlePath: string = '';
   /** 左栏收起态（Ctrl+B / « 按钮）。收起后只留档案名一列，抬头与三个按钮仍保留。 */
   @State listCollapsed: boolean = false;
+  /** 左栏展开宽度：按当前列表最长档案名自适应（见 listWidthForNames）。 */
+  @State listW: number = LIST_W;
   /** 左栏排序方向：true = 升序（自然序） */
   @State sortAsc: boolean = true;
   /** 顶栏自动隐藏（Win64 0cfabb2）：鼠标贴近窗口顶端才浮出，默认不占画面 */
@@ -1070,7 +1083,7 @@ struct Index {
 
   // ---- 交互 ----
   @State playing: boolean = false;
-  @State status: string = '点顶栏「选择图片」挑文件，或「选择文件夹」浏览目录';
+  @State status: string = '点左栏「选择文件夹」浏览目录';
   /** 全屏（沉浸）模式：隐藏顶栏 / 左侧档案栏 / 状态栏，画布铺满整个窗口。
    *  做的是「应用内隐藏 UI」，不调 window 全屏接口 —— 不依赖窗口权限，也不会踩系统 API 差异。 */
   @State fullscreen: boolean = false;
@@ -1238,7 +1251,7 @@ struct Index {
   /** 启动时读回上次位置。
    *
    *  只有「上次来自图库全部」才会自动重新扫描并跳回原处 —— 因为全量扫描不需要用户交互；
-   *  而「选择图片」是系统选择器，程序无权替用户操作，只能提示用户点一下。
+   *  而系统选择器程序无权替用户操作，只能提示用户点一下。
    *  静默扫描失败（多半是没有受控权限）时不弹任何窗，只留一句状态栏提示。
    *
    *  值类型说明：preferences.get 返回的是 ValueType 联合类型，ArkTS 下必须逐个
@@ -1279,7 +1292,7 @@ struct Index {
       this.resumeHint = '上次看到「' + saved.name + '」（第 ' + (saved.idx + 1) + ' 张 · ' + saved.src + '）';
       hilog.info(DOMAIN, TAG, 'readLastPos: got pos in %{public}d ms', Date.now() - t0);
       if (AUTO_RESUME_ON_START) {
-        this.status = '正在回到上次位置：第 ' + (saved.idx + 1) + ' 张 · ' + saved.name;
+        this.status = '正在恢复上次位置：第 ' + (saved.idx + 1) + ' 张 · ' + saved.name;
         if (saved.src === SRC_ALL) {
           // 上次来自「图库全部」→ 优先静默重扫（能拿到最新的全量列表）；
           // 扫不到（多半是没权限）时 queryAllPhotos 内部会自己退到快照恢复。
@@ -1289,9 +1302,9 @@ struct Index {
           this.trySnapRestore();
         }
       } else {
-        // 启动时只记位置、不做重活。用户点「回到上次」时才真正恢复
+        // 启动时只记位置、不做重活（恢复动作不再有独立按钮入口）
         // （见 AUTO_RESUME_ON_START 注释：启动时读快照 + 重扫会触发 APP_INPUT_BLOCK）。
-        this.status = '上次看到「' + saved.name + '」第 ' + (saved.idx + 1) + ' 张 · 点「回到上次」自动跳回';
+        this.status = '上次看到「' + saved.name + '」第 ' + (saved.idx + 1) + ' 张 · 可用「选择文件夹」重新打开目录';
       }
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'readLastPos failed: %{public}s', JSON.stringify(e));
@@ -1378,7 +1391,7 @@ struct Index {
       src: this.source
     };
     this.posPending = pos;
-    this.lastPos = pos; // 内存里同步更新，「回到上次」按钮立刻可用
+    this.lastPos = pos; // 内存里同步更新，内部恢复逻辑可直接取用
     this.scheduleFlush();
   }
 
@@ -1518,7 +1531,8 @@ struct Index {
     return ok;
   }
 
-  /** 顶栏「回到上次」：当前有列表就在列表里定位；列表为空则先尝试「图库全部」重扫、再用快照恢复 */
+  /** 【已停用】原顶栏「回到上次」的处理（11-10 起按钮与 doAction 分支已移除，本体保留供降级链复用）：
+   *  当前有列表就在列表里定位；列表为空则先尝试「图库全部」重扫、再用快照恢复 */
   private resumeLast(): void {
     const p: LastPos | undefined = this.lastPos;
     if (p === undefined) {
@@ -1529,7 +1543,7 @@ struct Index {
       const i: number = this.restoreIndex(this.items);
       if (i >= 0) {
         this.select(i);
-        this.status = '已回到上次位置：第 ' + (i + 1) + ' / ' + this.items.length + ' 张 · ' +
+        this.status = '已恢复上次位置：第 ' + (i + 1) + ' / ' + this.items.length + ' 张 · ' +
           this.items[i].name;
         return;
       }
@@ -1541,7 +1555,7 @@ struct Index {
       this.loadAllGallery(); // 失败时内部会退到快照恢复
       return;
     }
-    this.status = '正在回到上次位置…';
+    this.status = '正在恢复上次位置…';
     this.trySnapRestore();
   }
 
@@ -1688,7 +1702,7 @@ struct Index {
    *  对齐 Win64：过滤 . 开头的隐藏文件，并按自然序排序（IMG_2 排在 IMG_10 前）。 */
   private setItems(uris: Array<string>, src: string): void {
     hilog.info(DOMAIN, TAG, 'setItems: %{public}d uris from %{public}s', uris.length, src);
-    // 从目录浏览切回「选择图片」/ 快照恢复：必须清掉目录态。
+    // 从目录浏览切回文件多选 / 快照恢复：必须清掉目录态。
     // 否则 startDirPoll 每 1.5s 还在盯旧目录，一旦 mtime 变化就会把用户刚选的图
     // 重新覆盖掉；标题栏也会继续挂着上一个目录的路径。
     this.browseDir = '';
@@ -1738,6 +1752,12 @@ struct Index {
     this.source = src;
     this.itemCount = list.length;
     this.rowCount = this.rows.length;
+    // 依据当前列表里最长的档案名调整左栏宽度：短名字收窄少留白，长名字放宽不截断。
+    const rowNames: string[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      rowNames.push(this.rows[i].name);
+    }
+    this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
     this.dataSource.reload(this.rows);
     // 标题栏路径：目录浏览态用当前目录；否则取首批 uri 的父目录
     // 目录态优先显示真实路径（原始 uri 常是 file://docs/... 或 %XX 编码，读起来像乱码）
@@ -1755,7 +1775,7 @@ struct Index {
     if (start >= 0) {
       this.resumeHint = ''; // 已经回到上次位置，空态提示不再需要
     }
-    const where: string = start >= 0 ? (' · 已回到上次位置（第 ' + (start + 1) + ' 张）') : '';
+    const where: string = start >= 0 ? (' · 已恢复上次位置（第 ' + (start + 1) + ' 张）') : '';
     this.status = '已载入 ' + list.length + ' 张（' + src + '）' + capped + where;
     hilog.info(DOMAIN, TAG, 'applyItems: %{public}d items, start at %{public}d', list.length, this.cur);
     this.clearWheel();     // 换了图片源，攒着的滚轮步数必须作废
@@ -3060,7 +3080,7 @@ struct Index {
       dv.select(opt)
         .then((uris: Array<string>) => {
           if (!uris || uris.length === 0) {
-            this.status = '已取消多选（可点顶栏「选择图片」重试）';
+            this.status = '已取消多选（可点左栏「选择文件夹」重试）';
             return;
           }
           hilog.info(DOMAIN, TAG, 'folder fallback picked %{public}d files', uris.length);
@@ -3163,7 +3183,7 @@ struct Index {
           base);
       }
       if (base.length === 0) {
-        this.status = '无法列出该目录 · ' + lastErr + '；可先用「选择图片」多选图片';
+        this.status = '无法列出该目录 · ' + lastErr + '；可点「选择文件夹」重新选择';
         hilog.error(DOMAIN, TAG, 'openFolder all candidates failed: %{public}s', lastErr);
         return false;
       }
@@ -3410,9 +3430,8 @@ struct Index {
       case 'play':
         this.toggleSlide();
         break;
-      case 'files':
-        this.openFiles();
-        break;
+      // 11-10 起「选择图片」按钮取消，'files' 分支一并移除；
+      // openFiles() 本体保留，仍被 openPicker() 的内部降级链调用。
       case 'folder':
         this.chooseFolder();
         break;
@@ -3440,9 +3459,8 @@ struct Index {
       case 'collapse':
         this.listCollapsed = !this.listCollapsed;
         break;
-      case 'resume':
-        this.resumeLast();
-        break;
+      // 11-10 起「回到上次」按钮取消，'resume' 分支一并移除；
+      // resumeLast() / loadAllGallery() 本体保留（启动自动恢复与内部降级仍复用）。
       case 'full':
         this.toggleFull();
         break;
@@ -3937,7 +3955,8 @@ struct Index {
   // ------------------------------------------------------------------
 
   /** 顶栏：非全屏时常驻；全屏时由 Stack 以绝对定位浮层复用同一份 Builder（见 build）。
-   *  保留「选择图片 / 回到上次」两个入口；「打开图库」按钮已于 11-10 按用户要求取消。 */
+   *  11-10 起「打开图库」「选择图片」「回到上次」三个按钮均已按用户要求取消，
+   *  顶栏只剩「全屏 / 幻灯片」，其余按钮与事件保持不变。 */
   @Builder
   topBar() {
     Row() {
@@ -3957,8 +3976,8 @@ struct Index {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
 
-      this.toolBtn('选择图片', 'files', false)
-      this.toolBtn('回到上次', 'resume', false)
+      // 11-10 起按用户要求彻底移除「选择图片」与「回到上次」两个按钮及其入口；
+      // 顶栏其余按钮（全屏 / 幻灯片）与事件保持不变。
       this.toolBtn('全屏', 'full', false)
       Button(this.playing ? '暂停' : '幻灯片')
         .type(ButtonType.Normal)
@@ -4005,17 +4024,17 @@ struct Index {
             .width('100%')
             .padding({ left: 12, right: 12, top: 10, bottom: 8 })
 
-            // Win64 52de763 / e9f55e7：挑图与导航入口放左栏抬头下面，收起态照样留着
+            // 11-10 起：排序 / 回上层 / 选择文件夹 三个按钮水平排在同一行。
+            // toolBtn 的 layoutWeight(1) 三等分宽度 → 水平间距由统一的 margin(3) 决定，一致；
+            // 统一 height(30) + Row 垂直居中 → 垂直对齐整齐；
+            // 合并掉原来的第二行后，按钮区不再有多余垂直空白，也不会重叠 / 错位。
             Row() {
               this.toolBtn(this.sortAsc ? '排序 ↑' : '排序 ↓', 'sort', true)
               this.toolBtn('回上层', 'up', true)
-            }
-            .width('100%')
-            .padding({ left: 6, right: 6, bottom: 4 })
-            Row() {
               this.toolBtn('选择文件夹', 'folder', true)
             }
             .width('100%')
+            .alignItems(VerticalAlign.Center)
             .padding({ left: 6, right: 6, bottom: 6 })
             .border({ width: { bottom: 1 }, color: '#2a2f3a' })
 
@@ -4046,7 +4065,7 @@ struct Index {
                     .textAlign(TextAlign.Center)
                     .margin({ bottom: 6 })
                 }
-                Text('点顶栏「选择图片」挑文件，或「选择文件夹」浏览目录')
+                Text('点左栏「选择文件夹」浏览目录')
                   .fontSize(11)
                   .fontColor('#5a6272')
                   .textAlign(TextAlign.Center)
@@ -4059,7 +4078,7 @@ struct Index {
               // LazyForEach + cachedCount：只为「屏幕上这几行 + 少量缓存」创建节点。
               // 用 ForEach 的话会为数组中每一项都建组件，几百张图就是几百个 ListItem，
               // 内存与节点数随图片数线性增长 —— 这是图片一多就崩的原因之一。
-              List({ scroller: this.scroller, space: 4 }) {
+              List({ scroller: this.scroller, space: 2 }) {
                 LazyForEach(this.dataSource, (item: ImageItem, idx: number) => {
                   ListItem() {
                     ArchiveRow({
@@ -4096,7 +4115,7 @@ struct Index {
             // 11-10 起按用户要求取消左下角 4 行 × 2 列共 8 个视图控制按钮。
             // 缩放 / 旋转 / 镜像 / 复位能力仍由键盘与鼠标提供（见 README 快捷键表）。
           }
-          .width(this.listCollapsed ? LIST_COLLAPSED_W : LIST_W)
+          .width(this.listCollapsed ? LIST_COLLAPSED_W : this.listW)
           .height('100%')
           .backgroundColor('#161a21')
 

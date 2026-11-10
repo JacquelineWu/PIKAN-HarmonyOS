@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames } from '../entry/src/main/ets/common/DirName.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -130,6 +130,40 @@ check('statSync 失败的无后缀项按文件夹列出', /else if \(!statOk\)/.
 check('无授权兜底不再 return false 吞掉目录表',
   /this\.chooseFilesInDir\(dirUri\);\s*return false;/.test(INDEX), false);
 check('兜底改为末尾在目录表建立之后触发', /if \(needFileFallback\)/.test(INDEX), true);
+
+console.log('--- textWidthVp() / listWidthForNames(): 档案名列宽自适应 ---');
+check('空串宽度 0', textWidthVp('', 12), 0);
+check('两个 CJK = 2 字宽', textWidthVp('人像', 12), 24);
+check('数字 / 大写按 0.6', textWidthVp('AB1', 12), Math.ceil(3 * 12 * 0.6));
+check('小写半角按 0.55', textWidthVp('abc', 12), Math.ceil(3 * 12 * 0.55));
+check('中文 + 空格混合', textWidthVp('编号 猫', 12), Math.ceil(12 + 12 + 12 * 0.3 + 12));
+check('空列表 → 收窄到下限（不多留白）', listWidthForNames([], 280, 900), 280);
+check('短名字 → 仍是下限', listWidthForNames(['a.jpg'], 280, 900), 280);
+check('现场长中文名 → 自动放宽', listWidthForNames(['编号202601 模特 猫'], 280, 900) > 280, true);
+check('名字越长宽度越大', listWidthForNames(['人像'], 280, 900) <
+  listWidthForNames(['编号202601 模特 猫 高清原图合集'], 280, 900), true);
+check('超长名字夹在上限（不压没预览区）', listWidthForNames(['很'.repeat(200)], 280, 900), 900);
+check('宽度恒在下限与上限之间', (() => {
+  const w = listWidthForNames(['DSC_0001.JPG', '编号202601 模特 猫'], 280, 900);
+  return w >= 280 && w <= 900;
+})(), true);
+
+console.log('--- 源码静态契约：按钮区与档案列表布局 ---');
+check('不再有「选择图片」toolBtn', /toolBtn\('选择图片'/.test(INDEX), false);
+check('不再有「回到上次」toolBtn', /toolBtn\('回到上次'/.test(INDEX), false);
+check('doAction 无 files 分支', /case 'files':/.test(INDEX), false);
+check('doAction 无 resume 分支', /case 'resume':/.test(INDEX), false);
+check('三个按钮合并在同一行',
+  /toolBtn\('回上层', 'up', true\)\s*this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), true);
+check('按钮区不再有原来的第二行',
+  /bottom: 4 \}\)\s*Row\(\) \{\s*this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), false);
+check('左栏宽度改用自适应 listW',
+  /\.width\(this\.listCollapsed \? LIST_COLLAPSED_W : this\.listW\)/.test(INDEX), true);
+check('applyItems 重算 listW', /this\.listW = listWidthForNames\(/.test(INDEX), true);
+check('档案名列有 minWidth 兜底', /constraintSize\(\{ minWidth: textWidthVp/.test(INDEX), true);
+check('行首图标高度压到 26', /\.height\(26\)/.test(INDEX), true);
+check('行上下 padding 压到 2', /top: 2, bottom: 2/.test(INDEX), true);
+check('List 行间距压到 2', /space: 2/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
