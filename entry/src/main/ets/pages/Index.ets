@@ -56,7 +56,7 @@ const DOMAIN = 0x0000;
 
 /** 版本号（与 AppScope/app.json5 的 versionName 保持一致），用于窗口标题栏。
  *  Win64 版 3ea7419 起标题栏带版本号；鸿蒙没有「读取程序集版本」的等价物，故用常量。 */
-const APP_VERSION: string = '1.0.6';
+const APP_VERSION: string = '1.0.7';
 /** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
  *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
 const CANVAS_BG: string = '#5F5F5F';
@@ -3368,31 +3368,9 @@ struct Index {
 
   private doAction(act: string): void {
     switch (act) {
-      case 'zin':
-        this.zoomBy(1.25);
-        break;
-      case 'zout':
-        this.zoomBy(0.8);
-        break;
-      case 'fit':
-        this.resetView();
-        this.status = '已适应窗口';
-        break;
-      case 'one':
-        this.zoomPixelPerfect();
-        break;
-      case 'rotl':
-        this.rotateBy(-90);
-        break;
-      case 'rotr':
-        this.rotateBy(90);
-        break;
-      case 'fliph':
-        this.toggleFlipH();
-        break;
-      case 'flipv':
-        this.toggleFlipV();
-        break;
+      // 11-10 起左下角 4×2 共 8 个视图按钮已按用户要求取消，对应分支一并移除。
+      // zoomBy / resetView / zoomPixelPerfect / rotateBy / toggleFlipH / toggleFlipV
+      // 仍由键盘、滚轮、鼠标键直接调用（不经过 doAction），功能没有删。
       case 'prev':
         this.go(-1);
         break;
@@ -3928,32 +3906,8 @@ struct Index {
               .cachedCount(6)
             }
   
-            // 底部视图控制条：与顶栏同一套 toolBtn（纯文字，紧凑、无歧义）
-            Column() {
-              Row() {
-                this.toolBtn('适应', 'fit', true)
-                this.toolBtn('1:1', 'one', true)
-              }
-              .width('100%')
-              Row() {
-                this.toolBtn('－', 'zout', true)
-                this.toolBtn('＋', 'zin', true)
-              }
-              .width('100%')
-              Row() {
-                this.toolBtn('左旋', 'rotl', true)
-                this.toolBtn('右旋', 'rotr', true)
-              }
-              .width('100%')
-              Row() {
-                this.toolBtn('镜像H', 'fliph', true)
-                this.toolBtn('镜像V', 'flipv', true)
-              }
-              .width('100%')
-            }
-            .width('100%')
-            .padding({ left: 8, right: 8, top: 6, bottom: 10 })
-            .border({ width: { top: 1 }, color: '#2a2f3a' })
+            // 11-10 起按用户要求取消左下角 4 行 × 2 列共 8 个视图控制按钮。
+            // 缩放 / 旋转 / 镜像 / 复位能力仍由键盘与鼠标提供（见 README 快捷键表）。
           }
           .width(this.listCollapsed ? LIST_COLLAPSED_W : LIST_W)
           .height('100%')
