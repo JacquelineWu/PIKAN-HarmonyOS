@@ -215,3 +215,18 @@ export function parentDirCandidates(path: string): string[] {
   add(parentDirOf(path));
   return out;
 }
+
+/** 目录条目名集合是否一致（顺序无关）。
+ *  自动重扫时用它判断 mtime 抖动是否只是「hover 解码读文件 / 网盘写缓存」造成的假变化：
+ *  没变就别重建列表，否则 applyItems 会把用户视图拉回上次位置。 */
+export function sameEntryNames(want: string[], current: string[]): boolean {
+  if (want.length !== current.length) {
+    return false;
+  }
+  for (let i = 0; i < want.length; i++) {
+    if (current.indexOf(want[i]) < 0) {
+      return false;
+    }
+  }
+  return true;
+}

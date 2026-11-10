@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames } from '../entry/src/main/ets/common/DirName.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -164,6 +164,46 @@ check('档案名列有 minWidth 兜底', /constraintSize\(\{ minWidth: textWidth
 check('行首图标高度压到 26', /\.height\(26\)/.test(INDEX), true);
 check('行上下 padding 压到 2', /top: 2, bottom: 2/.test(INDEX), true);
 check('List 行间距压到 2', /space: 2/.test(INDEX), true);
+
+console.log('--- sameEntryNames(): 重扫时判断目录内容是否真的变了 ---');
+check('空目录一致', sameEntryNames([], []), true);
+check('顺序不同仍算一致（不触发重建）', sameEntryNames(['a', '人像'], ['人像', 'a']), true);
+check('新增条目 → 不一致', sameEntryNames(['a', 'b'], ['a']), false);
+check('删除条目 → 不一致', sameEntryNames(['a'], ['a', 'b']), false);
+check('改名 → 不一致', sameEntryNames(['a', 'b'], ['a', 'c']), false);
+check('中文 + 空格现场路径一致',
+  sameEntryNames(['编号202601 模特 猫', '人像'], ['人像', '编号202601 模特 猫']), true);
+
+console.log('--- 源码静态契约：hover 缩略图纯预览、退出不切回上次 ---');
+const HOVER_FN = INDEX.slice(INDEX.indexOf('private onHoverChange('), INDEX.indexOf('hoverThumb()'));
+const APPLY_FN = INDEX.slice(INDEX.indexOf('private applyItems('), INDEX.indexOf('后台分批补测体积'));
+check('hover 关闭有去抖常量', /const HOVER_CLOSE_DELAY_MS: number = 120;/.test(INDEX), true);
+check('onHover(false) 改延迟关闭（hoverSeq 代号）', /const seq: number = \+\+this\.hoverSeq;/.test(HOVER_FN), true);
+check('延迟关闭带 clearTimeout 复位', /clearTimeout\(this\.hoverCloseTimer\)/.test(INDEX), true);
+check('hover 回来会取消待关闭计时器',
+  /this\.hoverSeq\+\+;\s*if \(this\.hoverCloseTimer !== -1\)/.test(HOVER_FN), true);
+check('onMouse(Move) 只在浮层未展开时补开', /MouseAction\.Move && !this\.showHover/.test(INDEX), true);
+check('hover 回调不触碰选中态 / 列表 / 目录',
+  /this\.onTap\(|applyItems\(|openFolder\(|this\.cur =/.test(HOVER_FN), false);
+check('aboutToDisappear 清理 hover 计时器',
+  /aboutToDisappear\(\): void \{[\s\S]{0,400}hoverCloseTimer/.test(INDEX), true);
+check('点击行时作废 hover 计时器',
+  /\.onClick\(\(\) => \{[\s\S]{0,300}this\.hoverSeq\+\+/.test(INDEX), true);
+
+check('openFolder 支持 isRescan', /isRescan\?: boolean/.test(INDEX), true);
+check('重扫内容未变则跳过列表重建', /isRescan === true && this\.sameDirEntries\(names\)/.test(INDEX), true);
+check('startDirPoll 用 isRescan=true / 不弹多选',
+  /this\.openFolder\(this\.browseBase, false, false, true\)/.test(INDEX), true);
+check('重扫传给 applyItems 的 preserveView', /rows, isRescan === true/.test(INDEX), true);
+check('preserveView 时不 restoreIndex', /keepView \? -1 : this\.restoreIndex\(list\)/.test(APPLY_FN), true);
+check('preserveView 时按 uri 保持当前张', /list\[i\]\.uri === prevUri/.test(APPLY_FN), true);
+check('preserveView 时不清预览缓存', /if \(!keepView\) \{\s*this\.clearPreviews\(\)/.test(APPLY_FN), true);
+check('preserveView 时不重解大图',
+  /if \(!keepView\) \{[\s\S]{0,700}this\.showPreviewOf\(this\.cur\)/.test(APPLY_FN), true);
+check('preserveView 时不覆盖状态栏（不闪「已载入 N 张」）',
+  /if \(!keepView\) \{\s*this\.status = '已载入/.test(APPLY_FN), true);
+check('sameDirEntries 用纯函数比对', /return sameEntryNames\(want, cur\)/.test(INDEX), true);
+check('诊断串带 hv=2 便于确认新包', /\| hv=2/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

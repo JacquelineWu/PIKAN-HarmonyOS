@@ -49,7 +49,7 @@ import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
-import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames } from '../common/DirName';
+import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -535,6 +535,9 @@ function fmtDate(ms: number): string {
  *  自己的 24 张 LRU、同时只解一个，不挤占主预载缓存。 */
 const HOVER_EDGE: number = 384;
 const HOVER_MAX_COUNT: number = 24;
+/** 悬停浮层关闭去抖（ms）：鼠标跨过行 / 浮层边界时不立刻收起，
+ *  避免 onHover(false) 与 onMouse(Move) 在同一帧抢状态导致 bindPopup 高频开关。 */
+const HOVER_CLOSE_DELAY_MS: number = 120;
 /** 待处理队列上限。快速滑动列表会堆积大量「已划走」的请求，超了就丢最旧的，
  *  否则一次甩动可能排进上千个任务 */
 const THUMB_QUEUE_MAX: number = 240;
@@ -801,6 +804,10 @@ struct ArchiveRow {
   @State showHover: boolean = false;                       // 悬停浮层是否展开
   @State hoverPx: image.PixelMap | undefined = undefined;  // 悬停大图（384px 档）
   private alive: boolean = true;
+  /** 悬停关闭去抖代号 / 计时器：hover 只碰这两个字段和上面两个 @State，
+   *  绝不调用父组件的 onTap / 列表 / 目录方法（否则退出 hover 会把当前档案 / 目录带走）。 */
+  private hoverSeq: number = 0;
+  private hoverCloseTimer: number = -1;
 
   /** Win64 bac9ff9：图片粉、目录粉蓝、不支持预览的文件灰；上级行用中性色 */
   /** 行首类型标记的颜色（不是缩略图，只是 18vp 的小符号）。 */
@@ -834,6 +841,11 @@ struct ArchiveRow {
 
   aboutToDisappear(): void {
     this.alive = false; // 离屏后即使队列轮到自己，也不再回调
+    this.hoverSeq++;    // 作废待执行的延迟关闭
+    if (this.hoverCloseTimer !== -1) {
+      clearTimeout(this.hoverCloseTimer);
+      this.hoverCloseTimer = -1;
+    }
     this.showHover = false; // 行划出屏幕 / 滚动列表：浮层立刻收起
     this.hoverPx = undefined;
   }
@@ -846,9 +858,28 @@ struct ArchiveRow {
       return;
     }
     if (!on) {
-      this.showHover = false;
-      this.hoverPx = undefined;
+      // 延迟收起 + 代号作废：鼠标从行移到浮层 / 相邻行的一瞬间，onHover(false)
+      // 与 onMouse(Move) 会连着派发；给 120ms 缓冲，期间 hover 回来就取消关闭。
+      // 这样 bindPopup 不会一帧内开关多次，LazyForEach 也就不会被反复重建。
+      const seq: number = ++this.hoverSeq;
+      if (this.hoverCloseTimer !== -1) {
+        clearTimeout(this.hoverCloseTimer);
+      }
+      this.hoverCloseTimer = setTimeout(() => {
+        this.hoverCloseTimer = -1;
+        if (!this.alive || seq !== this.hoverSeq) {
+          return; // 期间又 hover 回来了 / 行已离屏
+        }
+        this.showHover = false;
+        this.hoverPx = undefined;
+      }, HOVER_CLOSE_DELAY_MS);
       return;
+    }
+    // on === true：先作废待收起的计时器（鼠标又回来了），再决定是否新开
+    this.hoverSeq++;
+    if (this.hoverCloseTimer !== -1) {
+      clearTimeout(this.hoverCloseTimer);
+      this.hoverCloseTimer = -1;
     }
     if (this.showHover) {
       return; // onMouse 的 Move 会连续派发，别重复排队 384px 解码
@@ -959,7 +990,9 @@ struct ArchiveRow {
     // （滚轮翻页 / 左右键就走这条通道）。SDK 26 明确 MouseAction.Hover
     // 「has no effect」，所以这里只认 Move；收起仍由 onHover(false) / 点击 / 离屏负责。
     .onMouse((event: MouseEvent) => {
-      if (event.action === MouseAction.Move) {
+      // 只在浮层没展开时补开一次。原实现每次 Move 都调 onHoverChange(true)，
+      // 会和 onHover(false) 抢状态，造成 showHover 高频翻转、bindPopup 反复创建销毁。
+      if (event.action === MouseAction.Move && !this.showHover) {
         this.onHoverChange(true);
       }
     })
@@ -969,7 +1002,14 @@ struct ArchiveRow {
       popupColor: '#1a1d23'
     })
     .onClick(() => {
-      this.showHover = false; // 鼠标按下选图：浮层立刻收起（Win64 51 行）
+      // 鼠标按下选图：浮层立刻收起；顺手作废延迟关闭，别让计时器在组件重建后又跑一次
+      this.hoverSeq++;
+      if (this.hoverCloseTimer !== -1) {
+        clearTimeout(this.hoverCloseTimer);
+        this.hoverCloseTimer = -1;
+      }
+      this.showHover = false;
+      this.hoverPx = undefined;
       this.onTap(this.idx);
     })
     .gesture(
@@ -1739,7 +1779,14 @@ struct Index {
   /** 统一入口：提交档案列表、刷新计数与数据源、重建预览与预载。
    *  起始位置：优先恢复到上次浏览的那张（见 restoreIndex），否则从第 1 张开始。
    *  目录浏览态会传入 rows（含 .. / 子文件夹 / 灰行），此时 items 仍只含可翻页图片。 */
-  private applyItems(list: ImageItem[], src: string, capped: string, rows?: ImageItem[]): void {
+  private applyItems(list: ImageItem[], src: string, capped: string, rows?: ImageItem[],
+    preserveView?: boolean): void {
+    // 目录自动重扫（isRescan）走 preserveView：只换 rows / items，绝不恢复上次位置、
+    // 不滚动列表、不清预览缓存、不重解大图。否则 hover 解码让目录 mtime 抖动后，
+    // 一次自动重扫就会把用户视图整个拉回「上次档案 / 目录」。
+    const keepView: boolean = preserveView === true;
+    const prevUri: string = (keepView && this.cur >= 0 && this.cur < this.items.length)
+      ? this.items[this.cur].uri : '';
     this.items = list;
     if (rows !== undefined) {
       this.rows = rows;
@@ -1765,35 +1812,58 @@ struct Index {
       (this.browseDir.length > 0 ? this.browseDir :
         (list.length > 0 ? parentDirOf(list[0].uri) : ''));
     // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
-    const start: number = this.restoreIndex(list);
-    this.cur = list.length > 0 ? (start >= 0 ? start : 0) : -1;
-    this.resetView();
-    if (this.cur >= 0) {
-      this.loadMeta(this.cur);
-      this.scroller.scrollToIndex(this.rowOfItem(this.cur), false);
+    const start: number = keepView ? -1 : this.restoreIndex(list);
+    if (keepView) {
+      // 保持当前显示的那张：列表可能重排，按 uri 重新对齐；找不到就夹在原下标附近。
+      let keptIdx: number = -1;
+      if (prevUri.length > 0) {
+        for (let i = 0; i < list.length; i++) {
+          if (list[i].uri === prevUri) {
+            keptIdx = i;
+            break;
+          }
+        }
+      }
+      this.cur = keptIdx >= 0 ? keptIdx :
+        (list.length > 0 ? Math.min(this.cur < 0 ? 0 : this.cur, list.length - 1) : -1);
+      hilog.info(DOMAIN, TAG, 'applyItems: rescan kept view at %{public}d', this.cur);
+    } else {
+      this.cur = list.length > 0 ? (start >= 0 ? start : 0) : -1;
+      this.resetView();
+      if (this.cur >= 0) {
+        this.loadMeta(this.cur);
+        this.scroller.scrollToIndex(this.rowOfItem(this.cur), false);
+      }
     }
     if (start >= 0) {
       this.resumeHint = ''; // 已经回到上次位置，空态提示不再需要
     }
     const where: string = start >= 0 ? (' · 已恢复上次位置（第 ' + (start + 1) + ' 张）') : '';
-    this.status = '已载入 ' + list.length + ' 张（' + src + '）' + capped + where;
-    hilog.info(DOMAIN, TAG, 'applyItems: %{public}d items, start at %{public}d', list.length, this.cur);
+    if (!keepView) {
+      this.status = '已载入 ' + list.length + ' 张（' + src + '）' + capped + where;
+    }
+    hilog.info(DOMAIN, TAG, 'applyItems: %{public}d items, cur=%{public}d keepView=%{public}d',
+      list.length, this.cur, keepView ? 1 : 0);
     this.clearWheel();     // 换了图片源，攒着的滚轮步数必须作废
-    this.clearPreviews();
-    this.failed.clear();   // 换了图片源，上一批的「解不开」黑名单作废
+    if (!keepView) {
+      this.clearPreviews();
+      this.failed.clear();   // 换了图片源，上一批的「解不开」黑名单作废
+    }
     // 接上启动预热的那张：此刻列表已有、cur 已定，交给缓存后 showPreviewOf 会直接命中。
     // 若它不属于这一批（用户换了别的来源），schedulePreload → evictOutside 会顺手释放掉。
-    if (this.warm !== undefined) {
-      const w: PreviewEntry = this.warm;
-      this.warm = undefined;
-      this.pushPreview(w);
-      const at: string = this.cur >= 0 ? this.items[this.cur].uri : '';
-      hilog.info(DOMAIN, TAG, 'warm: adopted %{public}s', w.uri === at ? 'on current' : 'not current');
+    if (!keepView) {
+      if (this.warm !== undefined) {
+        const w: PreviewEntry = this.warm;
+        this.warm = undefined;
+        this.pushPreview(w);
+        const at: string = this.cur >= 0 ? this.items[this.cur].uri : '';
+        hilog.info(DOMAIN, TAG, 'warm: adopted %{public}s', w.uri === at ? 'on current' : 'not current');
+      }
+      this.showPreviewOf(this.cur);
+      this.fillSizes();
     }
-    this.showPreviewOf(this.cur);
     this.refreshSpread();
     this.schedulePreload();
-    this.fillSizes();
     this.snapDirty = true; // 列表换了 → 下次写盘时把这一批 uri 存成快照
     this.markPos();        // 顺带把「起始位置」也记下来（含快照在内一起落盘）
   }
@@ -3135,7 +3205,8 @@ struct Index {
   /** 返回是否真的进入了目录浏览态（失败时调用方不该改动目录栈）。 */
   /** allowFileFallback：目录能列但子文件读不了时，是否弹「目录内多选」选择器。
    *  「回上层」传 false —— 那种兜底会调 setItems 把目录态清掉，反而让回上层白做。 */
-  private async openFolder(dirUri: string, push: boolean, allowFileFallback?: boolean): Promise<boolean> {
+  private async openFolder(dirUri: string, push: boolean, allowFileFallback?: boolean,
+    isRescan?: boolean): Promise<boolean> {
     if (this.folderBusy) {
       return false; // 上一批还在列，别叠
     }
@@ -3187,6 +3258,14 @@ struct Index {
         hilog.error(DOMAIN, TAG, 'openFolder all candidates failed: %{public}s', lastErr);
         return false;
       }
+      // 自动重扫：mtime 变了不代表条目变了（hover 缩略图解码会读文件，网盘同步目录
+      // 还会写本地缓存）。条目名集合一致就只更新基准值，绝不重建列表 ——
+      // 否则 applyItems 的 restoreIndex + scrollToIndex 会把用户视图拉回「上次位置」。
+      if (isRescan === true && this.sameDirEntries(names)) {
+        this.dirMtime = this.tryMtime(base);
+        hilog.info(DOMAIN, TAG, 'rescan: entries unchanged, keep view');
+        return true;
+      }
       if (names.length > 0) {
         hilog.info(DOMAIN, TAG, 'openFolder base=%{public}s first=%{public}s', base, names[0]);
       }
@@ -3204,7 +3283,7 @@ struct Index {
       // 只在目录浏览态显示，不挤状态栏（状态栏是单行 Ellipsis，末尾会被截掉）。
       this.diagLine = 'v' + APP_VERSION + ' | dir=' + dirLabel +
         ' | raw=' + ellipsizeMiddle(dirUri, 42) +
-        ' | base=' + ellipsizeMiddle(base, 42);
+        ' | base=' + ellipsizeMiddle(base, 42) + ' | hv=2';
       const imgs: ImageItem[] = [];
       const dirs: ImageItem[] = [];
       const others: ImageItem[] = [];
@@ -3281,7 +3360,7 @@ struct Index {
       this.dirMtime = this.tryMtime(base);
       this.startDirPoll();
       // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
-      this.applyItems(imgs, dirLabel, '', rows);
+      this.applyItems(imgs, dirLabel, '', rows, isRescan === true);
       if (keepUri.length > 0 && !push) {
         for (let i = 0; i < imgs.length; i++) {
           if (imgs[i].uri === keepUri) {
@@ -3356,6 +3435,28 @@ struct Index {
     }
   }
 
+  /** 目录条目名集合是否没变。mtime 抖动（hover 解码读文件 / 网盘同步写缓存）
+   *  不该触发列表重建；只有真正增删 / 改名才需要重扫。rows[0] 是「..」行，不计入。 */
+  private sameDirEntries(names: string[]): boolean {
+    const want: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      const raw: string = names[i];
+      if (raw.length === 0 || (HIDE_DOT_FILES && raw.charAt(0) === '.')) {
+        continue;
+      }
+      want.push(repairMojibake(raw));
+    }
+    const cur: string[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r: ImageItem = this.rows[i];
+      if ((r.kind ?? ROW_IMAGE) === ROW_UP) {
+        continue;
+      }
+      cur.push(r.name);
+    }
+    return sameEntryNames(want, cur);
+  }
+
   /** SDK 26 没有 fileObserver，只能定时比对目录 mtime。变化后去抖重扫，
    *  且只在「用户没在翻页」时动手，避免和切图抢主线程。 */
   private startDirPoll(): void {
@@ -3374,7 +3475,9 @@ struct Index {
         }
         this.rescanTimer = setTimeout(() => {
           this.rescanTimer = -1;
-          this.openFolder(this.browseBase, false);
+          // 第 4 参 true = 自动重扫：内容没变就跳过，内容变了也保持当前视图，
+          // 绝不把用户拉回「上次位置」。第 3 参 false = 重扫不弹文件多选。
+          this.openFolder(this.browseBase, false, false, true);
         }, DIR_RESCAN_DEBOUNCE_MS);
       }
     }, DIR_POLL_MS);

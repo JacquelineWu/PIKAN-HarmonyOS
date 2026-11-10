@@ -510,6 +510,37 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 修复：hover 缩略图退出后「切回上次档案 / 目录」（2026-11-10）
+
+现象：鼠标停在左栏档案行会浮出缩略图，移开鼠标后，当前显示的图 / 当前目录会被拉回之前那一份。
+
+**根因不在 hover 回调本身**（它只读自己的 `showHover` / `hoverPx`），而是两条间接链路：
+
+| # | 链路 | 后果 |
+|---|---|---|
+| ① | hover 缩略图要 `decodePx()` **读图片文件** → 目录 mtime 抖动（网盘同步目录还会写本地缓存）→ `startDirPoll()` 每 1.5s 比对 mtime，去抖 900ms 后 `openFolder(browseBase, false)` 自动重扫 → `applyItems()` 里的 `restoreIndex()` + `scrollToIndex()` + `clearPreviews()` + `showPreviewOf()` | 列表滚回「上次位置」、状态栏闪「已恢复上次位置」、预览重解 —— 观感就是「切回上次档案 / 目录」 |
+| ② | `onHover(false)` 立刻关浮层，与 `onMouse(Move)` 兜底的 `onHoverChange(true)` 在同一帧抢状态 | `showHover` 高频翻转 → `bindPopup` 反复创建销毁 → `LazyForEach` 列表被反复重建、滚动位置不稳 |
+
+### 改动
+
+| 改动 | 作用 |
+|---|---|
+| `HOVER_CLOSE_DELAY_MS = 120` + `hoverSeq` / `hoverCloseTimer` | `onHover(false)` 改为**延迟收起**，期间 hover 回来就取消；`aboutToDisappear` / `onClick` 都会清计时器。浮层一帧内不再反复开关 |
+| `onMouse(Move)` 兜底加 `!this.showHover` | 只在浮层没展开时补开一次，不再每次 Move 都排队 384px 解码、不再和 `onHover(false)` 抢状态 |
+| hover 回调保持**纯预览** | 不调用 `onTap` / `applyItems` / `openFolder` / 不改 `cur`，静态契约测试锁住这一点 |
+| `DirName.ts` 新增纯函数 `sameEntryNames()` | 重扫前比对目录条目名集合（顺序无关）；mtime 抖动但名字没变 → **只更新基准值，不重建列表** |
+| `openFolder()` 新增 `isRescan` 参数 | 自动重扫时先 `sameDirEntries(names)`，一致就直接 `return true`；`startDirPoll` 改调 `openFolder(browseBase, false, false, true)`（重扫不弹文件多选） |
+| `applyItems()` 新增 `preserveView` 参数 | 内容真的变了才重扫，且此时也**不 `restoreIndex`、不 `scrollToIndex`、不 `resetView`、不 `clearPreviews`、不 `showPreviewOf`、不覆盖状态栏**；只按 uri 把 `cur` 对齐到新列表，保持当前图与滚动位置 |
+| `diagLine` 末尾加 `hv=2` | 截图一眼分辨新旧包 |
+
+> 取舍：条目**增删 / 改名**仍会自动重扫（且保住当前图与滚动位置）；仅**文件内容变化**（mtime 变、名字不变）不再触发重建，
+> 需要刷新时点「排序」或重新「选择文件夹」即可。这样 hover 解码不会再扰动视图。
+
+验证：`node --experimental-strip-types tests/dirname.test.mjs` **107/107 通过**
+（新增 6 例 `sameEntryNames()` 纯函数 + 19 例源码静态契约，断言 hover 回调不碰选中态、延迟关闭、
+重扫跳过 / `preserveView` 分支不恢复位置等）、括号配平 OK。
+按 11-10 约定**未编译 HAP、未放桌面、未升版本**（仍 1.0.7），请在 DevEco Studio 里编译后实机确认。
+
 ## 按钮区精简 + 档案列表列宽自适应（2026-11-10）
 
 按用户要求**只调整按钮区域与档案列表布局**，其余按钮、功能、事件与交互一律不变，
