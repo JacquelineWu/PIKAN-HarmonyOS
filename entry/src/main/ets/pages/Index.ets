@@ -50,6 +50,7 @@ import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
 import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
+import { HoverGuard } from '../common/HoverGuard';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -535,8 +536,9 @@ function fmtDate(ms: number): string {
  *  自己的 24 张 LRU、同时只解一个，不挤占主预载缓存。 */
 const HOVER_EDGE: number = 384;
 const HOVER_MAX_COUNT: number = 24;
-/** 悬停浮层关闭去抖（ms）：鼠标跨过行 / 浮层边界时不立刻收起，
- *  避免 onHover(false) 与 onMouse(Move) 在同一帧抢状态导致 bindPopup 高频开关。 */
+/** 悬停浮层关闭去抖（ms）：鼠标跨过行 / 子元素边界时不立刻收起。
+ *  注意：这只能抹平「正常进出」的抖动，**治不了不停闪** —— 闪烁真正的根因是
+ *  bindPopup 默认的 mask / autoCancel（见下方 bindPopup 选项上的说明）。 */
 const HOVER_CLOSE_DELAY_MS: number = 120;
 /** 待处理队列上限。快速滑动列表会堆积大量「已划走」的请求，超了就丢最旧的，
  *  否则一次甩动可能排进上千个任务 */
@@ -809,6 +811,28 @@ struct ArchiveRow {
   private hoverSeq: number = 0;
   private hoverCloseTimer: number = -1;
 
+  /** 行标识：同一目录里 uri 唯一，排序 / 重扫改变 idx 也不会串位。 */
+  private rowKey(): string {
+    return this.uri;
+  }
+
+  private cancelCloseTimer(): void {
+    if (this.hoverCloseTimer !== -1) {
+      clearTimeout(this.hoverCloseTimer);
+      this.hoverCloseTimer = -1;
+    }
+  }
+
+  /** 被 HoverGuard 同步收起（另一行接手浮层）：立刻关，不走延迟，
+   *  否则「旧行还在等 120ms、新行已经弹出」会看到两个浮层重叠闪一下。
+   *  只碰 hover 自己的状态，绝不调用 onTap / 列表 / 目录方法。 */
+  private forceHide(): void {
+    this.hoverSeq++;
+    this.cancelCloseTimer();
+    this.showHover = false;
+    this.hoverPx = undefined;
+  }
+
   /** Win64 bac9ff9：图片粉、目录粉蓝、不支持预览的文件灰；上级行用中性色 */
   /** 行首类型标记的颜色（不是缩略图，只是 18vp 的小符号）。 */
   private iconColor(): string {
@@ -842,10 +866,8 @@ struct ArchiveRow {
   aboutToDisappear(): void {
     this.alive = false; // 离屏后即使队列轮到自己，也不再回调
     this.hoverSeq++;    // 作废待执行的延迟关闭
-    if (this.hoverCloseTimer !== -1) {
-      clearTimeout(this.hoverCloseTimer);
-      this.hoverCloseTimer = -1;
-    }
+    this.cancelCloseTimer();
+    HoverGuard.shared().release(this.rowKey());
     this.showHover = false; // 行划出屏幕 / 滚动列表：浮层立刻收起
     this.hoverPx = undefined;
   }
@@ -857,14 +879,18 @@ struct ArchiveRow {
     if (this.kind !== ROW_IMAGE) {
       return;
     }
+    const key: string = this.rowKey();
     if (!on) {
-      // 延迟收起 + 代号作废：鼠标从行移到浮层 / 相邻行的一瞬间，onHover(false)
-      // 与 onMouse(Move) 会连着派发；给 120ms 缓冲，期间 hover 回来就取消关闭。
-      // 这样 bindPopup 不会一帧内开关多次，LazyForEach 也就不会被反复重建。
-      const seq: number = ++this.hoverSeq;
-      if (this.hoverCloseTimer !== -1) {
-        clearTimeout(this.hoverCloseTimer);
+      // 已被 HoverGuard 同步收起（换到另一行 / 点击 / 离屏）就别再排一次关闭
+      if (!this.showHover) {
+        return;
       }
+      // 延迟收起 + 代号作废：鼠标跨过行内子元素 / 行边界的一瞬间会连着派发
+      // onHover(false) 与 onHover(true)，120ms 缓冲只用来抹平这种正常抖动。
+      // ⚠️ 它治不了「不停闪」：那是 popup 的 mask / autoCancel 默认值造成的
+      //    自激循环，已在 bindPopup 选项里关掉（见下方）。
+      const seq: number = ++this.hoverSeq;
+      this.cancelCloseTimer();
       this.hoverCloseTimer = setTimeout(() => {
         this.hoverCloseTimer = -1;
         if (!this.alive || seq !== this.hoverSeq) {
@@ -872,18 +898,18 @@ struct ArchiveRow {
         }
         this.showHover = false;
         this.hoverPx = undefined;
+        HoverGuard.shared().release(key);
       }, HOVER_CLOSE_DELAY_MS);
       return;
     }
-    // on === true：先作废待收起的计时器（鼠标又回来了），再决定是否新开
+    // on === true：先作废待收起的计时器（鼠标又回来了）
     this.hoverSeq++;
-    if (this.hoverCloseTimer !== -1) {
-      clearTimeout(this.hoverCloseTimer);
-      this.hoverCloseTimer = -1;
-    }
+    this.cancelCloseTimer();
     if (this.showHover) {
-      return; // onMouse 的 Move 会连续派发，别重复排队 384px 解码
+      return; // 连续派发别重复排队 384px 解码
     }
+    // 全局唯一浮层：新行接手时同步收起旧行，避免两个 popup 重叠闪一下
+    HoverGuard.shared().take(key, () => this.forceHide());
     this.showHover = true;
     const hit: image.PixelMap | undefined = ThumbLoader.hover().peek(this.uri);
     if (hit !== undefined) {
@@ -984,32 +1010,53 @@ struct ArchiveRow {
     // hover 绑在整行而不是档案名 Text 上：鼠标划过图标 / 字节 / 日期列也能出图，
     // 触发面积大得多，PC 上更好按（用户反馈「要 mouse over 才显示」）。
     .onHover((isHover: boolean) => {
+      // 记下「本机 onHover 通道可用」，据此关掉下面 onMouse 的兜底自动打开。
+      // 若放在 onHoverChange 里，兜底自己调用时会把自己禁掉（只派发 onMouse 的设备
+      // 就永远弹不出浮层），所以必须留在 .onHover 回调内。
+      HoverGuard.shared().noteHover();
       this.onHoverChange(isHover);
     })
-    // 2in1 兜底：部分设备 onHover 不派发浮层事件，但 onMouse 一定到
-    // （滚轮翻页 / 左右键就走这条通道）。SDK 26 明确 MouseAction.Hover
-    // 「has no effect」，所以这里只认 Move；收起仍由 onHover(false) / 点击 / 离屏负责。
+    // 2in1 兜底：SDK 26 明确 MouseAction.Hover「has no effect」，这里只认 Move。
     .onMouse((event: MouseEvent) => {
-      // 只在浮层没展开时补开一次。原实现每次 Move 都调 onHoverChange(true)，
-      // 会和 onHover(false) 抢状态，造成 showHover 高频翻转、bindPopup 反复创建销毁。
-      if (event.action === MouseAction.Move && !this.showHover) {
+      if (event.action !== MouseAction.Move) {
+        return;
+      }
+      if (this.showHover) {
+        // 鼠标仍在本行移动：续命、取消待收起。菜单 / 浮层抢焦点会造成一次
+        // 假的 onHover(false)，靠这条把它压住，浮层不会「刚出来就消失」。
+        this.hoverSeq++;
+        this.cancelCloseTimer();
+        return;
+      }
+      // ⚠️ 绝不能无条件自动打开：正常设备收到 onHover(false) 后会延迟收起，
+      // 紧接着一次 Move 就又把浮层打开 —— 「收起→打开→收起」自激成不停闪。
+      // 只有在「整台设备从未派发过 onHover」时才启用兜底。
+      if (!HoverGuard.shared().hoverSupported) {
         this.onHoverChange(true);
       }
     })
     .bindPopup(this.showHover, {
       builder: () => { this.hoverThumb(); },
       placement: Placement.Right,
-      popupColor: '#1a1d23'
+      popupColor: '#1a1d23',
+      // ===== 不停闪的真正根因（SDK 26 CustomPopupOptions 的两个默认值）=====
+      // mask 默认 true：popup 一显示就铺一层覆盖全窗口的透明遮罩，吞掉鼠标事件，
+      //   宿主行立刻收到 onHover(false) → 我们收起 popup → 遮罩消失 → hover 恢复
+      //   → 又弹出 → 无限循环。上一轮加的 120ms 去抖只是把闪烁周期拉长而已。
+      // autoCancel 默认 true：页面上任何操作（含鼠标移动）系统都会自行收起 popup，
+      //   而 showHover 仍为 true 又把它拉回来，两边打架 → 高频闪烁。
+      // 关掉这两项后，popup 显隐完全由 showHover 决定，onHover(false) 也重新可信。
+      mask: false,
+      autoCancel: false,
+      enableArrow: false // 少一次箭头位置计算，弹出的位置更稳定
     })
     .onClick(() => {
       // 鼠标按下选图：浮层立刻收起；顺手作废延迟关闭，别让计时器在组件重建后又跑一次
       this.hoverSeq++;
-      if (this.hoverCloseTimer !== -1) {
-        clearTimeout(this.hoverCloseTimer);
-        this.hoverCloseTimer = -1;
-      }
+      this.cancelCloseTimer();
       this.showHover = false;
       this.hoverPx = undefined;
+      HoverGuard.shared().release(this.rowKey());
       this.onTap(this.idx);
     })
     .gesture(
@@ -3283,7 +3330,7 @@ struct Index {
       // 只在目录浏览态显示，不挤状态栏（状态栏是单行 Ellipsis，末尾会被截掉）。
       this.diagLine = 'v' + APP_VERSION + ' | dir=' + dirLabel +
         ' | raw=' + ellipsizeMiddle(dirUri, 42) +
-        ' | base=' + ellipsizeMiddle(base, 42) + ' | hv=2';
+        ' | base=' + ellipsizeMiddle(base, 42) + ' | hv=3';
       const imgs: ImageItem[] = [];
       const dirs: ImageItem[] = [];
       const others: ImageItem[] = [];

@@ -510,6 +510,50 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 修复：hover 缩略图「不停闪」（2026-11-10，接上节）
+
+现象：鼠标停在左栏档案行，缩略图浮层反复出现 / 消失，闪个不停。
+上一轮加的 `HOVER_CLOSE_DELAY_MS = 120` 去抖只把闪烁周期拉长，**没消除**。
+
+### 真正根因：`CustomPopupOptions` 的两个默认值
+
+查本机 SDK 26 `ets/component/common.d.ts` 的 `CustomPopupOptions`（第 13866 行起）确认：
+
+| 字段 | 默认值 | 后果 |
+|---|---|---|
+| `mask` | **true** | popup 一显示就铺一层覆盖全窗口的透明遮罩，吞掉鼠标事件 → 宿主行立刻收到 `onHover(false)` → 我们收起 popup → 遮罩消失 → hover 恢复 → 又弹出，**自激循环** |
+| `autoCancel` | **true** | 页面上任何操作（含鼠标移动）系统都会自行收起 popup，而 `showHover` 仍为 `true` 又把它拉回来 → 两边打架，高频闪烁 |
+
+两者叠加就是「浮层刚出来就消失、又立刻出来」的不停闪。之前所有去抖 / 代号作废都只是在跟这个循环抢时序。
+
+### 改动
+
+| 改动 | 说明 |
+|---|---|
+| `bindPopup` 加 `mask: false` / `autoCancel: false` / `enableArrow: false` | 关掉遮罩与系统自动收起，浮层显隐**完全由 `showHover` 决定**；`onHover(false)` 也重新变成可信的「真的移出了」事件 |
+| 新增 `common/HoverGuard.ts`（纯逻辑，可单测） | 全局唯一浮层：新行 `take()` 时**同步**收起旧行（不等 120ms），旧行 `release()` 只在自己仍是持有者时生效，不会误关后来打开的行 → 快速跨行不再有两个浮层重叠闪 |
+| `onMouse(Move)` 不再无条件自动打开 | 这是第二个自激源：`onHover(false)` 后延迟收起，紧接着一次 Move 又打开。现在只在**整台设备从未派发过 onHover**（`hoverSupported === false`）时兜底；浮层已展开时只续命（取消待收起计时器），不打开 |
+| `.onHover` 回调里 `noteHover()` | 必须放在 `.onHover` 内而不是 `onHoverChange()` 内，否则兜底自己调用时会把自己禁掉，只派发 onMouse 的设备就永远弹不出浮层 |
+| `forceHide()` / `cancelCloseTimer()` | 同步收起与计时器清理收拢成方法；`aboutToDisappear` / `onClick` / 延迟关闭都会 `release()` 持有者 |
+| 诊断串 `hv=2` → `hv=3` | 不升版本时靠它确认跑的是新代码 |
+
+**保留不变**：hover 缩略图功能本身、384px / 24 张 LRU / 并发 1 的解码、整行 hover 触发面积、
+点击选图、双击全屏、`Ctrl+B`、目录浏览，以及上一节的 `preserveView` 重扫保护。
+
+### 验证
+
+`node --experimental-strip-types tests/dirname.test.mjs` **129/129 通过**：
+新增 10 例 `HoverGuard` 状态机行为用例（跨行切换、旧行延迟回调不误关新行、同一行重复 take、
+`hoverSupported` 门控）+ 12 例源码静态契约（断言三个 popup 选项、门控条件、take/release/forceHide 调用链）。
+`Index.ets` / `DirName.ts` / `HoverGuard.ts` 括号配平 OK，两个纯逻辑模块经 Node 实际 import 解析通过。
+
+按 11-10 约定**未编译 HAP、未放桌面、未升版本**（仍 1.0.7），请在 DevEco Studio 里编译后实机确认。
+截图里右下角诊断串末尾应为 `| hv=3`。
+
+> 备注：项目里那个简易「括号配平」脚本曾有 bug —— 进入 `//` 行注释后换行时没把模式复位，
+> 导致后续整段被当注释跳过、对含行注释的文件误报未闭合。已在检查时修正（换行复位 `m='c'`），
+> 以 Node 实际 `import` 结果为准。
+
 ## 修复：hover 缩略图退出后「切回上次档案 / 目录」（2026-11-10）
 
 现象：鼠标停在左栏档案行会浮出缩略图，移开鼠标后，当前显示的图 / 当前目录会被拉回之前那一份。

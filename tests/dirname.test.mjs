@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames } from '../entry/src/main/ets/common/DirName.ts';
+import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -181,12 +182,13 @@ check('hover 关闭有去抖常量', /const HOVER_CLOSE_DELAY_MS: number = 120;/
 check('onHover(false) 改延迟关闭（hoverSeq 代号）', /const seq: number = \+\+this\.hoverSeq;/.test(HOVER_FN), true);
 check('延迟关闭带 clearTimeout 复位', /clearTimeout\(this\.hoverCloseTimer\)/.test(INDEX), true);
 check('hover 回来会取消待关闭计时器',
-  /this\.hoverSeq\+\+;\s*if \(this\.hoverCloseTimer !== -1\)/.test(HOVER_FN), true);
-check('onMouse(Move) 只在浮层未展开时补开', /MouseAction\.Move && !this\.showHover/.test(INDEX), true);
+  /this\.hoverSeq\+\+;\s*this\.cancelCloseTimer\(\)/.test(HOVER_FN), true);
+check('onMouse(Move) 不再无条件自动打开（原自激闪烁源）',
+  /MouseAction\.Move && !this\.showHover/.test(INDEX), false);
 check('hover 回调不触碰选中态 / 列表 / 目录',
   /this\.onTap\(|applyItems\(|openFolder\(|this\.cur =/.test(HOVER_FN), false);
 check('aboutToDisappear 清理 hover 计时器',
-  /aboutToDisappear\(\): void \{[\s\S]{0,400}hoverCloseTimer/.test(INDEX), true);
+  /aboutToDisappear\(\): void \{[\s\S]{0,400}cancelCloseTimer/.test(INDEX), true);
 check('点击行时作废 hover 计时器',
   /\.onClick\(\(\) => \{[\s\S]{0,300}this\.hoverSeq\+\+/.test(INDEX), true);
 
@@ -203,7 +205,59 @@ check('preserveView 时不重解大图',
 check('preserveView 时不覆盖状态栏（不闪「已载入 N 张」）',
   /if \(!keepView\) \{\s*this\.status = '已载入/.test(APPLY_FN), true);
 check('sameDirEntries 用纯函数比对', /return sameEntryNames\(want, cur\)/.test(INDEX), true);
-check('诊断串带 hv=2 便于确认新包', /\| hv=2/.test(INDEX), true);
+check('诊断串带 hv=3 便于确认新包', /\| hv=3/.test(INDEX), true);
+
+console.log('--- HoverGuard：同一时刻只有一行浮层（纯逻辑状态机） ---');
+let g = new HoverGuard();
+let aClosed = 0;
+let bClosed = 0;
+g.take('A', () => { aClosed++; });
+g.take('B', () => { bClosed++; });
+check('换到 B 时同步收起 A（不等 120ms，避免两浮层重叠闪）', aClosed, 1);
+check('B 成为唯一持有者', g.isActive('B'), true);
+g.release('A');                       // 旧行那条延迟关闭回调晚到
+check('旧行 release 不误关新行 B', g.isActive('B'), true);
+check('旧行 release 不触发 B 的收起', bClosed, 0);
+g.take('B', () => { bClosed++; });
+check('同一行重复 take 不再收起（不闪）', bClosed, 0);
+g.release('B');
+check('release 当前持有者后清空', g.isActive('B'), false);
+
+g = new HoverGuard();
+check('初始认为 onHover 不可用（允许 onMouse 兜底）', g.hoverSupported, false);
+g.noteHover();
+check('收到过一次 onHover 后关闭 onMouse 兜底（切断自激）', g.hoverSupported, true);
+
+g = new HoverGuard();
+let closes = 0;
+g.take('A', () => { closes++; });
+g.release('A');
+check('假离开收起后不残留持有者', g.isActive('A'), false);
+g.take('A', () => { closes++; });
+check('重新 take 同一行不触发旧 close', closes, 0);
+
+console.log('--- 源码静态契约：bindPopup 默认值导致的「不停闪」 ---');
+const POPUP_START = INDEX.indexOf('.bindPopup(this.showHover');
+const POPUP = INDEX.slice(POPUP_START, INDEX.indexOf('.gesture(', POPUP_START));
+check('mask:false 关掉吞鼠标事件的透明遮罩（根因①）', /mask: false/.test(POPUP), true);
+check('autoCancel:false 禁止系统自行收起 popup（根因②）', /autoCancel: false/.test(POPUP), true);
+check('enableArrow:false 减少弹出位置抖动', /enableArrow: false/.test(POPUP), true);
+check('onHover 回调里标记 hoverSupported', /HoverGuard\.shared\(\)\.noteHover\(\)/.test(INDEX), true);
+check('onMouse 兜底受 hoverSupported 门控',
+  /if \(!HoverGuard\.shared\(\)\.hoverSupported\)/.test(INDEX), true);
+check('onMouse 在浮层展开时只续命、不打开',
+  /if \(this\.showHover\) \{[\s\S]{0,220}this\.cancelCloseTimer\(\);/.test(INDEX), true);
+check('打开浮层前 take 同步收起上一行',
+  /HoverGuard\.shared\(\)\.take\(key, \(\) => this\.forceHide\(\)\)/.test(HOVER_FN), true);
+check('forceHide 同步收起、不走延迟',
+  /private forceHide\(\)[\s\S]{0,220}this\.showHover = false;/.test(INDEX), true);
+check('延迟关闭时释放持有者', /HoverGuard\.shared\(\)\.release\(key\)/.test(HOVER_FN), true);
+check('aboutToDisappear 释放持有者',
+  /HoverGuard\.shared\(\)\.release\(this\.rowKey\(\)\)/.test(INDEX), true);
+check('点击行时释放持有者',
+  /\.onClick\(\(\) => \{[\s\S]{0,320}HoverGuard\.shared\(\)\.release/.test(INDEX), true);
+check('hover 回调仍不触碰选中态 / 列表 / 目录',
+  /this\.onTap\(|applyItems\(|openFolder\(|this\.cur =/.test(HOVER_FN), false);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
