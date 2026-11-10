@@ -108,7 +108,7 @@ export function realPathOf(p: string): string {
  *
  *  与旧版 `dirOf()` 的关键差别：**先去 `?` 参数与尾斜杠，再取父级**。
  *  picker 返回的目录标识常带尾斜杠，旧实现 `lastIndexOf('/')` 落在最后一个字符上，
- *  `substring(0, i)` 得到的还是自己（只少了一个斜杠）—— 于是「回上层」重新列同一个
+ *  `substring(0, i)` 得到的还是自己（只少了一个斜杠）—— 于是「往上层」重新列同一个
  *  目录，界面看起来完全没反应（2026-11-10 现场：`人像/编号202601 模特 猫/`）。
  *  已是根 / 解析不出时返回空串，绝不返回自身。 */
 export function parentDirOf(path: string): string {
@@ -116,6 +116,8 @@ export function parentDirOf(path: string): string {
   if (s.length === 0 || s === '/') {
     return '';         // 已是根，没有父级
   }
+  // 往上层（2026-11-10）语义：严格按目录层级，只取一级父目录，不用浏览历史。
+  // 卷根判定交给 volumeRootOf()/upLevelOf()，此处 parentDirOf() 只做「剥一级」的基础运算。
   const i: number = s.lastIndexOf('/');
   if (i < 0) {
     return '';
@@ -127,12 +129,6 @@ export function parentDirOf(path: string): string {
   return stripTrailingSlash(parent);
 }
 
-/** 回上层时逐个尝试的父目录候选（按优先级，去重）：
- *   ① 保留原始 scheme / 编码的父 URI —— picker 授权是按 URI 发的，这一形态最可能仍有效；
- *   ② 解码后的父 URI —— 中文与 `%20` 空格目录名能读；
- *   ③ 真实文件系统路径的父 —— 落到 `/storage/...` 形态。
- *  每个候选还会被 openFolder() 里的 dirCandidates() 再展开一次，命中哪个用哪个。
- *  绝不包含「自身」（尾斜杠造成的假父级），避免点了回上层却原地不动。 */
 /** 估算一段文本在给定字号下占的宽度（vp），用于「按档案名长度自适应列宽」。
  *  ArkUI 的 Text 在 layoutWeight(1) 下拿不到内容宽度，只能自己估：
  *    · CJK / 全角（>= U+2E80）按 1 个字宽；
@@ -182,7 +178,7 @@ export function listWidthForNames(names: string[], minWidth: number, maxWidth: n
  *  逐 URI 授权模型下，picker 只认「已经拿到授权、且带 scheme 的 URI」：
  *   · 传父目录（没授权）→ select() 直接 reject 或忽略定位；
  *   · 传纯文件系统路径 `/storage/...` → 不是 URI，同样不生效。
- *  旧版 chooseFolderAt() 把 parents[0]（常是纯路径）当起点，是「回上层仍然失败」的最后一环。
+ *  旧版 chooseFolderAt() 把 parents[0]（常是纯路径）当起点，是「往上层仍然失败」的最后一环。
  *  正确做法：用**当前目录**的 picker 原始 uri 作起点（一定已授权），picker 打开停在这一层，
  *  用户点一次「上层」再确认即可。找不到带 scheme 的 uri 时返回空串 —— 调用方就不设起点。 */
 export function pickerStartOf(browseDir: string, pickRootUri: string): string {
@@ -196,6 +192,8 @@ export function pickerStartOf(browseDir: string, pickRootUri: string): string {
   return '';
 }
 
+/** 旧「往上层」逐候选探测遗留工具，Index.ets 已不再用（改走 upParentCandidates()）。
+ *  保留供回归测试与历史兼容：它只从**单一路径**求父级写法，不像新逻辑还要校验卷根。 */
 export function parentDirCandidates(path: string): string[] {
   const out: string[] = [];
   const seen: Set<string> = new Set<string>();
@@ -213,6 +211,184 @@ export function parentDirCandidates(path: string): string[] {
     add(safeDecode(p));
   }
   add(parentDirOf(path));
+  return out;
+}
+
+// --------------------------------------------------------------------
+// 「往上层」目录层级导航（2026-11-10）
+//
+// 语义对齐 Windows 文件管理器的「向上 / Up」按钮：
+//   · 目标只由**当前路径**算出，与浏览历史无关；
+//   · 每次只剥掉一层，连续点击逐级逼近卷的逻辑最上层；
+//   · 到卷根后没有父级，upLevelOf 返回 ''，按钮置灰、不再上移；
+//   · canGoUpFrom 与 upLevelOf 共用同一推导 —— 按钮状态不可能和点击行为打架。
+// 全部是纯函数，可用 Node 24 直接回归，不必装 HAP。
+// --------------------------------------------------------------------
+
+/** 统一分隔符：Windows 反斜杠 → 正斜杠，只用于层级计算（不改文件名显示）。 */
+function hierSlashes(s: string): string {
+  return s.split('\\').join('/');
+}
+
+/** 把任意 uri / 路径归一成「层级计算用」的真实路径：
+ *  去 ? 参数与尾斜杠、还原 file://docs 文档 URI、百分号解码、统一分隔符。 */
+export function hierPathOf(path: string): string {
+  return hierSlashes(realPathOf(path));
+}
+
+/** 逻辑卷根 —— 「往上层」能到达的最高层（Windows 的 C:\ 对应物）。
+ *  · Windows 盘符路径 `C:/Users/...` → `C:`（盘符根，再往上是「此电脑」，不属于目录层级）；
+ *  · 鸿蒙用户卷 `/storage/(Users|media|emulated)/<id>/...` → `/storage/<bucket>/<id>`，
+ *    这是文件管理器里「内部存储 / 用户卷」的顶，上面 `/storage`、`/` 是系统目录，
+ *    既没有逐 URI 授权也没有可浏览内容，不应作为「往上层」的一级；
+ *  · 其它绝对路径 → `/`（文件系统根）；
+ *  · 解析不出真实路径（如 `file://docs` 碎片）→ `''`，表示无法判定层级。 */
+export function volumeRootOf(path: string): string {
+  const s: string = hierPathOf(path);
+  if (s.length === 0) {
+    return '';
+  }
+  // 注意要同时认 `C:/Users/...` 和卷根自身 `C:`（尾斜杠已被 stripTrailingSlash 去掉），
+  // 否则到达盘符根时 volumeRootOf 会突然返回 ''，导致按钮状态与层级判定不一致。
+  if (/^[A-Za-z]:($|\/)/.test(s)) {
+    return s.substring(0, 2);           // 'C:'
+  }
+  if (s.charAt(0) !== '/') {
+    return '';
+  }
+  const parts: string[] = s.split('/');
+  // parts[0] 是空串；识别 /storage/<bucket>/<id>
+  if (parts.length >= 4 && parts[1] === 'storage' &&
+      (parts[2] === 'Users' || parts[2] === 'media' || parts[2] === 'emulated')) {
+    return '/' + parts[1] + '/' + parts[2] + '/' + parts[3];
+  }
+  return '/';
+}
+
+/** 目录层级深度（卷根 = 0）。用于诊断串与「逐级、不越级」回归断言：
+ *  upLevelOf 每调用一次，dirLevelOf 必须严格减 1，直到 0 停止。 */
+export function dirLevelOf(path: string): number {
+  const s: string = hierPathOf(path);
+  if (s.length === 0) {
+    return 0;
+  }
+  const root: string = volumeRootOf(s);
+  let rest: string = s;
+  if (root.length > 0 && root !== '/' && s.indexOf(root) === 0) {
+    rest = s.substring(root.length);
+  }
+  let n: number = 0;
+  const parts: string[] = rest.split('/');
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].length > 0) {
+      n++;
+    }
+  }
+  return n;
+}
+
+/** 「往上层」的目标：当前路径的**直接父目录**，严格只剥一层，绝不越级。
+ *  已在卷根 / 越过卷根 / 解析不出路径时返回 '' —— 调用方据此置灰按钮并停止上移。
+ *  绝不返回自身（尾斜杠造成的假父级），因此连续点击不可能绕圈。 */
+export function upLevelOf(path: string): string {
+  const s: string = hierPathOf(path);
+  if (s.length === 0) {
+    return '';
+  }
+  const root: string = volumeRootOf(s);
+  if (root.length === 0 || s === root || s === '/') {
+    return '';                          // 已到卷的逻辑最上层
+  }
+  if (root !== '/' && s.indexOf(root + '/') !== 0) {
+    return '';                          // 不在该卷之下（异常路径），不再上移
+  }
+  const i: number = s.lastIndexOf('/');
+  if (i < 0) {
+    return '';
+  }
+  let parent: string = i === 0 ? '/' : s.substring(0, i);
+  if (parent.length === 0) {
+    parent = '/';
+  }
+  if (parent === s) {
+    return '';                          // 绝不返回自身
+  }
+  // 不得越过卷根（root='C:' / '/storage/Users/<id>' 时尤其要挡住）
+  if (parent !== root && parent.length < root.length) {
+    return '';
+  }
+  return parent;
+}
+
+/** 是否仍有父级 —— 按钮 enabled 状态与点击行为的**唯一**判据。
+ *  直接复用 upLevelOf：只要它为非空，按钮就一定可点且点击一定落到同一层，
+ *  从定义上排除「按钮亮着却没父级 / 有父级却点不动」的状态不一致。 */
+export function canGoUpFrom(path: string): boolean {
+  return upLevelOf(path).length > 0;
+}
+
+/** 两个 uri / 路径是否指向同一个目录（同一层级、同一位置）。
+ *  用于校验 picker 补授权时选中的确实是我们算出的那一层。 */
+export function sameDirPath(a: string, b: string): boolean {
+  const ka: string = stripTrailingSlash(hierPathOf(a));
+  const kb: string = stripTrailingSlash(hierPathOf(b));
+  return ka.length > 0 && ka === kb;
+}
+
+/** picker 补授权时：选中的目录是否**正好**是当前路径的直接父级。
+ *  不接受祖父级（越级）、旁支目录、或当前目录自身；解析不出真实路径时
+ *  退回按目录名比对（且排除与当前目录同名）。到卷根后一律返回 false。 */
+export function isUpTargetOf(picked: string, current: string): boolean {
+  const target: string = upLevelOf(current);
+  if (target.length === 0) {
+    return false;
+  }
+  const pickedReal: string = hierPathOf(picked);
+  if (pickedReal.length === 0) {
+    const n: string = baseName(picked);
+    return n.length > 0 && n === baseName(target) && n !== baseName(current);
+  }
+  return stripTrailingSlash(pickedReal) === target;
+}
+
+/** 「往上层」时逐个尝试的候选：全部是 upLevelOf(currentPath) 那一层的不同 URI 写法
+ *  （保留 scheme / 编码的形态最可能仍带 picker 逐 URI 授权）。
+ *  任何候选都必须通过 sameDirPath 校验落在同一层；层级不符、等于自身、
+ *  等于当前目录的一律剔除 —— 从源头上杜绝越级与循环。 */
+export function upParentCandidates(currentPath: string, rawUri: string): string[] {
+  const target: string = upLevelOf(currentPath);
+  if (target.length === 0) {
+    return [];                          // 已到卷根：没有候选，也不该再点
+  }
+  const curKey: string = stripTrailingSlash(hierPathOf(currentPath));
+  const out: string[] = [];
+  const seen: Set<string> = new Set<string>();
+  const add = (s: string): void => {
+    if (s.length === 0 || seen.has(s)) {
+      return;
+    }
+    const k: string = stripTrailingSlash(hierPathOf(s));
+    if (k.length === 0 || k === curKey || !sameDirPath(s, target)) {
+      return;
+    }
+    seen.add(s);
+    out.push(s);
+  };
+  // ① 保留 rawUri 的 scheme / 编码形态的父 URI（授权按 URI 发，命中率最高）
+  const r: string = stripTrailingSlash(rawUri);
+  const j: number = r.lastIndexOf('/');
+  if (j >= 0) {
+    const p: string = j === 0 ? '/' : r.substring(0, j);
+    add(p);
+    add(safeDecode(p));                 // ② 解码写法（中文 / %20 目录名）
+  }
+  // ③ 其它已知写法，仍按「同一层」过滤
+  const extra: string[] = parentDirCandidates(rawUri).concat(parentDirCandidates(currentPath));
+  for (let i = 0; i < extra.length; i++) {
+    add(extra[i]);
+  }
+  // ④ 真实路径目标永远兜底，保证至少有一个 fs.listFile 能认的形态
+  add(target);
   return out;
 }
 

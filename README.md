@@ -25,8 +25,8 @@
 |---|---|
 | 格式 | HEIC / HEIF / JPG / JPEG / PNG / WEBP / BMP / GIF，走鸿蒙系统解码器 |
 | 挑图入口 | 仅 `选择文件夹`（`DocumentSelectMode.FOLDER`）；**`打开图库`（v1.0.6）、`选择图片` 与 `回到上次`（11-10）三个按钮均已取消**，界面上不再出现（见「按钮区精简」章节） |
-| 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `回上层` / `退格` 回上级（**含直接从选中目录上溯一级**，不必先钻进子目录）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
-| 左栏 | 抬头下 `排序 ↑ / ↓`、`回上层`、`选择文件夹` **同一行等宽排列**；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
+| 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `往上层` / `退格` 按**目录层级**进入直接父目录（**不按浏览历史回退**，连续点击逐级到卷 / 硬盘逻辑最上层后停止）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
+| 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` 在无父级时**置灰**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
 | 鼠标键 | 预览区 **左键放大 ×1.5**（以光标为锚点）、**右键还原**（回适应窗口并归位）、**双击切换全屏**（撤销第一下单击的放大）；双击档案名同样切换全屏 |
@@ -35,7 +35,7 @@
 | 复位 / 1:1 | 右键画布 / 键盘 `0` 复位适应；`F` 切 1:1。**11-10 起取消 `适应` `1:1` 按钮** |
 | 竖图对开 | 当前与下一张**同为竖图**时左右并排；**点到 / 翻到哪张哪张就在左边**，翻页步长恒一格；横图 / 落单张仍单页；信息浮层列出两个文件名 |
 | 幻灯片 | `幻灯片` 按钮 / 空格键，默认 3 秒切换 |
-| 键盘翻页 / 回上层 | `←` `→` 上一张/下一张；`退格` 回上层目录 |
+| 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | 全屏时顶栏浮在画布上（不占布局），鼠标贴到窗口顶端才出现，停手 2s 自动收起 |
 | 关闭应用 | **`Esc`**（非全屏时；全屏下 `Esc` 先退全屏，再按一次才关闭） |
@@ -134,7 +134,7 @@ PIKAN-HarmonyOS/
 > 连同 `doAction()` 里对应的 8 个分支一起移除，左栏列表多出约 160vp 高度。
 > 这些能力**没有删除**，仍由键盘与鼠标提供：Ctrl + 滚轮缩放、`↑` / `↓` 缩放、
 > `R` / `Shift+R` 旋转、`Shift+H` / `Shift+V` 镜像、右键画布或 `0` 复位、`F` 切 1:1。
-> 左栏抬头下的 `排序 ↑/↓`、`回上层`、`选择文件夹` 与分隔条 « / » **均保留**。
+> 左栏抬头下的 `排序 ↑/↓`、`往上层`、`选择文件夹` 与分隔条 « / » **均保留**。
 > 原 8 个按钮的 act 名为 `fit / one / zout / zin / rotl / rotr / fliph / flipv`（供恢复时对照）。
 
 ### 全屏（沉浸）模式
@@ -459,7 +459,7 @@ HiLog 上看：`warm: ready in N ms` → `warm: adopted on current`（命中当�
 | 批次 | 内容 | 编译 |
 |---|---|---|
 | A | 预载 20 → **前后各 50**（`PRELOAD_COUNT = 112` / `PRELOAD_MAX_BYTES = 512MB`）；`100% = 1:1` 缩放口径；中灰底 `#5F5F5F`；顶栏 `PIKAN 1.0.4` + 完整路径（中间省略）；状态栏缓存账目；乱码文件名修复；自然序排序；隐藏 `.` 文件；`app.json5` 版本 1.0.4 | `BUILD SUCCESSFUL in 14 s 559 ms` |
-| B | 右键还原 / 双击全屏（撤销单击放大）/ `Ctrl+B` / `Shift+R,H,V` / 退格回上层；左栏改文件浏览器数据结构与三栏行；`选择文件夹` / `回上层` / `排序` 按钮；目录 `mtime` 轮询自检；竖图对开配对逻辑 | `BUILD SUCCESSFUL in 10 s 106 ms` |
+| B | 右键还原 / 双击全屏（撤销单击放大）/ `Ctrl+B` / `Shift+R,H,V` / 退格往上层；左栏改文件浏览器数据结构与三栏行；`选择文件夹` / `往上层` / `排序` 按钮；目录 `mtime` 轮询自检；竖图对开配对逻辑 | `BUILD SUCCESSFUL in 10 s 106 ms` |
 | C | 对开双页显示：右页解码（`rightToken` 代号校验）、两页各占半宽、信息浮层双名、缓存淘汰保护右页；`clearPreviews()` 同步撤右页引用；右页未就绪用占位而非 `Image(uri)` | `BUILD SUCCESSFUL in 10 s 789 ms` |
 | D | 全屏时顶栏自动隐藏（贴顶端浮出 / 停手 2s 收起，`Stack + position` 不占布局）；`Ctrl+B` 收起窄条 224 + 分隔条 « 按钮；体积补测在翻页 / 换目录 / 幻灯片期间让路 | `BUILD SUCCESSFUL in 34 s 698 ms` |
 | E | 悬停缩略图（独立 `ThumbLoader` 实例：384px 档 / 24 张 LRU / 并发 1）；启动自检日志 | `BUILD SUCCESSFUL in 41 s 703 ms` |
@@ -509,6 +509,79 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 往上层：改为 Windows 文件管理器的目录层级语义（2026-11-10）
+
+按钮从「回上层」改称 **「往上层」**，语义从「沿浏览历史回退」改成对齐 Windows 文件管理器的
+**向上 / Up**：目标只由**当前路径**决定，每次只进入直接父目录，连续点击逐级到达卷 / 硬盘的
+逻辑最上层后停止。
+
+> 下文历史章节里出现的旧按钮名、`dirStack`、「按浏览历史回退」都是**旧实现记录**，
+> 现已全部删除；保留文字只为排障溯源。
+
+### 旧实现的问题
+
+| # | 旧行为 | 后果 |
+|---|---|---|
+| ① | `browseUp()` 优先 `pop` 浏览历史栈 | 栈里存的是「进子目录前的那个目录」，不是当前路径的父级；连续点击沿来路绕圈 |
+| ② | 同时用 `browseBase` / `browseDir` / `pickRootUri` 三个锚点各算一次父级再混着试 | 三个锚点可能处在**不同层级**，命中哪个全看授权 → 越级、状态不一致 |
+| ③ | 没有「是否仍有父级」的状态 | 到顶了还会继续弹选择器，按钮也一直亮着 |
+
+### 新模型（全部是 `DirName.ts` 纯函数）
+
+| 函数 | 作用 |
+|---|---|
+| `hierPathOf()` | 把任意 URI 归一成层级计算用路径（去 query / 尾斜杠、还原 `file://docs`、解码 `%XX`） |
+| `volumeRootOf()` | 逻辑卷根：`C:` / `/storage/Users/<id>` / `/`；这就是「往上层」能到达的最高层 |
+| `dirLevelOf()` | 层级深度，卷根 = L0，用于诊断串与「每步严格 −1」回归断言 |
+| `upLevelOf()` | **直接父目录**，严格只剥一层；到卷根 / 解析不出返回 `''`，绝不返回自身 |
+| `canGoUpFrom()` | 是否仍有父级，直接复用 `upLevelOf()` —— 按钮状态与点击行为**同源** |
+| `upParentCandidates()` | 同一父层的不同 URI 写法，每个候选都要过 `sameDirPath()` 校验，杜绝越级 / 绕圈 |
+| `isUpTargetOf()` | 补授权时只接受直接父级，拒绝自身 / 祖父 / 旁支 / 同名同层旁支 |
+
+### 状态一致性
+
+| 触发点 | 统一动作 |
+|---|---|
+| `applyItems()` | **唯一刷新点**：同时更新 `source` / `rowCount` / `listW` / `titlePath` / `canGoUp`；`canGoUp = canGoUpFrom(browseBase)` |
+| `openFolder()` | 成功才写 `browseBase`（实测能列的真实路径），失败不改任何状态；顶层时不列 `..` 行 |
+| `browseUp()` | 成功经 `openFolder → applyItems` 一起刷新当前路径、目录展示、按钮状态，并清掉与层级无关的 `pickRootUri` 旧锚点 |
+| 三条入口 | 按钮 / `..` 行 / `退格` 全部收口到 `browseUp()`，行为完全一致 |
+
+- **按钮状态**：`toolBtn('往上层', 'up', true, this.canGoUp)`。有父级亮、到卷根或图片列表态置灰；
+  置灰态点击也走 `browseUp()` 的同源 guard，只给「已到卷 / 硬盘的逻辑最上层 · 没有父级了」
+  /「当前是图片列表」提示，**绝不移动目录**（比点了完全没反应更易排查）。
+  置灰用明暗色 + `.opacity()`；SDK 26 的 `CommonMethod` 里确有 `enabled(value: boolean)`，
+  但**刻意不用** `.enabled(false)`：那样点击完全没反应，而顶层已不列 `..` 行，
+  用户就再也看不到「为什么不能再往上」的原因。保留 `onClick`、由同源 guard 拦住，
+  既不移动目录，也能自行排查。
+- **目录展示**：卷根没有父级时 `rows` 不生成 `..` 行，与按钮置灰、状态提示三者一致。
+- **无浏览历史**：`Index.ets` 里已彻底删掉历史栈，`openFolder()` 的参数也从 `push` 改名为
+  `resetView`（只控制「是否从第一张开始」，与父级推算无关）。
+
+### 连续点击示例
+
+```
+/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像/编号202601 模特 猫   L4
+  → /storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像              L3
+  → /storage/Users/currentUser/Download/com.baidu.netdisk.hmpc                   L2
+  → /storage/Users/currentUser/Download                                          L1
+  → /storage/Users/currentUser   （卷根 L0，按钮置灰，不再上移）
+```
+
+Windows 盘符路径同样逐级：`C:/Users/foo/Pictures/2020 → … → C:`，停在盘符根而不进「此电脑」；
+通用 POSIX 路径停在 `/`。每一步 `dirLevelOf` 严格减 1，不越级、不循环。
+
+### 验证
+
+`node --experimental-strip-types tests/dirname.test.mjs` **204/204 通过**：新增卷根 / 层级深度 /
+逐级上行链（鸿蒙路径、Windows 盘符、POSIX）、到顶停止、候选同层过滤、补授权防越级，
+以及 22 条源码静态契约（按钮绑定 `canGoUp`、无历史栈、顶层不列 `..`、三条入口收口等）。
+右下角诊断串带 **`up4`** 与 `L4→L3` 层级标记，便于实机截图辨认新旧包；
+`UP_NAV_TAG` 只是诊断标记，**不是版本号**。
+
+按 11-10 约定：**未编译 HAP、未放桌面、未升版本（仍 1.0.7）、未 push**。
+请在 DevEco Studio 里编译后实机点几次「往上层」确认逐级上移与到顶置灰。
 
 ## 修复：hover 缩略图「不停闪」（2026-11-10，接上节）
 
@@ -597,7 +670,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | 顶栏移除 `选择图片` 与 `回到上次` | 连同 `doAction()` 的 `case 'files'` / `case 'resume'` 一起删除；顶栏只剩 `全屏` / `幻灯片` |
 | 界面文案清理 | 初始状态栏、空态提示、启动提示、多选取消 / 列目录失败的提示，全部改为指向 `选择文件夹`；结果类文案改成「恢复上次位置」—— 界面上不再出现这两个入口名 |
 | 底层方法保留 | `openFiles()` / `resumeLast()` / `loadAllGallery()` / `openGallery()` 不删，仍被 `openPicker()` 内部降级链与启动预热复用；只是不再有 UI 入口（与 v1.0.6 处理 `openGallery()` 的方式一致） |
-| 左栏三个按钮合并为一行 | `排序 ↑ / ↓`、`回上层`、`选择文件夹` 放进同一个 `Row()`；`toolBtn` 的 `layoutWeight(1)` 三等分、统一 `margin(3)` 保证水平间距一致，统一 `height(30)` + `alignItems(VerticalAlign.Center)` 保证垂直对齐；删掉原来的第二行，按钮区不再有多余垂直空白 / 重叠 / 错位 |
+| 左栏三个按钮合并为一行 | `排序 ↑ / ↓`、`往上层`、`选择文件夹` 放进同一个 `Row()`；`toolBtn` 的 `layoutWeight(1)` 三等分、统一 `margin(3)` 保证水平间距一致，统一 `height(30)` + `alignItems(VerticalAlign.Center)` 保证垂直对齐；删掉原来的第二行，按钮区不再有多余垂直空白 / 重叠 / 错位 |
 
 > 三个按钮**保持原文字与 act 不变**（`sort` / `up` / `folder`），只是从两行改为一行。
 > `LIST_W = 280` 作为左栏下限，正是「一行三个按钮等宽且不挤」的安全宽度。
@@ -652,9 +725,9 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 
 > 按 11-10 约定**未编译 HAP、未放桌面、未升版本**（仍 1.0.7），请在 DevEco Studio 里编译后实机确认。
 
-## 回上层「仍然失败」二次修复（2026-11-10，接上节）
+## 往上层「仍然失败」二次修复（2026-11-10，接上节）
 
-上节修完后实机点「回上层」仍无反应。复查整条链路（按钮绑定 → `browseUp` → `openFolder` → 授权兜底）后，
+上节修完后实机点「往上层」仍无反应。复查整条链路（按钮绑定 → `browseUp` → `openFolder` → 授权兜底）后，
 确认前两处根因已修对，但**最后一环的 picker 起点传错了**：
 
 | # | 问题 | 后果 |
@@ -677,25 +750,25 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 按 11-10 约定**未编译 HAP、未放桌面、未升版本**（仍 1.0.7），请在 DevEco Studio 里编译后实机确认。
 若仍不对，请截右下角诊断串——它会直接显示是 `up START`（新代码已跑）还是旧串（装的还是旧包）。
 
-## 回上层在「人像/编号202601 模特 猫」没反应（2026-11-10 修复）
+## 往上层在「人像/编号202601 模特 猫」没反应（2026-11-10 修复）
 
 现象：选择文件夹 `/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像/编号202601 模特 猫`
-后，点左栏「回上层」完全没反应；期望回到 `…/人像/` 并显示该目录名。
+后，点左栏「往上层」完全没反应；期望回到 `…/人像/` 并显示该目录名。
 
 根因有两个，叠在一起：
 
 | # | 原因 | 后果 |
 |---|---|---|
 | ① | 本地 `dirOf()` **不去尾部斜杠** | picker 返回的目录标识常带 `/`，`lastIndexOf('/')` 落在最后一个字符，`substring(0, i)` 得到的还是**自己**（只少一个斜杠），`openFolder()` 又列了一遍同一个目录 → 界面原地不动 |
-| ② | picker 授权是**逐 URI** 的 | 祖先目录（`人像`）没拿到授权，只拿一个父候选去 `listFile` 常常全部失败；旧代码只在状态栏写一句「回上层失败」，很容易被当成没反应 |
+| ② | picker 授权是**逐 URI** 的 | 祖先目录（`人像`）没拿到授权，只拿一个父候选去 `listFile` 常常全部失败；旧代码只在状态栏写一句「往上层失败」，很容易被当成没反应 |
 
 | 改动 | 说明 |
 |---|---|
 | `DirName.ts` 新增 `realPathOf / parentDirOf / parentDirCandidates` | 先去 `?` 与尾斜杠再取父级；`file://docs/...` 还原成 `/storage/...`；`%XX` 安全解码；已是根返回空串；**绝不返回自身** |
 | 父候选按优先级逐个试 | ① 保留 scheme 的父 URI → ② 解码后的父 → ③ 真实路径父，每个再经 `dirCandidates()` 展开一次，命中哪个用哪个 |
-| `browseUp()` 改 async + 循环 | 状态栏先显示 `回上层 → 人像`；成功才 `pop dirStack`，失败可重试；不再静默 |
-| `openFolder()` 新增 `allowFileFallback?` | 「回上层」传 false：不再弹「目录内多选」，`setItems()` 也就不会把刚进去的目录态清掉 |
-| 新增 `pickRootUri` | 记住最近一次「选择文件夹」的原始 uri；目录态被「目录内多选」清掉后仍能算出上层。成功进入上层后清空，避免连续回上层时算出「倒退回刚离开的目录」的候选 |
+| `browseUp()` 改 async + 循环 | 状态栏先显示 `往上层 → 人像`；成功才 `pop dirStack`，失败可重试；不再静默 |
+| `openFolder()` 新增 `allowFileFallback?` | 「往上层」传 false：不再弹「目录内多选」，`setItems()` 也就不会把刚进去的目录态清掉 |
+| 新增 `pickRootUri` | 记住最近一次「选择文件夹」的原始 uri；目录态被「目录内多选」清掉后仍能算出上层。成功进入上层后清空，避免连续往上层时算出「倒退回刚离开的目录」的候选 |
 | 新增 `chooseFolderAt()` | 所有父候选都因无授权列不出时，拉起 `FOLDER` picker 补授权（⚠️ 初版把 `defaultFilePathUri` 指向未授权的父目录导致仍失败，已在下节二次修复） |
 | `applyItems()` 标题栏 | `dirOf()` → `parentDirOf()`，统一走新口径 |
 
@@ -712,7 +785,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | 删除 `build()` 里的底部 `Column()` 视图控制条 | 8 个 `toolBtn()`、容器与顶部分隔线一并移除；左栏列表多出约 160vp |
 | `doAction()` 移除 8 个 case | `fit / one / zin / zout / rotl / rotr / fliph / flipv` 不再有 UI 入口 |
 | 底层方法保留 | `zoomBy / resetView / zoomPixelPerfect / rotateBy / toggleFlipH / toggleFlipV` 仍被键盘、滚轮、鼠标键直接调用，功能不丢 |
-| 左栏剩余按钮 | `排序 ↑/↓`、`回上层`、`选择文件夹`、分隔条 « / » 均保留（不在本次取消范围） |
+| 左栏剩余按钮 | `排序 ↑/↓`、`往上层`、`选择文件夹`、分隔条 « / » 均保留（不在本次取消范围） |
 | `versionCode 7` / `versionName 1.0.7` | 每次改版必升版本，避免 `bm install -p` 覆盖同版本包被 BMS 跳过；顶栏显示 `PIKAN 1.0.7` |
 
 快捷键替代：滚轮翻页、**Ctrl + 滚轮**缩放、`↑` / `↓` 缩放、左键放大 ×1.5、右键还原、
@@ -731,7 +804,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | `openGallery()` 保留但不再接 UI | 它内部的 `scanAll` / `restoreFromSnapshot` / 选择器兜底，与「回到上次」复用同一套能力；注释标注【已停用】，将来要恢复只需加回按钮与 case |
 | `versionCode 6` / `versionName 1.0.6` | 沿用 v1.0.5 的教训：改版必升版本号，避免 `bm install -p` 覆盖同版本包被 BMS 跳过；顶栏显示 `PIKAN 1.0.6` |
 
-**功能不受影响**：`选择图片`（系统文件选择器）、`选择文件夹`（目录浏览，含中文 / 多级路径 / 回上层）、
+**功能不受影响**：`选择图片`（系统文件选择器）、`选择文件夹`（目录浏览，含中文 / 多级路径 / 往上层）、
 `回到上次`（全量扫描或 uri 快照恢复）三条路径都保留。
 下文「appfreeze 排查」「`打开图库` 的两条路线」「权限降级链」等历史章节仍保留作排障记录，
 其中提到的 `打开图库` 指这个**已移除的入口**；其底层扫描 / 快照 / 权限逻辑仍在被 `回到上次` 使用。
@@ -742,7 +815,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 （解包 `ets/modules.abc` 能命中 `dirDisplayName` / `stripTrailingSlash` / `读取预览` /
 `dirLabel` / `browseUp` / `chooseFilesInDir`），但存在一个真实的交付缺陷：
 
-> 11-04 起四次修复（全量对齐、目录 URI、回上层 + 缩略图、目录名）**全部共用
+> 11-04 起四次修复（全量对齐、目录 URI、往上层 + 缩略图、目录名）**全部共用
 > `versionCode 4 / 1.0.4`**。`bm install -p` 覆盖同版本包时可能被 BMS 跳过，
 > 界面上也**没有任何东西能分辨装的是哪一版**——用户看到的很可能仍是旧包。
 
@@ -868,13 +941,13 @@ hilog | grep HeicViewer        # 或 hdc shell "hilog | grep HeicViewer"
 `listFile OK/FAIL [n]`（哪种写法能列）、`probeChild FAIL`（子文件为什么打不开）、
 `decodePx FAIL uri=`（最后卡在哪一步）。
 
-## 回上层失效 + 左栏缩略图按需显示（2026-11-09 修复）
+## 往上层失效 + 左栏缩略图按需显示（2026-11-09 修复）
 
-### 1. 「回上层 / `..` / 退格」点了没反应
+### 1. 「往上层 / `..` / 退格」点了没反应
 
 `chooseFolder()` 是 `dirStack = []` + `openFolder(uris[0], false)`（`push=false`）进入首个目录的，
 **栈永远是空的**；而旧 `browseUp()` 第一句就是 `dirStack.length === 0 → 提示「没有上层目录」并 return`。
-用户只要没先钻进子目录，回上层必然被这句拦死 —— 这就是实机反馈「不能用」的全部原因。
+用户只要没先钻进子目录，往上层必然被这句拦死 —— 这就是实机反馈「不能用」的全部原因。
 
 | 改动 | 作用 |
 |---|---|
@@ -902,7 +975,7 @@ hilog | grep HeicViewer        # 或 hdc shell "hilog | grep HeicViewer"
   不再用行内小图顶，也不触发任何原图解码；
 - 目录行 / 灰行不弹；点击、离屏、划走立刻收起。
 
-`devecocli build`：`BUILD SUCCESSFUL in 10 s 982 ms`（0 ERROR，两次分别验证回上层与缩略图改动）。
+`devecocli build`：`BUILD SUCCESSFUL in 10 s 982 ms`（0 ERROR，两次分别验证往上层与缩略图改动）。
 
 ## 移植自 Win64 版的四项优化（2026-10-28）
 

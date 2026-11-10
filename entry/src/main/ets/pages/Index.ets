@@ -4,7 +4,7 @@
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
  *            （11-10 起依次取消「打开图库」「选择图片」「回到上次」三个按钮）
- *   · 左侧：抬头下「排序 / 回上层 / 选择文件夹」同一行等宽排列；
+ *   · 左侧：抬头下「排序 / 往上层 / 选择文件夹」同一行等宽排列；
  *            图像档案列表（悬停缩略图 + 文件名 + 体积 + 日期），列宽按最长名字自适应、行高紧凑
  *   · 右侧：大图预览（GPU 合成渲染），悬浮信息层 + 缩放角标
  *   · 底栏：状态栏
@@ -49,7 +49,9 @@ import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
-import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
+import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, pickerStartOf,
+  volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, isUpTargetOf,
+  textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
@@ -60,6 +62,9 @@ const DOMAIN = 0x0000;
 /** 版本号（与 AppScope/app.json5 的 versionName 保持一致），用于窗口标题栏。
  *  Win64 版 3ea7419 起标题栏带版本号；鸿蒙没有「读取程序集版本」的等价物，故用常量。 */
 const APP_VERSION: string = '1.0.7';
+/** 「往上层」目录层级导航的诊断标记（仅用于右下角诊断串截图辨认新旧包，
+ *  不是版本号，不改 AppScope/app.json5）。旧包诊断串里是 anchors/stack，新包是 up4/L 层级。 */
+const UP_NAV_TAG: string = 'up4';
 /** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
  *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
 const CANVAS_BG: string = '#5F5F5F';
@@ -86,7 +91,7 @@ const TOPBAR_KEEP_PX: number = 8;
 const TOPBAR_H: number = 52;
 const TOPBAR_HIDE_MS: number = 2000;
 /** 左栏宽度：展开 / 收起。
- *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 回上层 / 选择文件夹）等宽并排且不重叠；
+ *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 往上层 / 选择文件夹）等宽并排且不重叠；
  *  LIST_MAX_W 是上限，避免个别超长档案名把右侧预览区压没。
  *  实际展开宽度由 listWidthForNames() 按当前列表最长名字在 [LIST_W, LIST_MAX_W] 内自适应。
  *  收起态仍固定 LIST_COLLAPSED_W（只留档案名一列），保持原有交互不变。 */
@@ -500,9 +505,11 @@ function ellipsizeMiddle(s: string, max: number): string {
   return s.substring(0, head) + '…' + s.substring(s.length - tail);
 }
 
-/** 父目录计算已统一迁到 common/DirName.ts 的 parentDirOf() / parentDirCandidates()。
+/** 父目录计算已统一迁到 common/DirName.ts：
+ *  基础剥一层用 parentDirOf()，目录层级上行的唯一入口是 upLevelOf() / upParentCandidates()。
  *  旧 dirOf() 不去尾斜杠：picker 给的目录常带 `/`，lastIndexOf('/') 落在末尾，
- *  substring(0, i) 得到的还是自己 —— 这就是「回上层」原地不动的根因。 */
+ *  substring(0, i) 得到的还是自己 —— 这就是「往上层」原地不动的根因。
+ *  本文件不再保留任何浏览历史栈，层级判断只读 browseBase 这个当前路径真值。 */
 
 /** 时间戳 → 'YY-MM-DD HH:mm'，用于左栏「日期」列（Win64 三栏档案列表）。 */
 function fmtDate(ms: number): string {
@@ -1118,13 +1125,13 @@ struct Index {
   private rows: ImageItem[] = [];
   // ---- 目录浏览（对齐 Win64 文件浏览器，鸿蒙变形实现）----
   private browseDir: string = '';          // 当前目录 uri（picker 原始返回值）；空 = 非目录浏览态
-  // openFolder 实测「能 listFile 且子文件能 open」的真实路径。回上层 / 重扫 / mtime 自检
-  // 一律用它：原始 uri 可能是 file://docs/... 或百分号编码，fs.statSync 认不出来。
+  // openFolder 实测「能 listFile 且子文件能 open」的真实路径 ——**当前路径的唯一真值**。
+  // 「往上层」只按它的目录层级算父级，绝不看浏览历史 / 不回溯「最初选择的目录」。
+  // 重扫 / mtime 自检也一律用它：原始 uri 可能是 file://docs/... 或 %XX 编码，statSync 认不出来。
   private browseBase: string = '';
-  /** 最近一次「选择文件夹」拿到的原始 uri。目录态若被「目录内多选」清掉，
-   *  仍可靠它推算出上层目录，不至于让「回上层」变成没反应。 */
+  /** 最近一次「选择文件夹」拿到的原始 uri，仅用作 FOLDER picker 的已授权起点。
+   *  ⚠️ 不再作为「往上层」的父级推算锚点：它可能指向好几层之前，混进来就会越级 / 绕圈。 */
   private pickRootUri: string = '';
-  private dirStack: string[] = [];          // 上层目录栈，存真实路径，供「..」/退格回退
   private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
   private dirPollTimer: number = -1;        // 目录轮询句柄
   private rescanTimer: number = -1;         // 变动后去抖重扫句柄
@@ -1147,6 +1154,11 @@ struct Index {
   @State listW: number = LIST_W;
   /** 左栏排序方向：true = 升序（自然序） */
   @State sortAsc: boolean = true;
+  /** 「往上层」按钮是否可用：等价于「当前路径仍有父级」。
+   *  由 canGoUpFrom(当前路径) 统一推导（与点击行为同源），绝不由浏览历史单独维护 ——
+   *  这样按钮明暗、提示文案、点击落点三者不可能出现状态不一致。
+   *  到卷根 / 非目录浏览态为 false，按钮置灰且点击只给提示、不再上移。 */
+  @State canGoUp: boolean = false;
   /** 顶栏自动隐藏（Win64 0cfabb2）：鼠标贴近窗口顶端才浮出，默认不占画面 */
   @State topbarVisible: boolean = true;
   private topbarTimer: number = -1;   // 「停手 N 秒自动收起」的兜底计时器
@@ -1794,7 +1806,8 @@ struct Index {
     // 重新覆盖掉；标题栏也会继续挂着上一个目录的路径。
     this.browseDir = '';
     this.browseBase = '';
-    this.dirStack = [];
+    // 没有浏览历史栈可清：往上层只认 browseBase；它在上面置空后，
+    // applyItems() 会把 canGoUp 一起刷成 false（按钮置灰）。
     this.diagLine = ''; // 回到图库 / 多选态，别再挂旧目录的诊断串
     this.dirHint = '';  // 非目录态不显示「本层没有图片」提示条
     if (this.dirPollTimer !== -1) {
@@ -1858,6 +1871,11 @@ struct Index {
     this.titlePath = this.browseBase.length > 0 ? this.browseBase :
       (this.browseDir.length > 0 ? this.browseDir :
         (list.length > 0 ? parentDirOf(list[0].uri) : ''));
+    // 「往上层」按钮状态的**唯一**刷新点：与 titlePath 同源，都取自当前真实路径。
+    // 任何换源 / 进子目录 / 往上层 / 重扫 / 快照恢复都会经过 applyItems，
+    // 因此按钮明暗、当前路径、目录展示三者永远一起更新，不会各说各话。
+    // 非目录浏览态 browseBase='' → canGoUp=false（按钮置灰）。
+    this.canGoUp = canGoUpFrom(this.browseBase);
     // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
     const start: number = keepView ? -1 : this.restoreIndex(list);
     if (keepView) {
@@ -3202,7 +3220,7 @@ struct Index {
           }
           hilog.info(DOMAIN, TAG, 'folder fallback picked %{public}d files', uris.length);
           this.setItems(uris, baseName(dirUri) + '（多选）');
-          this.pickRootUri = dirUri; // 目录态被 setItems 清了，记住原始目录供「回上层」用
+          this.pickRootUri = dirUri; // 目录态被 setItems 清了，记住原始目录供「往上层」用
         })
         .catch((e: Object) => {
           this.status = '目录内多选失败：' + JSON.stringify(e);
@@ -3232,8 +3250,7 @@ struct Index {
             return;
           }
           hilog.info(DOMAIN, TAG, 'chooseFolder picked uri=%{public}s', uris[0]);
-          this.pickRootUri = uris[0];
-          this.dirStack = [];
+          this.pickRootUri = uris[0]; // 只作 picker 起点，不参与父级推算
           this.openFolder(uris[0], false);
         })
         .catch((e: Object) => {
@@ -3246,13 +3263,16 @@ struct Index {
   }
 
   /** 列一个目录：构造左栏 rows（.. / 子文件夹 / 灰行 / 图片）与可翻页 items（只含图片）。
-   *  push=true 时把当前目录压栈，供「..」回退；重扫（push=false）保持当前张不闪。
+   *  resetView=true（进入子目录）时从第一张开始；false（重扫 / 排序 / 目录切换）时
+   *  尽量按 uri 找回落点保持当前张不闪。
+   *  ⚠️ 这里**没有任何浏览历史栈**：上级只由 browseUp() 按 browseBase 的目录层级算出，
+   *     与「从哪条路径进来」无关，连续点击才会逐级上移而不是沿来路绕圈。
    *  ⚠️ 鸿蒙 DocumentViewPicker 授予的是 URI，fs.listFile / statSync 对它不一定有权限；
    *     失败时明确提示，不静默吞掉（Win64 走的是真实文件系统路径）。 */
-  /** 返回是否真的进入了目录浏览态（失败时调用方不该改动目录栈）。 */
+  /** 返回是否真的进入了目录浏览态（失败时当前路径 / 按钮状态一律不动）。 */
   /** allowFileFallback：目录能列但子文件读不了时，是否弹「目录内多选」选择器。
-   *  「回上层」传 false —— 那种兜底会调 setItems 把目录态清掉，反而让回上层白做。 */
-  private async openFolder(dirUri: string, push: boolean, allowFileFallback?: boolean,
+   *  「往上层」传 false —— 那种兜底会调 setItems 把目录态清掉，反而让往上层白做。 */
+  private async openFolder(dirUri: string, resetView: boolean, allowFileFallback?: boolean,
     isRescan?: boolean): Promise<boolean> {
     if (this.folderBusy) {
       return false; // 上一批还在列，别叠
@@ -3378,7 +3398,11 @@ struct Index {
         others.reverse();
       }
       const rows: ImageItem[] = [];
-      rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+      // 卷 / 硬盘的逻辑最上层没有父级：不列「..」行，目录展示与按钮置灰保持一致。
+      // 判定与 applyItems() 的 canGoUp、browseUp() 的 canUp 同源，都是 canGoUpFrom(base)。
+      if (canGoUpFrom(base)) {
+        rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+      }
       for (let i = 0; i < dirs.length; i++) {
         rows.push(dirs[i]);
       }
@@ -3397,18 +3421,15 @@ struct Index {
       if (needFileFallback) {
         hilog.warn(DOMAIN, TAG, 'openFolder: will offer multi-select, imgs=%{public}d', imgs.length);
       }
-      // 压栈存「真实可列路径」而非原始 uri：回上层时 pop 出来直接能列，
-      // 不必再对 file://docs/... 猜形态。这也是「回上层」以前失效的关键。
-      if (push && this.browseBase.length > 0 && this.browseBase !== base) {
-        this.dirStack.push(this.browseBase);
-      }
+      // 不再压任何「来路」栈：旧实现往上层时 pop 的是浏览历史，不是当前路径的父级，
+      // 连续点击会沿历史绕圈 / 越级。现在只把 base 记为唯一当前路径真值。
       this.browseDir = dirUri;
       this.browseBase = base;
       this.dirMtime = this.tryMtime(base);
       this.startDirPoll();
       // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
       this.applyItems(imgs, dirLabel, '', rows, isRescan === true);
-      if (keepUri.length > 0 && !push) {
+      if (keepUri.length > 0 && !resetView) {
         for (let i = 0; i < imgs.length; i++) {
           if (imgs[i].uri === keepUri) {
             this.cur = i;
@@ -3586,6 +3607,9 @@ struct Index {
         this.chooseFolder();
         break;
       case 'up':
+        // 按钮置灰（canGoUp=false：已到卷根 / 非目录浏览态）时点击也收口到 browseUp()，
+        // 它按 canGoUpFrom 二次校验后只给「没有父级」提示，绝不移动目录。
+        // 按钮 / 退格 / '..' 行三条入口行为因此完全一致。
         this.browseUp();
         break;
       case 'sort':
@@ -3619,122 +3643,102 @@ struct Index {
     }
   }
 
-  /** 回上层目录（Win64 77f7b6b）。
+  /** 往上层：按**目录层级**进入当前路径的直接父级，对齐 Windows 文件管理器的「向上」。
    *
-   *  2026-11-10 现场：`人像/编号202601 模特 猫/` 点「回上层」完全没反应。两个叠加原因：
-   *   ① 旧 dirOf() 不去尾斜杠，picker 给的目录标识常带 `/`，算出来的「父级」其实是
-   *      自己，openFolder 又列了一遍同一个目录 —— 界面看起来原地不动；
-   *   ② picker 的授权是逐 URI 的，祖先目录（人像）常常没授权，单一候选列不出来。
+   *  2026-11-10 语义重写（本次需求）：旧实现是「按浏览历史回退」——
+   *    · 优先弹出浏览历史栈，栈里存的是「进过子目录前的那个目录」，不是当前路径的父级，
+   *      连续点击会沿历史绕圈、越级，而不是逐级上移；
+   *    · 还把 browseBase / browseDir / pickRootUri 三个锚点（可能处在**不同层级**）
+   *      各自算父级再混在一起试，命中哪个全看授权 —— 这就是「越级 / 状态不一致」的来源；
+   *    · 没有「是否仍有父级」的按钮状态，到顶了还会继续弹选择器。
    *
-   *  现在用 parentDirCandidates() 生成「URI 父 / 解码父 / 真实路径父」逐个试，
-   *  命中哪个用哪个；全部失败才拉起定位到父目录的 FOLDER picker 补授权。
-   *  进过子目录时仍优先 pop dirStack，且成功之后才 pop（失败可重试）。 */
+   *  现在只认一个真值：browseBase（openFolder 实测能列目录的真实路径）。
+   *    · upLevelOf() 严格只剥一层，volumeRootOf() 定出卷的逻辑最上层；
+   *    · canGoUpFrom() 同源推导按钮明暗，到卷根返回 false，按钮置灰、点击只给提示；
+   *    · upParentCandidates() 只生成同一父层的不同 URI 写法供逐 URI 授权尝试，
+   *      任何候选都用 sameDirPath 校验落在同一层，杜绝越级与绕圈；
+   *    · 连续点击逐级 L4→L3→L2→L1→L0，到卷根后不再上移；
+   *    · 成功后 openFolder → applyItems 统一刷新当前路径 / 目录展示 / 按钮状态，
+   *      并清掉 pickRootUri 这个与层级无关的旧锚点，三者不可能各说各话。 */
   private async browseUp(): Promise<void> {
     if (this.folderBusy) {
-      this.status = '回上层：上一批目录还在列，稍候再点';
+      this.status = '往上层：上一批目录还在列，稍候再点';
       return;
     }
-    // 三种锚点都拿来推父目录：browseBase 是实测能列的路径，browseDir 保留 picker
-    // 原始 scheme，pickRootUri 在目录态被「目录内多选」清掉后仍记得最初选的目录。
-    const anchors: string[] = [];
-    const seenAnchor: Set<string> = new Set<string>();
-    const addAnchor = (s: string): void => {
-      if (s.length > 0 && !seenAnchor.has(s)) {
-        seenAnchor.add(s);
-        anchors.push(s);
-      }
-    };
-    addAnchor(this.browseBase);
-    addAnchor(this.browseDir);
-    addAnchor(this.pickRootUri);
-    // 一点就把状态写进右下角诊断串：点一下有没有反应、跑的是不是新代码，
-    // 截图即可判断（历史上多次「改了没生效」最后都是装了旧包）。
-    this.diagLine = 'up START | v' + APP_VERSION + ' | anchors=' + anchors.length +
-      ' | base=' + ellipsizeMiddle(this.browseBase, 30) +
-      ' | raw=' + ellipsizeMiddle(this.browseDir, 30);
-    if (anchors.length === 0) {
-      this.status = '当前是文件选择结果，没有上层目录（用「选择文件夹」进入目录浏览）';
-      this.diagLine = 'up | no anchor（非目录浏览态）| v' + APP_VERSION;
+    // 唯一的当前路径：目录浏览态就是实测能列的真实路径；非目录浏览态为空。
+    const current: string = this.browseBase;
+    const level: number = dirLevelOf(current);
+    const root: string = volumeRootOf(current);
+    const target: string = upLevelOf(current);
+    const canUp: boolean = canGoUpFrom(current);
+    // 按钮状态与点击行为同源：点击瞬间就对齐，不需要等异步结果。
+    this.canGoUp = canUp;
+    this.diagLine = 'up START | ' + UP_NAV_TAG + ' | L' + level +
+      '→' + (canUp ? 'L' + dirLevelOf(target) : 'TOP') +
+      ' | can=' + (canUp ? '1' : '0') +
+      ' | cur=' + ellipsizeMiddle(current, 30) +
+      ' | root=' + ellipsizeMiddle(root, 24) + ' | v' + APP_VERSION;
+    if (!canUp || target.length === 0) {
+      // 已到卷 / 硬盘的逻辑最上层，或非目录浏览态：不再上移，也不再弹选择器。
+      this.status = current.length === 0
+        ? '当前是图片列表，没有上层目录（用「选择文件夹」进入目录浏览）'
+        : '已到卷 / 硬盘的逻辑最上层「' + baseName(current) + '」· 没有父级了';
+      this.diagLine = 'up TOP | ' + UP_NAV_TAG + ' | L' + level +
+        ' | root=' + ellipsizeMiddle(root, 24) + ' | can=0 | v' + APP_VERSION;
       return;
     }
-    const primary: string = anchors[0];
-    const norm = (s: string): string => stripTrailingSlash(s);
-    const fromStack: boolean = this.dirStack.length > 0;
-    const parents: string[] = [];
-    const seenParent: Set<string> = new Set<string>();
-    const addParent = (s: string): void => {
-      if (s.length > 0 && !seenParent.has(s)) {
-        seenParent.add(s);
-        parents.push(s);
-      }
-    };
-    if (fromStack) {
-      addParent(this.dirStack[this.dirStack.length - 1]); // 进过子目录：栈里的真实路径最可靠
-    }
-    for (let a = 0; a < anchors.length; a++) {
-      const cands: string[] = parentDirCandidates(anchors[a]);
-      for (let j = 0; j < cands.length; j++) {
-        const p: string = cands[j];
-        if (norm(p) !== norm(anchors[a])) {
-          addParent(p); // 过滤尾斜杠造成的「假父级 = 自己」
-        }
-      }
-    }
-    this.diagLine = 'up | ' + parents.length + ' cands | target=' +
-      (parents.length > 0 ? baseName(parents[0]) : '?') +
-      ' | stack=' + (fromStack ? '1' : '0') + ' | v' + APP_VERSION;
-    let tried: number = 0;
-    let lastTried: string = '';
+    const parents: string[] = upParentCandidates(current,
+      this.browseDir.length > 0 ? this.browseDir : current);
+    const targetName: string = baseName(target);
+    this.status = '往上层 L' + level + '→L' + dirLevelOf(target) + ' → ' + targetName;
+    this.diagLine = 'up | ' + UP_NAV_TAG + ' | L' + level + '→L' + dirLevelOf(target) +
+      ' | ' + parents.length + ' 同层候选 | target=' + targetName +
+      ' | root=' + ellipsizeMiddle(root, 24) + ' | v' + APP_VERSION;
     for (let i = 0; i < parents.length; i++) {
       const parent: string = parents[i];
-      if (parent.length === 0 || norm(parent) === norm(primary)) {
-        continue; // 已到最上层 / 尾斜杠造成的「假父级」= 自己
-      }
-      tried++;
-      lastTried = parent;
-      hilog.info(DOMAIN, TAG, 'browseUp try %{public}s → %{public}s (cand %{public}d/%{public}d)',
-        primary, parent, i + 1, parents.length);
-      this.status = '回上层 ' + (i + 1) + '/' + parents.length + ' → ' + baseName(parent);
-      // openFolder 失败不会覆盖 diagLine，成功会换成新目录的诊断串 —— 正好当进度/结果看
-      this.diagLine = 'up ' + (i + 1) + '/' + parents.length + ' | try=' +
-        ellipsizeMiddle(parent, 46) + ' | 失败原因见状态栏';
+      hilog.info(DOMAIN, TAG, 'browseUp L%{public}d→L%{public}d try %{public}s (cand %{public}d/%{public}d)',
+        level, dirLevelOf(target), parent, i + 1, parents.length);
+      this.status = '往上层 ' + (i + 1) + '/' + parents.length + ' → ' + targetName;
+      this.diagLine = 'up ' + (i + 1) + '/' + parents.length + ' | ' + UP_NAV_TAG +
+        ' | try=' + ellipsizeMiddle(parent, 46) + ' | 失败原因见状态栏';
       // 第三参 false：不再弹「目录内多选」，否则 setItems 会把刚进去的目录态清掉
       const ok: boolean = await this.openFolder(parent, false, false);
       if (ok) {
-        if (fromStack) {
-          this.dirStack.pop();
-        }
-        // 已经真正进入上层目录，旧的「最初选择」锚点作废 —— 否则连续回上层时
-        // 它算出来的父级会指回刚离开的目录，造成「又退回去」的假象。
+        // 旧「最初选择」锚点作废：它指向好几层之前，留着会让下一次往上层越级。
         this.pickRootUri = '';
-        hilog.info(DOMAIN, TAG, 'browseUp OK → %{public}s', this.browseBase);
+        // applyItems 已把 browseBase / browseDir / source / titlePath / canGoUp 一起刷新到父层。
+        this.status = '往上层 → ' + baseName(this.browseBase) +
+          '（L' + dirLevelOf(this.browseBase) + '）· ' +
+          (this.canGoUp ? '还能继续往上层' : '已到卷 / 硬盘的逻辑最上层');
+        this.diagLine = 'up OK | ' + UP_NAV_TAG + ' | L' + dirLevelOf(this.browseBase) +
+          ' | can=' + (this.canGoUp ? '1' : '0') + ' | v' + APP_VERSION;
+        hilog.info(DOMAIN, TAG, 'browseUp OK → %{public}s L%{public}d',
+          this.browseBase, dirLevelOf(this.browseBase));
         return;
       }
     }
-    if (tried === 0) {
-      this.status = '已经是最上层目录 · 可用「选择文件夹」换一个目录';
-      this.diagLine = 'up | no valid parent（候选全等于自身）| v' + APP_VERSION;
-      return;
-    }
-    const targetName: string = baseName(lastTried);
-    this.status = '回上层失败：上级「' + targetName + '」无读取授权 · 已打开目录选择器，请进到「' +
-      targetName + '」确认一次';
-    this.diagLine = 'up FAIL | ' + tried + '/' + parents.length +
-      ' cands all denied | target=' + targetName + ' | need picker auth | v' + APP_VERSION;
-    hilog.warn(DOMAIN, TAG, 'browseUp all parents failed, anchor=%{public}s', primary);
-    // 逐 URI 授权模型下，祖先目录没授权时唯一可靠的补权方式：让用户确认一次。
-    this.chooseFolderAt(targetName);
+    this.status = '往上层失败：上级「' + targetName + '」无读取授权 · 已打开目录选择器，请进到「' +
+      targetName + '」确认一次（只进一层）';
+    this.diagLine = 'up FAIL | ' + UP_NAV_TAG + ' | ' + parents.length +
+      ' cands denied | target=' + targetName + ' | need picker auth | v' + APP_VERSION;
+    hilog.warn(DOMAIN, TAG, 'browseUp all same-level cands failed, current=%{public}s', current);
+    // 逐 URI 授权模型下，父目录没授权时唯一可靠的补权方式：让用户确认一次，
+    // 且只接受恰好一层的父目录（isUpTargetOf 校验），避免补授权时越级。
+    this.chooseFolderAt(targetName, target, current);
   }
 
-  /** 回上层时祖先目录没有 URI 授权：拉起 FOLDER picker 补授权。
+  /** 往上层时祖先目录没有 URI 授权：拉起 FOLDER picker 补授权。
    *
    *  ⚠️ 关键修正（2026-11-10 第二次）：`defaultFilePathUri` 必须是**已授权且带 scheme** 的 URI。
    *  旧版把 parents[0] 传进来，而它常是纯文件系统路径 `/storage/.../人像`，或是压根没授权
    *  的父 URI —— DocumentViewPicker 会直接 reject / 忽略定位，兜底选择器等于没弹，
-   *  用户看到的就是「回上层仍然失败」。
+   *  用户看到的就是「往上层仍然失败」。
    *  现在改用**当前目录**的 picker 原始 uri 作起点（一定已授权）：picker 打开就停在当前层，
-   *  用户点一次「上层」进到目标目录再确认，即可拿到授权并真正进入。 */
-  private chooseFolderAt(targetName: string): void {
+   *  用户点一次「上层」进到目标目录再确认，即可拿到授权并真正进入。
+   *  2026-11-10 层级语义补充：target / current 由 upLevelOf() 算出，handle 用
+   *  isUpTargetOf() 校验选中的目录**恰好是那一层父级** —— 用户在选择器里多点几层
+   *  （越级）或原地确认，都不会被接受，从补授权这一环也保证不越级 / 不绕圈。 */
+  private chooseFolderAt(targetName: string, target: string, current: string): void {
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (!ctx) {
@@ -3753,23 +3757,38 @@ struct Index {
       hilog.info(DOMAIN, TAG, 'chooseFolderAt start=%{public}s target=%{public}s', start, targetName);
       const handle = (uris: Array<string>): void => {
         if (!uris || uris.length === 0) {
-          this.status = '已取消（仍停在原目录）· 「回上层」需要一次目录授权';
+          this.status = '已取消（仍停在原目录）· 「往上层」需要一次目录授权';
           return;
         }
-        // 用户可能直接点了「确定」而没进上层：那还是当前目录，别再列一遍造成「没反应」
+        // 只接受「当前路径的直接父级」：原地确认（还是当前目录）与多点几层
+        // （祖父 / 旁支）都拒绝，避免补授权把「往上层」变成越级或绕圈。
         const pickedName: string = baseName(uris[0]);
-        const curName: string = baseName(this.browseBase.length > 0 ? this.browseBase : this.browseDir);
-        if (pickedName.length > 0 && pickedName === curName) {
-          this.status = '选中的还是「' + pickedName + '」· 请在选择器里点「上层」进到「' +
-            targetName + '」再确认';
-          hilog.warn(DOMAIN, TAG, 'chooseFolderAt picked current dir again: %{public}s', uris[0]);
+        const curName: string = baseName(current.length > 0 ? current : this.browseDir);
+        const stillHere: boolean = pickedName.length > 0 && pickedName === curName;
+        // 判定完全交给纯函数，不再额外按「同名 + 同层级」放宽：
+        // 旧 fallback 会把同名同层的旁支目录也放进来，等于给越级 / 绕圈留了口子。
+        // isUpTargetOf() 在能还原真实路径时要求与 upLevelOf(current) 指向同一目录；
+        // 只有完全还原不出路径的文档 URI 碎片才退回「目录名 + 排除当前目录」比对。
+        const exactLevel: boolean = isUpTargetOf(uris[0], current);
+        if (stillHere || !exactLevel) {
+          this.status = stillHere
+            ? '选中的还是「' + pickedName + '」· 请在选择器里点「上层」进到「' +
+              targetName + '」再确认'
+            : '选中的「' + pickedName + '」不是直接上层「' + targetName +
+              '」· 请只点一次「上层」再确认（不接受越级）';
+          hilog.warn(DOMAIN, TAG, 'chooseFolderAt rejected non-parent pick: %{public}s', uris[0]);
           return;
         }
         this.pickRootUri = uris[0];
-        this.dirStack = [];
         this.openFolder(uris[0], false, false).then((ok: boolean) => {
           if (!ok) {
             this.status = '已选择「' + pickedName + '」但列目录失败 · 可再点「选择文件夹」重试';
+          } else {
+            // openFolder → applyItems 已统一刷新路径 / 目录展示 / 按钮状态
+            this.pickRootUri = '';
+            this.status = '往上层 → ' + baseName(this.browseBase) +
+              '（L' + dirLevelOf(this.browseBase) + '）· ' +
+              (this.canGoUp ? '还能继续往上层' : '已到卷 / 硬盘的逻辑最上层');
           }
         });
       };
@@ -3787,16 +3806,16 @@ struct Index {
             dv.select(retry)
               .then((uris: Array<string>) => { handle(uris); })
               .catch((e2: Object) => {
-                this.status = '回上层授权失败：' + JSON.stringify(e2) + ' · 可点「选择文件夹」手动选上级目录';
+                this.status = '往上层授权失败：' + JSON.stringify(e2) + ' · 可点「选择文件夹」手动选上级目录';
                 hilog.error(DOMAIN, TAG, 'chooseFolderAt retry rejected: %{public}s', JSON.stringify(e2));
               });
           } else {
-            this.status = '回上层授权失败：' + JSON.stringify(e) + ' · 可点「选择文件夹」手动选上级目录';
+            this.status = '往上层授权失败：' + JSON.stringify(e) + ' · 可点「选择文件夹」手动选上级目录';
             hilog.error(DOMAIN, TAG, 'chooseFolderAt rejected: %{public}s', JSON.stringify(e));
           }
         });
     } catch (e) {
-      this.status = '回上层授权不可用：' + JSON.stringify(e);
+      this.status = '往上层授权不可用：' + JSON.stringify(e);
     }
   }
 
@@ -3975,7 +3994,7 @@ struct Index {
         break;
       case KeyCode.KEYCODE_DEL:
       case KeyCode.KEYCODE_BACK:
-        // 退格 = 回上层目录（Win64 77f7b6b）；不在目录浏览态时给一句提示
+        // 退格 = 往上层目录（Win64 77f7b6b）；不在目录浏览态时给一句提示
         this.browseUp();
         break;
       case KeyCode.KEYCODE_F11:
@@ -3997,18 +4016,22 @@ struct Index {
   // UI 片段
   // ------------------------------------------------------------------
 
+  /** enabled=false 只做视觉置灰，不引入 .enabled()：置灰态点击仍会走 doAction →
+   *  browseUp() 的同源 guard，给出「已到顶层 / 没有父级」提示而不会移动目录，
+   *  比点了完全没反应更好排查。三个按钮共用，只有「往上层」传 canGoUp。 */
   @Builder
-  toolBtn(label: string, act: string, flex: boolean) {
+  toolBtn(label: string, act: string, flex: boolean, enabled: boolean) {
     Button(label)
       .type(ButtonType.Normal)
       .fontSize(12)
-      .fontColor('#e8ecf4')
-      .backgroundColor('#2a2f3a')
+      .fontColor(enabled ? '#e8ecf4' : '#6b7280')
+      .backgroundColor(enabled ? '#2a2f3a' : '#20242c')
       .borderRadius(6)
       .height(30)
       .padding({ left: 10, right: 10 })
       .margin(3)
       .layoutWeight(flex ? 1 : 0)
+      .opacity(enabled ? 1.0 : 0.45)
       .onClick(() => this.doAction(act))
   }
 
@@ -4128,7 +4151,7 @@ struct Index {
 
       // 11-10 起按用户要求彻底移除「选择图片」与「回到上次」两个按钮及其入口；
       // 顶栏其余按钮（全屏 / 幻灯片）与事件保持不变。
-      this.toolBtn('全屏', 'full', false)
+      this.toolBtn('全屏', 'full', false, true)
       Button(this.playing ? '暂停' : '幻灯片')
         .type(ButtonType.Normal)
         .fontSize(13)
@@ -4174,14 +4197,15 @@ struct Index {
             .width('100%')
             .padding({ left: 12, right: 12, top: 10, bottom: 8 })
 
-            // 11-10 起：排序 / 回上层 / 选择文件夹 三个按钮水平排在同一行。
+            // 11-10 起：排序 / 往上层 / 选择文件夹 三个按钮水平排在同一行。
             // toolBtn 的 layoutWeight(1) 三等分宽度 → 水平间距由统一的 margin(3) 决定，一致；
             // 统一 height(30) + Row 垂直居中 → 垂直对齐整齐；
             // 合并掉原来的第二行后，按钮区不再有多余垂直空白，也不会重叠 / 错位。
             Row() {
-              this.toolBtn(this.sortAsc ? '排序 ↑' : '排序 ↓', 'sort', true)
-              this.toolBtn('回上层', 'up', true)
-              this.toolBtn('选择文件夹', 'folder', true)
+              this.toolBtn(this.sortAsc ? '排序 ↑' : '排序 ↓', 'sort', true, true)
+              // canGoUp 由 applyItems() 与当前路径同源刷新：有父级亮、到卷根 / 非目录态灰。
+              this.toolBtn('往上层', 'up', true, this.canGoUp)
+              this.toolBtn('选择文件夹', 'folder', true, true)
             }
             .width('100%')
             .alignItems(VerticalAlign.Center)

@@ -6,11 +6,12 @@
  * 覆盖 2026-11-10 报出的缺陷：选择
  *   /storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像
  * 时左栏抬头空白。同时覆盖中文、%XX 编码、file://docs 文档 URI、
- * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底。
+ * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底，
+ * 以及「往上层」按目录层级逐级上行（不按浏览历史、不越级、不循环、到卷根停止）。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
@@ -83,7 +84,7 @@ for (const [label, base, raw, candidates, expected] of labelCases) {
 check('dirDisplayName 结果恒非空',
   dirDisplayName('', '', []).length > 0, true);
 
-console.log('--- parentDirOf(): 回上层的父目录（尾斜杠 / 中文 / 文档 URI） ---');
+console.log('--- parentDirOf(): 往上层的基础父目录（尾斜杠 / 中文 / 文档 URI） ---');
 const CHILD = `${ROOT}/人像/编号202601 模特 猫`;
 const PARENT = `${ROOT}/人像`;
 check('现场路径：多级中文 + 空格 → 人像', parentDirOf(CHILD), PARENT);
@@ -100,7 +101,7 @@ check('空串 → 空串', parentDirOf(''), '');
 check('文档 URI 碎片不算路径', realPathOf('file://docs'), '');
 check('父结果恒不等于自身', parentDirOf(`${CHILD}/`) === stripTrailingSlash(`${CHILD}/`), false);
 
-console.log('--- parentDirCandidates(): 回上层逐个尝试的候选 ---');
+console.log('--- parentDirCandidates(): 往上层逐个尝试的候选（旧版遗留工具） ---');
 const cands = parentDirCandidates(`file://docs${CHILD}/`);
 check('文档 URI 候选数 >= 2', cands.length >= 2, true);
 check('首选保留 URI 形态', cands[0], `file://docs${PARENT}`);
@@ -154,8 +155,8 @@ check('不再有「选择图片」toolBtn', /toolBtn\('选择图片'/.test(INDEX
 check('不再有「回到上次」toolBtn', /toolBtn\('回到上次'/.test(INDEX), false);
 check('doAction 无 files 分支', /case 'files':/.test(INDEX), false);
 check('doAction 无 resume 分支', /case 'resume':/.test(INDEX), false);
-check('三个按钮合并在同一行',
-  /toolBtn\('回上层', 'up', true\)\s*this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), true);
+check('三个按钮合并在同一行，且「往上层」绑定 canGoUp',
+  /toolBtn\('往上层', 'up', true, this\.canGoUp\)[\s\S]{0,220}toolBtn\('选择文件夹', 'folder', true, true\)/.test(INDEX), true);
 check('按钮区不再有原来的第二行',
   /bottom: 4 \}\)\s*Row\(\) \{\s*this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), false);
 check('左栏宽度改用自适应 listW',
@@ -258,6 +259,141 @@ check('点击行时释放持有者',
   /\.onClick\(\(\) => \{[\s\S]{0,320}HoverGuard\.shared\(\)\.release/.test(INDEX), true);
 check('hover 回调仍不触碰选中态 / 列表 / 目录',
   /this\.onTap\(|applyItems\(|openFolder\(|this\.cur =/.test(HOVER_FN), false);
+
+console.log('--- 「往上层」目录层级：卷根 / 严格逐级 / 到顶停止 ---');
+const DEEP = `${ROOT}/人像/编号202601 模特 猫`;
+const VOLROOT = '/storage/Users/currentUser';
+check('鸿蒙用户卷根', volumeRootOf(DEEP), VOLROOT);
+check('Windows 盘符卷根', volumeRootOf('C:/Users/foo/Pictures/2020'), 'C:');
+check('Windows 盘符根自身仍是卷根（到顶不判空）', volumeRootOf('C:'), 'C:');
+check('通用 POSIX 卷根', volumeRootOf('/a/b/c'), '/');
+check('文档 URI 归到同一卷根', volumeRootOf(`file://docs${DEEP}/`), VOLROOT);
+check('碎片 URI 判不出卷根', volumeRootOf('file://docs'), '');
+check('现场路径层级 L4', dirLevelOf(DEEP), 4);
+check('卷根层级 L0', dirLevelOf(VOLROOT), 0);
+check('尾斜杠不改变层级', dirLevelOf(`${DEEP}/`), 4);
+check('只剥一层 → 人像', upLevelOf(DEEP), `${ROOT}/人像`);
+check('尾斜杠（旧缺陷）仍只剥一层', upLevelOf(`${DEEP}/`), `${ROOT}/人像`);
+check('%XX 文档 URI 形态同样只剥一层',
+  upLevelOf(`file://docs${ROOT}/%E4%BA%BA%E5%83%8F/%E7%BC%96%E5%8F%B7202601%20%E6%A8%A1%E7%89%B9%20%E7%8C%AB/`),
+  `${ROOT}/人像`);
+check('父结果绝不等于自身', upLevelOf(`${DEEP}/`) === stripTrailingSlash(`${DEEP}/`), false);
+check('卷根没有父级', upLevelOf(VOLROOT), '');
+check('Windows 盘符根没有父级', upLevelOf('C:'), '');
+check('文件系统根没有父级', upLevelOf('/'), '');
+check('空路径没有父级', upLevelOf(''), '');
+check('canGoUpFrom 与 upLevelOf 同源（有父级）', canGoUpFrom(DEEP), upLevelOf(DEEP).length > 0);
+check('canGoUpFrom 与 upLevelOf 同源（卷根）', canGoUpFrom(VOLROOT), false);
+check('非目录态空路径按钮置灰', canGoUpFrom(''), false);
+
+// 连续点击模拟：每一步严格 L-1，遇到重复路径即判定为「绕圈」。
+function climb(path) {
+  const out = [path];
+  const seen = new Set([stripTrailingSlash(hierPathOf(path))]);
+  let cur = path;
+  for (let i = 0; i < 32; i++) {
+    const next = upLevelOf(cur);
+    if (next.length === 0) {
+      break;
+    }
+    const key = stripTrailingSlash(hierPathOf(next));
+    if (seen.has(key)) {
+      return { out, loop: true };
+    }
+    seen.add(key);
+    out.push(next);
+    cur = next;
+  }
+  return { out, loop: false };
+}
+const cOhos = climb(DEEP);
+check('鸿蒙现场路径连续点击 L4→L3→L2→L1→L0',
+  cOhos.out.map((p) => dirLevelOf(p)).join('>'), '4>3>2>1>0');
+check('鸿蒙逐级链无循环', cOhos.loop, false);
+check('鸿蒙逐级链终点就是卷根', cOhos.out[cOhos.out.length - 1], VOLROOT);
+check('鸿蒙逐级链每步严格只少一层（不越级）', (() => {
+  for (let i = 1; i < cOhos.out.length; i++) {
+    if (dirLevelOf(cOhos.out[i]) !== dirLevelOf(cOhos.out[i - 1]) - 1) {
+      return false;
+    }
+  }
+  return true;
+})(), true);
+check('到卷根后按钮状态 false', canGoUpFrom(cOhos.out[cOhos.out.length - 1]), false);
+check('到卷根后再点也不上移', upLevelOf(cOhos.out[cOhos.out.length - 1]), '');
+
+const cWin = climb('C:/Users/foo/Pictures/2020');
+check('Windows 逐级链', cWin.out.join('>'),
+  'C:/Users/foo/Pictures/2020>C:/Users/foo/Pictures>C:/Users/foo>C:/Users>C:');
+check('Windows 逐级链无循环', cWin.loop, false);
+check('Windows 到盘符根停止（不再往「此电脑」）', canGoUpFrom(cWin.out[cWin.out.length - 1]), false);
+check('Windows 每步只少一层', (() => {
+  for (let i = 1; i < cWin.out.length; i++) {
+    if (dirLevelOf(cWin.out[i]) !== dirLevelOf(cWin.out[i - 1]) - 1) {
+      return false;
+    }
+  }
+  return true;
+})(), true);
+
+const cPosix = climb('/a/b/c');
+check('POSIX 逐级链', cPosix.out.join('>'), '/a/b/c>/a/b>/a>/');
+check('POSIX 逐级链无循环', cPosix.loop, false);
+check('POSIX 到根停止', canGoUpFrom(cPosix.out[cPosix.out.length - 1]), false);
+
+console.log('--- upParentCandidates(): 候选必须全在同一父层（不越级 / 不循环） ---');
+const ups = upParentCandidates(DEEP, `file://docs${DEEP}/`);
+const TARGET = upLevelOf(DEEP);
+check('候选非空', ups.length > 0, true);
+check('候选全部落在同一父层', ups.every((u) => sameDirPath(u, TARGET)), true);
+check('候选不含当前目录自身', ups.some((u) => sameDirPath(u, DEEP)), false);
+check('候选不含祖父层', ups.some((u) => sameDirPath(u, ROOT)), false);
+check('候选不含旁支目录', ups.some((u) => sameDirPath(u, `${ROOT}/人像/别的文件夹`)), false);
+check('候选含真实路径目标（fs.listFile 兜底）', ups.includes(TARGET), true);
+check('候选已去重', new Set(ups).size, ups.length);
+check('卷根无候选', upParentCandidates(VOLROOT, `file://docs${VOLROOT}/`).length, 0);
+check('非目录态空路径无候选', upParentCandidates('', '').length, 0);
+
+console.log('--- sameDirPath() / isUpTargetOf(): 补授权只接受直接父级 ---');
+check('sameDirPath 认文档 URI 与真实路径', sameDirPath(`file://docs${TARGET}/`, TARGET), true);
+check('sameDirPath 认尾斜杠', sameDirPath(`${TARGET}/`, TARGET), true);
+check('sameDirPath 拒绝不同目录', sameDirPath(`${TARGET}/子`, TARGET), false);
+check('sameDirPath 空串不算同一目录', sameDirPath('', ''), false);
+check('接受真实路径父目录', isUpTargetOf(TARGET, DEEP), true);
+check('接受文档 URI 形态的父目录', isUpTargetOf(`file://docs${TARGET}/`, DEEP), true);
+check('接受 %XX 编码父目录', isUpTargetOf(`file://docs${ROOT}/%E4%BA%BA%E5%83%8F/`, DEEP), true);
+check('拒绝当前目录自身（原地确认）', isUpTargetOf(DEEP, DEEP), false);
+check('拒绝祖父级（越级）', isUpTargetOf(ROOT, DEEP), false);
+check('拒绝旁支目录', isUpTargetOf(`${ROOT}/别的目录`, DEEP), false);
+check('拒绝同名同层旁支（旧 fallback 漏洞）', isUpTargetOf(`${ROOT}/别的父/人像`, DEEP), false);
+check('卷根一律拒绝', isUpTargetOf(TARGET, VOLROOT), false);
+check('空选中拒绝', isUpTargetOf('', DEEP), false);
+
+console.log('--- 源码静态契约：「往上层」目录层级语义（2026-11-10） ---');
+check('按钮文案统一为「往上层」', /toolBtn\('往上层', 'up',/.test(INDEX), true);
+check('源码不再出现「回上层」', /回上层/.test(INDEX), false);
+check('按钮状态绑定 canGoUp', /toolBtn\('往上层', 'up', true, this\.canGoUp\)/.test(INDEX), true);
+check('toolBtn 增加 enabled 形参', /toolBtn\(label: string, act: string, flex: boolean, enabled: boolean\)/.test(INDEX), true);
+check('置灰用明暗色 + opacity（不依赖新组件属性）',
+  /\.fontColor\(enabled \?/.test(INDEX) && /\.opacity\(enabled \? 1\.0 : 0\.45\)/.test(INDEX), true);
+check('源码不再有浏览历史栈 dirStack', /dirStack/.test(INDEX), false);
+check('openFolder 参数改名 resetView（无压栈语义）', /resetView: boolean/.test(INDEX), true);
+check('applyItems 同源刷新 canGoUp', /this\.canGoUp = canGoUpFrom\(this\.browseBase\)/.test(INDEX), true);
+const UP_FN = INDEX.slice(INDEX.indexOf('private async browseUp('), INDEX.indexOf('private chooseFolderAt('));
+check('browseUp 用 upLevelOf 求直接父级', /const target: string = upLevelOf\(current\)/.test(UP_FN), true);
+check('browseUp 用 canGoUpFrom 同源判定', /const canUp: boolean = canGoUpFrom\(current\)/.test(UP_FN), true);
+check('browseUp 到顶立即 return，不再弹选择器', /if \(!canUp \|\| target\.length === 0\)/.test(UP_FN), true);
+check('browseUp 不再 pop 浏览历史', /\.pop\(/.test(UP_FN), false);
+check('browseUp 候选只用同层 upParentCandidates', /upParentCandidates\(current,/.test(UP_FN), true);
+check('成功后清掉 pickRootUri 旧锚点', /this\.pickRootUri = '';/.test(UP_FN), true);
+check('顶层不列 .. 行（目录展示与按钮一致）',
+  /if \(canGoUpFrom\(base\)\) \{\s*rows\.push\(\{ uri: '', name: '\.\.'/.test(INDEX), true);
+check('补授权只认 isUpTargetOf', /const exactLevel: boolean = isUpTargetOf\(uris\[0\], current\);/.test(INDEX), true);
+check('补授权不再按「同名 + 层级」放宽', /pickedName === targetName && dirLevelOf/.test(INDEX), false);
+check('按钮 / 退格 / .. 行三条入口都收口 browseUp',
+  (INDEX.match(/this\.browseUp\(\)/g) || []).length >= 3, true);
+check('诊断串标记 up4（辨认新包，不升版本号）', /const UP_NAV_TAG: string = 'up4'/.test(INDEX), true);
+check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
