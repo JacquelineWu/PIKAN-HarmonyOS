@@ -9,6 +9,7 @@
  * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf } from '../entry/src/main/ets/common/DirName.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
@@ -115,6 +116,20 @@ check('带 ? 参数与尾斜杠', pickerStartOf(`${RAW_DIR}?mode=r`, ''), `file:
 check('纯文件系统路径不给 picker（旧版缺陷）', pickerStartOf(PARENT, CHILD), '');
 check('两者都是纯路径时返回空串 → 不设 defaultFilePathUri', pickerStartOf('', ''), '');
 check('绝不返回未授权的父目录', pickerStartOf(RAW_DIR, '') === PARENT, false);
+
+// 这部分不是纯函数，而是对 Index.ets 的源码静态契约：
+// 「全是子文件夹、零图片的目录（人像）不能显示空白」是 UI 分支决定的，
+// 编译不了 HAP 时至少要保证这段分支不被改回去。
+console.log('--- 源码静态契约：零图片目录仍要列出目录表 ---');
+const INDEX = readFileSync(new URL('../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
+check('空态判断用 rowCount（左栏实际行数）', /if \(this\.rowCount === 0\)/.test(INDEX), true);
+check('不再用 itemCount 判空态（itemCount 只算图片）', /if \(this\.itemCount === 0\)/.test(INDEX), false);
+check('applyItems 同步 rowCount', /this\.rowCount = this\.rows\.length/.test(INDEX), true);
+check('零图片目录设置 dirHint 提示条', /this\.dirHint = '本层没有图片/.test(INDEX), true);
+check('statSync 失败的无后缀项按文件夹列出', /else if \(!statOk\)/.test(INDEX), true);
+check('无授权兜底不再 return false 吞掉目录表',
+  /this\.chooseFilesInDir\(dirUri\);\s*return false;/.test(INDEX), false);
+check('兜底改为末尾在目录表建立之后触发', /if \(needFileFallback\)/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

@@ -510,6 +510,39 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 选择文件夹后「零图片目录」显示空白（2026-11-10 修复）
+
+现象：选择 `/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像` 后左栏一片空白。
+该目录下全是「编号202601 模特 猫」这样的**子文件夹、没有一张图片**。
+期望：像 Win64 文件浏览器一样，**不管有没有照片，都要把目录表列出来**。
+
+根因是三个叠加，全部在显示/分支层，不是目录读取失败：
+
+| # | 原因 | 后果 |
+|---|---|---|
+| ① | 左栏 `build()` 用 `if (this.itemCount === 0)` 判空态，而 `itemCount` **只统计图片数**（`applyItems` 里 = `imgs.length`） | 零图片目录被整块换成「还没有图片」提示，`rows`（含 `..` 和所有子文件夹）**一行都不渲染** → 全白 |
+| ② | 逐 URI 授权下 `fs.statSync(child)` 常失败，子文件夹拿不到 `isDirectory()` | 名字不带图片后缀 → 全被归为 `ROW_OTHER` 灰行，显示「不支持预览」且**点不进去**，等于没有目录表 |
+| ③ | 「能列目录但子文件读不了」时 `openFolder()` 直接 `chooseFilesInDir()` + `return false` | 目录态根本不建立（`applyItems` 没执行），用户取消多选后左栏依然是空白 |
+
+| 改动 | 说明 |
+|---|---|
+| 新增 `@State rowCount`（= `this.rows.length`） | `applyItems()` 里与 `itemCount` 同步赋值；`build()` 空态判断改为 `if (this.rowCount === 0)`。**零图片但有子文件夹时列表照常渲染** |
+| 新增 `@State dirHint` | 零图片目录在列表上方显示「本层没有图片 · N 个子文件夹（点名称进入）」，右侧空态同步提示「点左侧文件夹进入子目录」；`setItems()`（非目录态）清空 |
+| `openFolder()` 分类增加 `statOk` | `statSync` 失败且名字不带图片后缀时按 `ROW_FOLDER` 列出，子文件夹可点击进入；`statSync` 成功时仍按真实 `isDirectory()` 判断，行为不变 |
+| 兜底不再 `return false` | 改为 `needFileFallback` 标记：**先建立目录态并 `applyItems()` 列出目录表，末尾再弹多选选择器**。取消多选 → 目录表还在；全选确认 → 换成图片列表。既保留「读不出图片」的补救，又不吞掉目录表 |
+| 状态栏 | 零图片时明确写「本层没有图片 · N 个子文件夹」；日志补 `rows=%{public}d` 便于核对 |
+
+> 取舍：`statSync` 失败时，无图片后缀的项一律按文件夹列出。若目录里真有无后缀的普通文件，
+> 会被显示成文件夹、点进去提示「无法列出该目录」——比原来「不支持预览」灰行更可操作，
+> 且不会影响已能正常 `stat` 的目录。
+
+**回归保护**：`tests/dirname.test.mjs` 末尾新增「源码静态契约」7 例，断言空态判断用
+`rowCount`、不再用 `itemCount`、`rowCount` 在 `applyItems` 同步、`dirHint` 存在、
+`statOk` 分支存在、兜底不再 `return false`。`node --experimental-strip-types tests/dirname.test.mjs`
+**59/59 通过**，括号配平通过。
+
+> 按 11-10 约定**未编译 HAP、未放桌面、未升版本**（仍 1.0.7），请在 DevEco Studio 里编译后实机确认。
+
 ## 回上层「仍然失败」二次修复（2026-11-10，接上节）
 
 上节修完后实机点「回上层」仍无反应。复查整条链路（按钮绑定 → `browseUp` → `openFolder` → 授权兜底）后，

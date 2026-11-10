@@ -1032,6 +1032,12 @@ struct Index {
   private rescanTimer: number = -1;         // 变动后去抖重扫句柄
   private folderBusy: boolean = false;      // 防止导航连点 / 重扫叠加重入
   @State itemCount: number = 0;
+  /** 左栏实际行数（含「..」/ 子文件夹 / 灰行），与 itemCount（只算图片）分开。
+   *  判空态必须用 rowCount：像「人像」这种全是子文件夹、零图片的目录，
+   *  itemCount=0 但 rows 有内容，旧版会整块换成「还没有图片」空态 → 目录表全白。 */
+  @State rowCount: number = 0;
+  /** 目录态零图片时的一行说明，显示在列表上方，避免用户以为又是空白 / 出错。 */
+  @State dirHint: string = '';
   @State source: string = '尚未打开';
   @State cur: number = -1;          // 当前选中索引；-1 表示空
   /** 当前浏览目录的完整路径（Win64 07c1eee：搬到标题栏）。鸿蒙没有 setWindowTitle，
@@ -1689,6 +1695,7 @@ struct Index {
     this.browseBase = '';
     this.dirStack = [];
     this.diagLine = ''; // 回到图库 / 多选态，别再挂旧目录的诊断串
+    this.dirHint = '';  // 非目录态不显示「本层没有图片」提示条
     if (this.dirPollTimer !== -1) {
       clearInterval(this.dirPollTimer);
       this.dirPollTimer = -1;
@@ -1724,9 +1731,13 @@ struct Index {
       this.rows = rows;
     } else {
       this.rows = list; // 非目录态：左栏行就是图片序列本身
+      // 有路径直接调 applyItems() 而不经 setItems()（如快照恢复），
+      // 这里兜底清掉目录提示条，避免图库态还挂着「本层没有图片」。
+      this.dirHint = '';
     }
     this.source = src;
     this.itemCount = list.length;
+    this.rowCount = this.rows.length;
     this.dataSource.reload(this.rows);
     // 标题栏路径：目录浏览态用当前目录；否则取首批 uri 的父目录
     // 目录态优先显示真实路径（原始 uri 常是 file://docs/... 或 %XX 编码，读起来像乱码）
@@ -3187,19 +3198,26 @@ struct Index {
         let size: number = -1;
         let mtime: number = 0;
         let isDir: boolean = false;
+        let statOk: boolean = false;
         try {
           const st: fs.Stat = fs.statSync(child);
           size = st.size;
           mtime = st.mtime;
           isDir = st.isDirectory();
+          statOk = true;
         } catch (e) {
-          // 单条 stat 失败不拖垮整批：当成不支持预览的文件列出
+          // 单条 stat 失败不拖垮整批：逐 URI 授权下这是常态，见下方分类
         }
         const shown: string = repairMojibake(raw);
         if (isDir) {
           dirs.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_FOLDER, itemIndex: -1 });
         } else if (isImageName(raw)) {
           imgs.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_IMAGE, itemIndex: -1 });
+        } else if (!statOk) {
+          // statSync 拿不到（子项没授权）且名字不带图片后缀：「人像」目录下的
+          // 「编号202601 模特 猫」这类子文件夹全落在这里。按文件夹列出，
+          // 目录表才不会变成一排点不进去的灰行（点名称即可继续进入）。
+          dirs.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_FOLDER, itemIndex: -1 });
         } else {
           others.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_OTHER, itemIndex: -1 });
         }
@@ -3225,15 +3243,13 @@ struct Index {
       for (let i = 0; i < others.length; i++) {
         rows.push(others[i]);
       }
-      // 兜底：目录能列、图片也在，但子文件一个都打不开 —— picker 的目录授权是逐 URI 的，
-      // 拼出来的子路径没权限。这时别给用户留一屏空白，直接开一个「以该目录为起点」的
-      // 文件多选选择器，Ctrl+A 全选即可看图（每个选中文件都单独授权，解码一定成功）。
-      // ⚠️ 早退前绝不改 browseDir / browseBase / dirStack：此刻并没有真的进入目录浏览态。
-      if (imgs.length > 0 && !childReadable && allowFileFallback !== false) {
-        this.status = '目录 ' + dirLabel + '：子文件无读取授权 · 已打开文件选择器，请全选图片';
-        hilog.warn(DOMAIN, TAG, 'openFolder: fallback to multi-select, imgs=%{public}d', imgs.length);
-        this.chooseFilesInDir(dirUri);
-        return false;
+      // 兜底：目录能列、图片也在，但子文件一个都打不开 —— picker 的目录授权是逐 URI 的。
+      // ⚠️ 这里**绝不能 return false / 提前退出**：那会让目录表根本不渲染，用户看到一屏空白。
+      // 改成先照常建立目录态并列出 rows，末尾再弹「以该目录为起点」的文件多选选择器；
+      // 用户取消多选时目录表仍在，全选确认则换成图片列表（两个需求都能满足）。
+      const needFileFallback: boolean = imgs.length > 0 && !childReadable && allowFileFallback !== false;
+      if (needFileFallback) {
+        hilog.warn(DOMAIN, TAG, 'openFolder: will offer multi-select, imgs=%{public}d', imgs.length);
       }
       // 压栈存「真实可列路径」而非原始 uri：回上层时 pop 出来直接能列，
       // 不必再对 file://docs/... 猜形态。这也是「回上层」以前失效的关键。
@@ -3257,19 +3273,29 @@ struct Index {
       }
       this.refreshSpread();
       if (imgs.length === 0) {
-        // 回上层常落在「全是子文件夹、本层零图片」的目录（例如百度网盘根目录），
-        // 明确告诉用户去点文件夹，别让他以为又白屏了。
+        // 全是子文件夹、本层零图片（例如「人像」）：目录表照常列出，
+        // 左栏再加一条提示条，别让用户以为又白屏了。
+        this.dirHint = '本层没有图片 · ' + dirs.length + ' 个子文件夹（点名称进入）';
         this.status = '目录 ' + dirLabel + '：本层没有图片 · ' + dirs.length +
           ' 个子文件夹（点文件夹进入）· 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
-        hilog.warn(DOMAIN, TAG, 'openFolder: 0 images among %{public}d entries', names.length);
+        hilog.warn(DOMAIN, TAG, 'openFolder: 0 images among %{public}d entries, rows=%{public}d',
+          names.length, rows.length);
       } else if (!childReadable) {
+        this.dirHint = '';
         this.status = '目录 ' + dirLabel + '：' + imgs.length + ' 张（子文件无读取授权，仅列目录）· ' +
           dirs.length + ' 个子文件夹';
       } else {
+        this.dirHint = '';
         this.status = '目录 ' + dirLabel + '：' + imgs.length + ' 张可预览 · ' +
           dirs.length + ' 个子文件夹';
       }
-      hilog.info(DOMAIN, TAG, 'openFolder done: %{public}d imgs, base=%{public}s', imgs.length, base);
+      if (needFileFallback) {
+        // 目录表已经显示出来了，再弹多选：取消 → 目录表还在；全选 → 换成图片列表
+        this.status = '目录 ' + dirLabel + '：子文件无读取授权 · 目录表已列出，另开选择器全选图片可看图';
+        this.chooseFilesInDir(dirUri);
+      }
+      hilog.info(DOMAIN, TAG, 'openFolder done: %{public}d imgs, %{public}d rows, base=%{public}s',
+        imgs.length, rows.length, base);
       return true;
     } finally {
       this.folderBusy = false;
@@ -3993,7 +4019,21 @@ struct Index {
             .padding({ left: 6, right: 6, bottom: 6 })
             .border({ width: { bottom: 1 }, color: '#2a2f3a' })
 
-            if (this.itemCount === 0) {
+            // 目录里零图片但有一堆子文件夹时，列表照常渲染，只是在上面补一行说明，
+            // 别让用户把「本层没有图片」误看成「又空白了」。
+            if (this.dirHint.length > 0 && this.rowCount > 0) {
+              Text(this.dirHint)
+                .fontSize(11)
+                .fontColor('#8b95a8')
+                .width('100%')
+                .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+                .backgroundColor('#1c212a')
+            }
+
+            // ⚠️ 判空态用 rowCount（左栏实际行数），不能用 itemCount（只算图片）：
+            // 「人像」这类全是子文件夹、零图片的目录 itemCount=0 但 rows 有内容，
+            // 旧版会整块换成「还没有图片」空态，目录表一行都不显示。
+            if (this.rowCount === 0) {
               Column() {
                 Text('还没有图片')
                   .fontSize(13)
@@ -4112,6 +4152,13 @@ struct Index {
               Text('🖼')
                 .fontSize(64)
                 .fontColor('#2a2f3a')
+              if (this.dirHint.length > 0) {
+                // 目录表已在左栏列出，右侧别让用户以为程序没读到东西
+                Text('本层没有图片 · 点左侧文件夹进入子目录')
+                  .fontSize(13)
+                  .fontColor('#8b95a8')
+                  .margin({ top: 12 })
+              }
               Text('滚轮切换上一张 / 下一张')
                 .fontSize(13)
                 .fontColor('#5a6272')
