@@ -2,16 +2,17 @@
  * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）
  *
  * 布局（ACDSee 风格）：
- *   · 顶栏：标题 + 当前文件名 + 「打开图库 / 选择图片 / 回到上次」+ 幻灯片
- *   · 左侧：图像档案列表（缩略图 + 文件名 + 体积），可滚动、点击切换
+ *   · 顶栏：标题 + 当前文件名 + 「选择图片 / 回到上次」+ 幻灯片
+ *            （11-10 起按用户要求取消「打开图库」按钮）
+ *   · 左侧：图像档案列表（悬停缩略图 + 文件名 + 体积 + 日期），可滚动、点击切换
  *   · 右侧：大图预览（GPU 合成渲染），悬浮信息层 + 缩放角标
  *   · 底栏：状态栏
  *
  * 图片来源：
- *   · 打开图库 —— 默认载入「图库内全部图片」，不用逐张勾选。
- *                  优先 getAssets 全量扫描（零交互）→ 失败用上次会话 uri 快照（零交互）
- *                  → 再失败才回退系统选择器 PhotoViewPicker（免权限，但上限 500 张）
- *   · 选择图片 —— DocumentViewPicker，任意文件 / 文件夹
+ *   · 选择图片 —— DocumentViewPicker，任意文件 / 文件夹（主要挑图入口）
+ *   · 选择文件夹 —— DocumentViewPicker FOLDER，浏览目录（含中文 / 多级路径）
+ *   · 回到上次 —— 恢复上次列表与位置；内部仍复用 getAssets 全量扫描 / uri 快照，
+ *                  但「打开图库」不再作为独立入口，见 openGallery() 上的停用说明
  *
  * 关键能力：
  *   · HEIC / JPG / PNG / WEBP / BMP / GIF 解码 —— 走鸿蒙系统 Image 解码器（系统 codec）
@@ -55,7 +56,7 @@ const DOMAIN = 0x0000;
 
 /** 版本号（与 AppScope/app.json5 的 versionName 保持一致），用于窗口标题栏。
  *  Win64 版 3ea7419 起标题栏带版本号；鸿蒙没有「读取程序集版本」的等价物，故用常量。 */
-const APP_VERSION: string = '1.0.5';
+const APP_VERSION: string = '1.0.6';
 /** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
  *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
 const CANVAS_BG: string = '#5F5F5F';
@@ -91,23 +92,25 @@ const MIN_SCALE: number = 0.05;
 const MAX_SCALE: number = 16.0;
 const SLIDE_INTERVAL: number = 3000;
 
-/** 图库选择器 maxSelectNumber 的系统上限（官方：最大 500，默认 50） */
+/** 图库选择器 maxSelectNumber 的系统上限（官方：最大 500，默认 50）。
+ *  仅供已停用的 openPicker() 使用；「打开图库」按钮取消后不会再触发。 */
 const PICKER_MAX: number = 500;
-/** 「打开图库」每次都弹系统选择器让用户重新挑（true），还是先试免交互的全量扫描（false）。
+/** 【已停用入口】原「打开图库」每次都弹系统选择器让用户重新挑（true），还是先试免交互的全量扫描（false）。
  *
  *  默认 **true**：用户要的就是「点一下就能重新挑要走哪些图」。原来那套「先静默全量扫描 →
  *  再用快照恢复 → 再申请受限权限 → 最后才弹选择器」的降级链，实际效果常常是**根本弹不出
  *  选择器**（快照一命中就直接用旧列表顶替了），而且中间夹着一次 requestPermissionsFromUser，
  *  紧接着拉起选择器容易互相干扰。
  *
- *  改成 true 之后：点「打开图库」= 直接进图库界面勾选，行为可预期。
+ *  改成 true 之后：点原「打开图库」= 直接进图库界面勾选，行为可预期。
  *  想回到「零交互载入全部」那套（需先在 AGC 申请到 READ_IMAGEVIDEO 并配置正式签名），
  *  把它改回 false。 */
 const GALLERY_ALWAYS_PICK: boolean = true;
-/** 弹哪个选择器当「打开图库」：
+/** 【已停用入口】原「打开图库」弹哪个选择器：
  *  true  = 系统图库选择器 PhotoViewPicker（界面就是图库，免权限、可多选、上限 500）
  *  false = 文件选择器 DocumentViewPicker + 图片后缀过滤（PC/2in1 上更稳，但要自己走到图片目录）
- *  若你机器上 PhotoViewPicker 打开后**图片选不了**，把它改成 false 立刻可用，其余逻辑不变。 */
+ *  若你机器上 PhotoViewPicker 打开后**图片选不了**，把它改成 false 立刻可用，其余逻辑不变。
+ *  该入口现已取消，此常量只影响停用的 openPicker()，主要挑图入口是「选择图片」。 */
 const GALLERY_USE_PHOTO_PICKER: boolean = true;
 /** 直接扫描图库时的安全上限，避免超大图库一次性吃满内存 */
 const SCAN_CAP: number = 20000;
@@ -585,11 +588,11 @@ const SNAP_CHUNK: number = 600;
  *
  *  默认 **false**：启动阶段主线程要忙首帧渲染、窗口初始化，此时再去读快照、甚至跑一次
  *  全量图库扫描，极易被 watchdog 判定为 APP_INPUT_BLOCK（实测就是这么冻住的 8 秒）。
- *  关掉之后启动只读几个小 key（毫秒级），恢复动作留给用户主动点「打开图库」/「回到上次」——
+ *  关掉之后启动只读几个小 key（毫秒级），恢复动作留给用户主动点「回到上次」——
  *  那时 applyItems → restoreIndex 依然会自动落回上次那张，功能没丢，只是不在启动时抢主线程。
  *
  *  另外：关掉它**不等于**启动时什么都不干 —— 见 warmLast()，那张「上次成功显示的图」
- *  会在后台单独解好等着，用户点开图库时首屏直接命中缓存。
+ *  会在后台单独解好等着，用户挑图 / 回到上次时首屏直接命中缓存。
  *  想要「一打开就自动回到上次图」就把它改回 true（大图库下有 ANR 风险）。 */
 const AUTO_RESUME_ON_START: boolean = false;
 const SNAP_KEY_COUNT: string = 'snapCount';
@@ -1065,7 +1068,7 @@ struct Index {
 
   // ---- 交互 ----
   @State playing: boolean = false;
-  @State status: string = '点顶栏「打开图库」在图库里挑图，或「选择图片」挑文件';
+  @State status: string = '点顶栏「选择图片」挑文件，或「选择文件夹」浏览目录';
   /** 全屏（沉浸）模式：隐藏顶栏 / 左侧档案栏 / 状态栏，画布铺满整个窗口。
    *  做的是「应用内隐藏 UI」，不调 window 全屏接口 —— 不依赖窗口权限，也不会踩系统 API 差异。 */
   @State fullscreen: boolean = false;
@@ -1113,9 +1116,9 @@ struct Index {
   private snapDirty: boolean = false;                   // 图片列表变了（换源）→ 下次写盘时顺带存快照
   private okUri: string = '';                           // 最后一次「成功显示」的 uri（下次启动预热它）
   /** 本次运行是否已经弹过「读取图库」权限申请。
-   *  只弹一次：权限一旦被拒，再点「打开图库」不该反复弹同一个框。 */
+   *  只弹一次：权限一旦被拒，恢复列表时不该反复弹同一个框。 */
   private permAsked: boolean = false;
-  /** 系统选择器是否正开着。连点「打开图库」会叠出两个选择器，后开的那个常常就是点不动的那个 */
+  /** 系统选择器是否正开着。连点会叠出两个选择器，后开的那个常常就是点不动的那个 */
   private pickerBusy: boolean = false;
   private snapChunks: number = 0;                       // 已写入快照的块数（换源后块数变少时清旧块）
   /** 空态区的一行提示（「上次看到 …」）。必须是 @State：它是异步读回来的，要靠它刷新 UI。
@@ -1233,7 +1236,7 @@ struct Index {
   /** 启动时读回上次位置。
    *
    *  只有「上次来自图库全部」才会自动重新扫描并跳回原处 —— 因为全量扫描不需要用户交互；
-   *  而「打开图库 / 选择图片」都是系统选择器，程序无权替用户操作，只能提示用户点一下。
+   *  而「选择图片」是系统选择器，程序无权替用户操作，只能提示用户点一下。
    *  静默扫描失败（多半是没有受控权限）时不弹任何窗，只留一句状态栏提示。
    *
    *  值类型说明：preferences.get 返回的是 ValueType 联合类型，ArkTS 下必须逐个
@@ -1284,9 +1287,9 @@ struct Index {
           this.trySnapRestore();
         }
       } else {
-        // 启动时只记位置、不做重活。用户点「打开图库」/「回到上次」时才真正恢复
+        // 启动时只记位置、不做重活。用户点「回到上次」时才真正恢复
         // （见 AUTO_RESUME_ON_START 注释：启动时读快照 + 重扫会触发 APP_INPUT_BLOCK）。
-        this.status = '上次看到「' + saved.name + '」第 ' + (saved.idx + 1) + ' 张 · 点「打开图库」或「回到上次」自动跳回';
+        this.status = '上次看到「' + saved.name + '」第 ' + (saved.idx + 1) + ' 张 · 点「回到上次」自动跳回';
       }
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'readLastPos failed: %{public}s', JSON.stringify(e));
@@ -1298,7 +1301,7 @@ struct Index {
    *  为什么这是安全的（对比把它做成「启动时自动恢复」）：
    *  只读 1 个小 key、只解 1 张 768px 的图、且推迟 WARM_DELAY_MS 让开首帧 ——
    *  不做全量重扫、不读快照，也就不会触发此前那种 PreferencesGetValue 卡死。
-   *  用户点「打开图库」时 applyItems 会把它接进缓存，showPreviewOf 命中 → 首屏立刻出图，
+   *  用户点「选择图片」/「回到上次」时 applyItems 会把它接进缓存，showPreviewOf 命中 → 首屏立刻出图，
    *  不必再等一次低清解码（这是打开大图库时「先黑一下」的主要来源）。 */
   private warmLast(uri: string): void {
     setTimeout(() => {
@@ -1475,7 +1478,7 @@ struct Index {
   }
 
   /** 用上次会话的 uri 快照重建列表（顺序与上次一致，随后 restoreIndex 会精确落到上次那张）。
-   *  返回 false 表示没有可用快照。不要求当前列表为空 —— 「打开图库」也复用它。 */
+   *  返回 false 表示没有可用快照。不要求当前列表为空 —— 「回到上次」也复用它。 */
   private async restoreFromSnapshot(): Promise<boolean> {
     try {
       const store: preferences.Preferences | undefined = await this.posStore();
@@ -1532,7 +1535,7 @@ struct Index {
       return;
     }
     if (p.src === SRC_ALL) {
-      this.status = '正在重新打开图库…';
+      this.status = '正在恢复上次列表…';
       this.loadAllGallery(); // 失败时内部会退到快照恢复
       return;
     }
@@ -1683,7 +1686,7 @@ struct Index {
    *  对齐 Win64：过滤 . 开头的隐藏文件，并按自然序排序（IMG_2 排在 IMG_10 前）。 */
   private setItems(uris: Array<string>, src: string): void {
     hilog.info(DOMAIN, TAG, 'setItems: %{public}d uris from %{public}s', uris.length, src);
-    // 从目录浏览切回「打开图库 / 选择图片」：必须清掉目录态。
+    // 从目录浏览切回「选择图片」/ 快照恢复：必须清掉目录态。
     // 否则 startDirPoll 每 1.5s 还在盯旧目录，一旦 mtime 变化就会把用户刚选的图
     // 重新覆盖掉；标题栏也会继续挂着上一个目录的路径。
     this.browseDir = '';
@@ -2190,7 +2193,11 @@ struct Index {
   // 打开图片来源
   // ------------------------------------------------------------------
 
-  /** 顶栏「打开图库」：默认即「图库内全部图片」，不要求用户逐张勾选。
+  /** 【已停用】原顶栏「打开图库」的处理链。
+   *  11-10 起按用户要求取消该按钮，doAction 的 'gallery' 分支与 toolBtn 一并移除。
+   *  方法本体保留但不再接任何 UI 入口：它内部的 scanAll / restoreFromSnapshot /
+   *  选择器兜底，与「回到上次」(loadAllGallery → queryAllPhotos → scanAll) 是同一套能力，
+   *  若以后要恢复入口，把 toolBtn 和 doAction 分支加回来即可，不必重写。
    *
    *  为什么不能直接拉起系统选择器：选择器的语义就是「让用户挑几张」，
    *  没有「全选」接口，而且官方把 maxSelectNumber 卡在 500 —— 图库上千张时选不全。
@@ -2208,7 +2215,7 @@ struct Index {
   private async openGallery(): Promise<void> {
     if (GALLERY_ALWAYS_PICK) {
       // 直接进图库界面勾选：不扫描、不读快照、不申请权限 —— 点一下就是「重新挑」
-      this.status = '正在打开图库选择器…（可多选，上限 ' + PICKER_MAX + ' 张）';
+      this.status = '正在打开图片选择器…（可多选，上限 ' + PICKER_MAX + ' 张）';
       await this.openPicker();
       return;
     }
@@ -2326,7 +2333,7 @@ struct Index {
 
   /** 试着全量扫描图库。成功返回 true（列表已载入）；失败返回 false —— 不弹窗、不改状态栏。
    *
-   *  单独抽出来，是为了让「打开图库」能先静默试一次：拿到了就用（零交互），
+   *  单独抽出来，是为了让原「打开图库」能先静默试一次（现由「回到上次」复用）：拿到了就用（零交互），
    *  拿不到再决定要不要申请权限、要不要退到选择器。
    *
    *  用 DataShare 谓词在「数据库层」完成过滤与排序，避免把全量数据拉进内存再筛。
@@ -3395,9 +3402,6 @@ struct Index {
       case 'play':
         this.toggleSlide();
         break;
-      case 'gallery':
-        this.openGallery();
-        break;
       case 'files':
         this.openFiles();
         break;
@@ -3782,7 +3786,7 @@ struct Index {
   // ------------------------------------------------------------------
 
   /** 顶栏：非全屏时常驻；全屏时由 Stack 以绝对定位浮层复用同一份 Builder（见 build）。
-   *  「打开图库 / 选择图片 / 回到上次」三个挑图入口是用户明确要求保留的，不随 Win64 对齐删掉。 */
+   *  保留「选择图片 / 回到上次」两个入口；「打开图库」按钮已于 11-10 按用户要求取消。 */
   @Builder
   topBar() {
     Row() {
@@ -3802,7 +3806,6 @@ struct Index {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
 
-      this.toolBtn('打开图库', 'gallery', false)
       this.toolBtn('选择图片', 'files', false)
       this.toolBtn('回到上次', 'resume', false)
       this.toolBtn('全屏', 'full', false)
@@ -3878,7 +3881,7 @@ struct Index {
                     .textAlign(TextAlign.Center)
                     .margin({ bottom: 6 })
                 }
-                Text('点顶栏「打开图库」在图库里挑图，或「选择图片」挑文件')
+                Text('点顶栏「选择图片」挑文件，或「选择文件夹」浏览目录')
                   .fontSize(11)
                   .fontColor('#5a6272')
                   .textAlign(TextAlign.Center)
