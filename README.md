@@ -25,7 +25,7 @@
 |---|---|
 | 格式 | HEIC / HEIF / JPG / JPEG / PNG / WEBP / BMP / GIF，走鸿蒙系统解码器 |
 | 挑图入口 | `打开图库`（每次弹系统 `PhotoViewPicker` 重新挑）/ `选择图片`（`DocumentViewPicker`，默认 `*.*`）/ `回到上次` |
-| 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `回上层` / `退格` 回上级（**含直接从选中目录上溯一级**，不必先钻进子目录）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
+| 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `回上层` / `退格` 回上级（**含直接从选中目录上溯一级**，不必先钻进子目录）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
 | 左栏 | 文件浏览器三栏（档案名 / 字节 / 日期），**自然序**排序（`IMG_2` 在 `IMG_10` 前）、`排序 ↑ / ↓` 切方向；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
@@ -109,12 +109,14 @@ PIKAN-HarmonyOS/
 │   └── src/main/
 │       ├── module.json5                   deviceTypes: tablet / 2in1
 │       ├── ets/
+│       │   ├── common/DirName.ts          文件名 / 目录名纯函数（不依赖 SDK，可被 Node 直接测）
 │       │   ├── entryability/EntryAbility.ets
 │       │   └── pages/Index.ets            全部 UI 与交互逻辑（ACDSee 布局 + 滚轮翻页）
 │       └── resources/
 │           ├── base/element/              string.json / color.json
 │           ├── base/media/app_icon.png
 │           └── base/profile/main_pages.json
+├── tests/dirname.test.mjs                 目录名显示回归测试（29 例，直接 import 源码）
 ├── hvigor/hvigor-config.json5
 ├── build-profile.json5                    工程级：signingConfigs 留空（IDE 自动补全）
 ├── hvigorfile.ts
@@ -510,6 +512,66 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 目录名显示缺陷：左栏抬头空白（2026-11-10 修复）
+
+复现：选择文件夹 `/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像`
+（或同类中文 / 多级路径）后，**左栏抬头的目录名为空白**，期望显示「人像」。
+
+### 根因
+
+左栏抬头是 `Text(this.source)`，值来自 `openFolder()` 里的
+`applyItems(imgs, baseName(base), '', rows)`。而旧 `baseName()` 是：
+
+    const i = s.lastIndexOf('/');
+    return i >= 0 ? s.substring(i + 1) : s;
+
+`DocumentViewPicker(FOLDER)` 返回的目录标识**常带尾部斜杠**（`.../人像/`），
+`lastIndexOf('/')` 正好落在最后一个字符，`substring(i + 1)` 返回 `''` —— 抬头就整条空白。
+中文目录名还可能被 `%XX` 编码、套 `file://docs` 文档 URI、后面带 `?` 参数，
+旧实现一样处理不了，显示成乱码串或直接缺失。
+
+`人像` 这类目录又恰好**只有子文件夹、本层零图片**：`probeChild()` 找不到图片可抽查，
+`base` 会退到 `fallbackBase`（第一个能 `listFile` 的候选，往往是原始 URI），
+把上面几种形态全叠在一起，缺陷必现。
+
+### 修法
+
+| 改动 | 作用 |
+|---|---|
+| 新增 `common/DirName.ts` | 把 `baseName` / `dirDisplayName` / `stripTrailingSlash` 抽成不依赖 SDK 的纯函数，集中修、可直接用 Node 测 |
+| `stripTrailingSlash()` | 去 `?` 参数与 1~N 个尾部斜杠，保留根 `/` 与 scheme 的 `//` |
+| `baseName()` | 去尾斜杠 → 安全 `decodeURIComponent` → 取末段；末段为空退回整串，最终兜底「（未命名）」，**恒不返回空串**；普通文件名行为不变 |
+| `dirDisplayName(base, raw, candidates)` | 在实测 base、picker 原始 uri、其它候选里逐个取末段，跳过 `file://docs` 碎片与仍是 `%XX` 的串，挑第一个可读目录名；全失败兜底「目录」 |
+| `openFolder()` 统一用 `dirLabel` | 左栏抬头 `source` 与三处状态栏文案全部改用同一个 `dirDisplayName()` 结果，中文 / 编码 / 多级路径都显示正确 |
+| `joinBase` 规范化 | 拼 child 前 `stripTrailingSlash(base)`，避免 `.../人像//xxx` 让 `fs.statSync` 认不出子目录（顺带修好子目录被误列成灰色「不支持预览」行） |
+| `hilog` 打点 | `openFolder dirLabel=... base=... raw=...`，实机一眼能核对系统到底给了什么形态 |
+
+**刻意保持不变**：`dirCandidates()` 的候选生成与挑选顺序、`probeChild()` 的判据、
+`rows / items` 结构、`itemIndex` 单向挂钩、`selected` 选中状态、列表点击 / 双击 /
+悬停交互、三栏样式与配色，全部未动。本次只改「显示名怎么算」和「拼 child 时去掉尾斜杠」。
+
+### 回归测试（直接跑源码，不是复制实现）
+
+纯函数在 `.ts` 模块里，Node 24 可直接 type-strip 加载：
+
+```sh
+node --experimental-strip-types tests/dirname.test.mjs
+```
+
+29 条用例，覆盖：
+
+- 现场路径 `/.../人像`、带尾斜杠 `.../人像/`、双尾斜杠 `.../人像//`；
+- `file://docs` 文档 URI + `%E4%BA%BA%E5%83%8F` 编码 + `?` 参数；
+- 多级中文路径 `.../人像/编号202601 模特 猫/`、中文 + 空格、纯 ASCII `DCIM`、顶层 `/人像/`；
+- 普通文件名不受影响、字面 `%` 不误伤、空串 / 根 `/` 兜底非空；
+- `dirDisplayName()` 多候选择优、URI 碎片靠 candidates 救回、全失败兜底。
+
+结果：`ALL PASS  29 passed, 0 failed`；`devecocli build`：`BUILD SUCCESSFUL`，
+33 tasks 全量重编，**0 ERROR**（仍是既有 7 条 WARN）。
+
+实机若仍有异常，抓 `openFolder dirLabel=` 一行即可定位：
+`hilog | grep HeicViewer`。
 
 ## 「选择文件夹」读不出图片（2026-11-09 修复）
 

@@ -46,6 +46,7 @@ import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
+import { baseName, dirDisplayName, stripTrailingSlash } from '../common/DirName';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -281,16 +282,9 @@ function fmtBytes(n: number): string {
   return (n / 1024 / 1024).toFixed(2) + ' MB';
 }
 
-/** 从 uri / 路径里抠出文件名 */
-function baseName(path: string): string {
-  let s = path;
-  const q = s.indexOf('?');
-  if (q >= 0) {
-    s = s.substring(0, q);
-  }
-  const i = s.lastIndexOf('/');
-  return i >= 0 ? s.substring(i + 1) : s;
-}
+/* baseName / dirDisplayName / stripTrailingSlash 统一放在 common/DirName.ts。
+ * 旧 baseName 遇到「带尾部斜杠的目录 URI」会返回空串，让左栏抬头整条空白；
+ * 抽成不依赖 SDK 的纯函数后，也能用 tests/dirname.test.mjs 直接跑回归。 */
 
 /** DocumentViewPicker(FOLDER) 返回的目录标识，在不同设备 / 系统版本上形态并不统一：
  *    · `file://docs/...` 这类「文档 URI」——`fs.listFile` 往往不接受；
@@ -3142,6 +3136,15 @@ struct Index {
       if (names.length > 0) {
         hilog.info(DOMAIN, TAG, 'openFolder base=%{public}s first=%{public}s', base, names[0]);
       }
+      // 左栏抬头 / 状态栏统一用的目录名。base 可能是带尾斜杠的文档 URI 或 %XX 编码串，
+      // 旧 baseName(base) 会返回空 → Text(this.source) 整条空白（「人像」目录实测）。
+      // dirDisplayName 在 base / 原始 uri / 其它候选里挑可读且非空的那个，恒不为空。
+      const dirLabel: string = dirDisplayName(base, dirUri, candidates);
+      // 拼接 child 前先去掉尾斜杠：base 自带 '/' 时会拼出 '.../人像//xxx'，
+      // statSync 认不出来，子目录会被误列成「不支持预览」灰行。
+      const joinBase: string = stripTrailingSlash(base);
+      hilog.info(DOMAIN, TAG, 'openFolder dirLabel=%{public}s base=%{public}s raw=%{public}s',
+        dirLabel, base, dirUri);
       const imgs: ImageItem[] = [];
       const dirs: ImageItem[] = [];
       const others: ImageItem[] = [];
@@ -3151,7 +3154,7 @@ struct Index {
           continue;
         }
         // names 里通常只是文件名；某些实现直接给完整路径 / URI，就别再拼一次
-        const child: string = raw.indexOf('/') >= 0 ? raw : base + '/' + raw;
+        const child: string = raw.indexOf('/') >= 0 ? raw : joinBase + '/' + raw;
         let size: number = -1;
         let mtime: number = 0;
         let isDir: boolean = false;
@@ -3198,7 +3201,7 @@ struct Index {
       // 文件多选选择器，Ctrl+A 全选即可看图（每个选中文件都单独授权，解码一定成功）。
       // ⚠️ 早退前绝不改 browseDir / browseBase / dirStack：此刻并没有真的进入目录浏览态。
       if (imgs.length > 0 && !childReadable) {
-        this.status = '目录 ' + baseName(base) + '：子文件无读取授权 · 已打开文件选择器，请全选图片';
+        this.status = '目录 ' + dirLabel + '：子文件无读取授权 · 已打开文件选择器，请全选图片';
         hilog.warn(DOMAIN, TAG, 'openFolder: fallback to multi-select, imgs=%{public}d', imgs.length);
         this.chooseFilesInDir(dirUri);
         return false;
@@ -3213,7 +3216,7 @@ struct Index {
       this.dirMtime = this.tryMtime(base);
       this.startDirPoll();
       // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
-      this.applyItems(imgs, baseName(base), '', rows);
+      this.applyItems(imgs, dirLabel, '', rows);
       if (keepUri.length > 0 && !push) {
         for (let i = 0; i < imgs.length; i++) {
           if (imgs[i].uri === keepUri) {
@@ -3227,11 +3230,11 @@ struct Index {
       if (imgs.length === 0) {
         // 回上层常落在「全是子文件夹、本层零图片」的目录（例如百度网盘根目录），
         // 明确告诉用户去点文件夹，别让他以为又白屏了。
-        this.status = '目录 ' + baseName(base) + '：本层没有图片 · ' + dirs.length +
+        this.status = '目录 ' + dirLabel + '：本层没有图片 · ' + dirs.length +
           ' 个子文件夹（点文件夹进入）· 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
         hilog.warn(DOMAIN, TAG, 'openFolder: 0 images among %{public}d entries', names.length);
       } else {
-        this.status = '目录 ' + baseName(base) + '：' + imgs.length + ' 张可预览 · ' +
+        this.status = '目录 ' + dirLabel + '：' + imgs.length + ' 张可预览 · ' +
           dirs.length + ' 个子文件夹';
       }
       hilog.info(DOMAIN, TAG, 'openFolder done: %{public}d imgs, base=%{public}s', imgs.length, base);
@@ -3250,7 +3253,7 @@ struct Index {
       if (n.length === 0 || n.charAt(0) === '.' || !isImageName(n)) {
         continue;
       }
-      const child: string = n.indexOf('/') >= 0 ? n : base + '/' + n;
+      const child: string = n.indexOf('/') >= 0 ? n : stripTrailingSlash(base) + '/' + n;
       try {
         const f: fs.File = fs.openSync(child, fs.OpenMode.READ_ONLY);
         fs.closeSync(f);
