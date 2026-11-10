@@ -55,7 +55,7 @@ const DOMAIN = 0x0000;
 
 /** 版本号（与 AppScope/app.json5 的 versionName 保持一致），用于窗口标题栏。
  *  Win64 版 3ea7419 起标题栏带版本号；鸿蒙没有「读取程序集版本」的等价物，故用常量。 */
-const APP_VERSION: string = '1.0.4';
+const APP_VERSION: string = '1.0.5';
 /** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
  *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
 const CANVAS_BG: string = '#5F5F5F';
@@ -848,6 +848,9 @@ struct ArchiveRow {
       this.hoverPx = undefined;
       return;
     }
+    if (this.showHover) {
+      return; // onMouse 的 Move 会连续派发，别重复排队 384px 解码
+    }
     this.showHover = true;
     const hit: image.PixelMap | undefined = ThumbLoader.hover().peek(this.uri);
     if (hit !== undefined) {
@@ -944,6 +947,14 @@ struct ArchiveRow {
     // 触发面积大得多，PC 上更好按（用户反馈「要 mouse over 才显示」）。
     .onHover((isHover: boolean) => {
       this.onHoverChange(isHover);
+    })
+    // 2in1 兜底：部分设备 onHover 不派发浮层事件，但 onMouse 一定到
+    // （滚轮翻页 / 左右键就走这条通道）。SDK 26 明确 MouseAction.Hover
+    // 「has no effect」，所以这里只认 Move；收起仍由 onHover(false) / 点击 / 离屏负责。
+    .onMouse((event: MouseEvent) => {
+      if (event.action === MouseAction.Move) {
+        this.onHoverChange(true);
+      }
     })
     .bindPopup(this.showHover, {
       builder: () => { this.hoverThumb(); },
@@ -1119,6 +1130,10 @@ struct Index {
    *  只在「入缓存 / 淘汰 / 清空」三个口子上 sync 一次给 UI —— 频率最多几十次/轮，够看又不抖。 */
   @State cacheCount: number = 0;
   @State cacheBytes: number = 0;
+  /** 目录浏览诊断行：把「装的是哪一版 + picker 实际返回的 uri 形态」画在屏幕上。
+   *  之前四次修复共用 versionCode 4 / 1.0.4，实机无法分辨装的是旧包还是新包；
+   *  而 agent 侧截不到屏、读不到 hilog，只能靠这一行让用户截图带回来。 */
+  @State diagLine: string = '';
   private preloadSeq: number = 0;                     // 预载任务代号，切换图片时自增使旧链作废
   private preloadBusy: boolean = false;
   // ↓↓ 排查用计数器：只喂给 hilog，不参与任何逻辑判断。定位完可整块删掉。
@@ -1674,6 +1689,7 @@ struct Index {
     this.browseDir = '';
     this.browseBase = '';
     this.dirStack = [];
+    this.diagLine = ''; // 回到图库 / 多选态，别再挂旧目录的诊断串
     if (this.dirPollTimer !== -1) {
       clearInterval(this.dirPollTimer);
       this.dirPollTimer = -1;
@@ -3145,6 +3161,12 @@ struct Index {
       const joinBase: string = stripTrailingSlash(base);
       hilog.info(DOMAIN, TAG, 'openFolder dirLabel=%{public}s base=%{public}s raw=%{public}s',
         dirLabel, base, dirUri);
+      // 屏幕上留一份可截图的诊断快照：版本号用来分辨新旧包，raw/base 用来核对
+      // picker 到底给了什么形态（file://docs / %XX / 尾斜杠），dirLabel 是最终显示名。
+      // 只在目录浏览态显示，不挤状态栏（状态栏是单行 Ellipsis，末尾会被截掉）。
+      this.diagLine = 'v' + APP_VERSION + ' | dir=' + dirLabel +
+        ' | raw=' + ellipsizeMiddle(dirUri, 42) +
+        ' | base=' + ellipsizeMiddle(base, 42);
       const imgs: ImageItem[] = [];
       const dirs: ImageItem[] = [];
       const others: ImageItem[] = [];
@@ -3821,7 +3843,8 @@ struct Index {
                 .fontWeight(FontWeight.Bold)
                 .fontColor('#dfe5ef')
                 .layoutWeight(1)
-              Text(this.itemCount > 0 ? (this.itemCount + ' 张') : '')
+              // 版本标记常驻左栏抬头：即使顶栏被自动隐藏，截图也能一眼分辨新旧包
+              Text('v' + APP_VERSION + (this.itemCount > 0 ? ' · ' + this.itemCount + ' 张' : ''))
                 .fontSize(12)
                 .fontColor('#7f88a3')
             }
@@ -4033,8 +4056,22 @@ struct Index {
           .padding(12)
           .hitTestBehavior(HitTestMode.Transparent)
 
-          // 右下角角标：缓存账目 + 缩放倍率
+          // 右下角角标：目录诊断 + 缓存账目 + 缩放倍率
           Column() {
+            // 目录浏览态的诊断快照（非目录态为空，完全不显示）。
+            // 用户实机反馈「左栏修复没生效」时，截一张图就能带上这三组信息。
+            if (this.diagLine.length > 0) {
+              Text(this.diagLine)
+                .fontSize(10)
+                .fontColor('#9aa5b8')
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .constraintSize({ maxWidth: 420 })
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .backgroundColor('#cc12161c')
+                .borderRadius(4)
+                .margin({ bottom: 6 })
+            }
             // 缓存：驻留张数 / 估算占用（圆括号里是张数上限与字节上限，便于看窗口是否填满）
             Row() {
               Text('缓存 ' + this.cacheCount + ' / ' + PRELOAD_COUNT + ' 张')

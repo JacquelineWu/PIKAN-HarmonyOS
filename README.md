@@ -513,6 +513,32 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 版本可辨识 + 目录诊断上屏（2026-11-10，v1.0.5）
+
+用户实机反馈「刚修的左列表问题还没有 fix」。排查后确认**源码与 HAP 都是对的**
+（解包 `ets/modules.abc` 能命中 `dirDisplayName` / `stripTrailingSlash` / `读取预览` /
+`dirLabel` / `browseUp` / `chooseFilesInDir`），但存在一个真实的交付缺陷：
+
+> 11-04 起四次修复（全量对齐、目录 URI、回上层 + 缩略图、目录名）**全部共用
+> `versionCode 4 / 1.0.4`**。`bm install -p` 覆盖同版本包时可能被 BMS 跳过，
+> 界面上也**没有任何东西能分辨装的是哪一版**——用户看到的很可能仍是旧包。
+
+| 改动 | 作用 |
+|---|---|
+| `versionCode 5` / `versionName 1.0.5` | 覆盖安装必然被当作升级接受；`APP_VERSION` 同步，顶栏显示 `PIKAN 1.0.5` |
+| 左栏抬头常驻 `v1.0.5` | 顶栏自动隐藏时也能从截图分辨新旧包（只改文字，不动控件与样式） |
+| `@State diagLine` | 目录浏览态把 `v1.0.5 \| dir=<显示名> \| raw=<picker 原始 uri> \| base=<实测路径>` 画在右下角角标；非目录态为空不显示 |
+| `install-PIKAN.sh` 打印包内 `versionName` | 终端里就能对照「装的哪个版本」与「界面显示哪个版本」 |
+| hover 加 `onMouse(Move)` 兜底 | 2in1 上 `onHover` 可能不派发；`onMouse` 是滚轮/点击已在用的可靠通道。SDK 26 的 `MouseAction.Hover` 官方标注 *has no effect*，故只认 `Move`；并加 `showHover` guard 防重复排队解码 |
+
+**为什么需要「把诊断画到屏幕上」**：WorkBuddy agent 运行在 uid `20020176`，
+与桌面文件 owner `20001006`、用户终端 `20020101` 不同域，实测
+`hidumper` / `hilog` / `bm` 全部 `Permission denied` 或 `failed to execute your command`，
+机器里也没有 `snapshot_display` / `screencap` / `uitest` 等截屏工具——
+**agent 侧无法截屏、也无法读实机日志**。所以用「一张截图能带全的诊断角标」替代。
+
+`devecocli build`：`BUILD SUCCESSFUL`，0 ERROR；回归测试 29 例仍全通过。
+
 ## 目录名显示缺陷：左栏抬头空白（2026-11-10 修复）
 
 复现：选择文件夹 `/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像`
