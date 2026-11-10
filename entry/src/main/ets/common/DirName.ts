@@ -133,6 +133,25 @@ export function parentDirOf(path: string): string {
  *   ③ 真实文件系统路径的父 —— 落到 `/storage/...` 形态。
  *  每个候选还会被 openFolder() 里的 dirCandidates() 再展开一次，命中哪个用哪个。
  *  绝不包含「自身」（尾斜杠造成的假父级），避免点了回上层却原地不动。 */
+/** 给 DocumentViewPicker.defaultFilePathUri 挑一个安全起点。
+ *
+ *  逐 URI 授权模型下，picker 只认「已经拿到授权、且带 scheme 的 URI」：
+ *   · 传父目录（没授权）→ select() 直接 reject 或忽略定位；
+ *   · 传纯文件系统路径 `/storage/...` → 不是 URI，同样不生效。
+ *  旧版 chooseFolderAt() 把 parents[0]（常是纯路径）当起点，是「回上层仍然失败」的最后一环。
+ *  正确做法：用**当前目录**的 picker 原始 uri 作起点（一定已授权），picker 打开停在这一层，
+ *  用户点一次「上层」再确认即可。找不到带 scheme 的 uri 时返回空串 —— 调用方就不设起点。 */
+export function pickerStartOf(browseDir: string, pickRootUri: string): string {
+  const tries: string[] = [browseDir, pickRootUri];
+  for (let i = 0; i < tries.length; i++) {
+    const s: string = stripTrailingSlash(tries[i]);
+    if (s.indexOf('://') >= 0) {
+      return s;
+    }
+  }
+  return '';
+}
+
 export function parentDirCandidates(path: string): string[] {
   const out: string[] = [];
   const seen: Set<string> = new Set<string>();

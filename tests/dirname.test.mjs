@@ -9,7 +9,7 @@
  * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底。
  */
 import assert from 'node:assert/strict';
-import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf } from '../entry/src/main/ets/common/DirName.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -106,6 +106,15 @@ check('包含真实路径父', cands.includes(PARENT), true);
 check('候选不含自身', cands.includes(stripTrailingSlash(`file://docs${CHILD}/`)), false);
 check('真实路径去重后只有父', parentDirCandidates(`${CHILD}/`).join('|'), PARENT);
 check('根路径不产生假父级', parentDirCandidates('/').join('|'), '/');
+
+console.log('--- pickerStartOf(): FOLDER picker 起点必须已授权且带 scheme ---');
+const RAW_DIR = `file://docs${CHILD}/`;
+check('picker 原始目录 URI 优先', pickerStartOf(RAW_DIR, RAW_DIR), `file://docs${CHILD}`);
+check('browseDir 为空时退回 pickRootUri', pickerStartOf('', RAW_DIR), `file://docs${CHILD}`);
+check('带 ? 参数与尾斜杠', pickerStartOf(`${RAW_DIR}?mode=r`, ''), `file://docs${CHILD}`);
+check('纯文件系统路径不给 picker（旧版缺陷）', pickerStartOf(PARENT, CHILD), '');
+check('两者都是纯路径时返回空串 → 不设 defaultFilePathUri', pickerStartOf('', ''), '');
+check('绝不返回未授权的父目录', pickerStartOf(RAW_DIR, '') === PARENT, false);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

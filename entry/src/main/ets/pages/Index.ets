@@ -47,7 +47,7 @@ import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
-import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates } from '../common/DirName';
+import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates, pickerStartOf } from '../common/DirName';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -3437,7 +3437,8 @@ struct Index {
    *  进过子目录时仍优先 pop dirStack，且成功之后才 pop（失败可重试）。 */
   private async browseUp(): Promise<void> {
     if (this.folderBusy) {
-      return; // 正在列目录，别叠（否则 openFolder 会静默返回，栈却被白弹一次）
+      this.status = '回上层：上一批目录还在列，稍候再点';
+      return;
     }
     // 三种锚点都拿来推父目录：browseBase 是实测能列的路径，browseDir 保留 picker
     // 原始 scheme，pickRootUri 在目录态被「目录内多选」清掉后仍记得最初选的目录。
@@ -3452,8 +3453,14 @@ struct Index {
     addAnchor(this.browseBase);
     addAnchor(this.browseDir);
     addAnchor(this.pickRootUri);
+    // 一点就把状态写进右下角诊断串：点一下有没有反应、跑的是不是新代码，
+    // 截图即可判断（历史上多次「改了没生效」最后都是装了旧包）。
+    this.diagLine = 'up START | v' + APP_VERSION + ' | anchors=' + anchors.length +
+      ' | base=' + ellipsizeMiddle(this.browseBase, 30) +
+      ' | raw=' + ellipsizeMiddle(this.browseDir, 30);
     if (anchors.length === 0) {
       this.status = '当前是文件选择结果，没有上层目录（用「选择文件夹」进入目录浏览）';
+      this.diagLine = 'up | no anchor（非目录浏览态）| v' + APP_VERSION;
       return;
     }
     const primary: string = anchors[0];
@@ -3479,6 +3486,9 @@ struct Index {
         }
       }
     }
+    this.diagLine = 'up | ' + parents.length + ' cands | target=' +
+      (parents.length > 0 ? baseName(parents[0]) : '?') +
+      ' | stack=' + (fromStack ? '1' : '0') + ' | v' + APP_VERSION;
     let tried: number = 0;
     let lastTried: string = '';
     for (let i = 0; i < parents.length; i++) {
@@ -3490,7 +3500,10 @@ struct Index {
       lastTried = parent;
       hilog.info(DOMAIN, TAG, 'browseUp try %{public}s → %{public}s (cand %{public}d/%{public}d)',
         primary, parent, i + 1, parents.length);
-      this.status = '回上层 → ' + baseName(parent);
+      this.status = '回上层 ' + (i + 1) + '/' + parents.length + ' → ' + baseName(parent);
+      // openFolder 失败不会覆盖 diagLine，成功会换成新目录的诊断串 —— 正好当进度/结果看
+      this.diagLine = 'up ' + (i + 1) + '/' + parents.length + ' | try=' +
+        ellipsizeMiddle(parent, 46) + ' | 失败原因见状态栏';
       // 第三参 false：不再弹「目录内多选」，否则 setItems 会把刚进去的目录态清掉
       const ok: boolean = await this.openFolder(parent, false, false);
       if (ok) {
@@ -3506,42 +3519,87 @@ struct Index {
     }
     if (tried === 0) {
       this.status = '已经是最上层目录 · 可用「选择文件夹」换一个目录';
+      this.diagLine = 'up | no valid parent（候选全等于自身）| v' + APP_VERSION;
       return;
     }
-    this.status = '回上层到「' + baseName(lastTried) + '」需要目录授权 · 已打开目录选择器，请确认该文件夹';
+    const targetName: string = baseName(lastTried);
+    this.status = '回上层失败：上级「' + targetName + '」无读取授权 · 已打开目录选择器，请进到「' +
+      targetName + '」确认一次';
+    this.diagLine = 'up FAIL | ' + tried + '/' + parents.length +
+      ' cands all denied | target=' + targetName + ' | need picker auth | v' + APP_VERSION;
     hilog.warn(DOMAIN, TAG, 'browseUp all parents failed, anchor=%{public}s', primary);
     // 逐 URI 授权模型下，祖先目录没授权时唯一可靠的补权方式：让用户确认一次。
-    // 用 parents[0]（URI 形态优先）作 picker 起点，比真实路径更容易被 defaultFilePathUri 接受。
-    this.chooseFolderAt(parents.length > 0 ? parents[0] : lastTried);
+    this.chooseFolderAt(targetName);
   }
 
-  /** 回上层时祖先目录没有 URI 授权：拉起 FOLDER picker 并定位到该父目录。
-   *  用户确认一次即可拿到授权并真正进入（状态栏会先说明为什么会弹选择器）。 */
-  private chooseFolderAt(dirUri: string): void {
+  /** 回上层时祖先目录没有 URI 授权：拉起 FOLDER picker 补授权。
+   *
+   *  ⚠️ 关键修正（2026-11-10 第二次）：`defaultFilePathUri` 必须是**已授权且带 scheme** 的 URI。
+   *  旧版把 parents[0] 传进来，而它常是纯文件系统路径 `/storage/.../人像`，或是压根没授权
+   *  的父 URI —— DocumentViewPicker 会直接 reject / 忽略定位，兜底选择器等于没弹，
+   *  用户看到的就是「回上层仍然失败」。
+   *  现在改用**当前目录**的 picker 原始 uri 作起点（一定已授权）：picker 打开就停在当前层，
+   *  用户点一次「上层」进到目标目录再确认，即可拿到授权并真正进入。 */
+  private chooseFolderAt(targetName: string): void {
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (!ctx) {
         this.status = '无法获取应用上下文';
         return;
       }
+      const start: string = pickerStartOf(this.browseDir, this.pickRootUri);
       const dv = new picker.DocumentViewPicker(ctx);
       const opt = new picker.DocumentSelectOptions();
       opt.selectMode = picker.DocumentSelectMode.FOLDER;
       opt.maxSelectNumber = 1;
-      opt.defaultFilePathUri = dirUri;
-      dv.select(opt)
-        .then((uris: Array<string>) => {
-          if (!uris || uris.length === 0) {
-            this.status = '已取消（仍停在原目录）';
-            return;
+      if (start.length > 0) {
+        opt.defaultFilePathUri = start;  // 已授权，picker 一定能打开并停在当前目录
+      }
+      this.status = '请在选择器里点「上层」进入「' + targetName + '」并确认 · 用于补该目录读取授权';
+      hilog.info(DOMAIN, TAG, 'chooseFolderAt start=%{public}s target=%{public}s', start, targetName);
+      const handle = (uris: Array<string>): void => {
+        if (!uris || uris.length === 0) {
+          this.status = '已取消（仍停在原目录）· 「回上层」需要一次目录授权';
+          return;
+        }
+        // 用户可能直接点了「确定」而没进上层：那还是当前目录，别再列一遍造成「没反应」
+        const pickedName: string = baseName(uris[0]);
+        const curName: string = baseName(this.browseBase.length > 0 ? this.browseBase : this.browseDir);
+        if (pickedName.length > 0 && pickedName === curName) {
+          this.status = '选中的还是「' + pickedName + '」· 请在选择器里点「上层」进到「' +
+            targetName + '」再确认';
+          hilog.warn(DOMAIN, TAG, 'chooseFolderAt picked current dir again: %{public}s', uris[0]);
+          return;
+        }
+        this.pickRootUri = uris[0];
+        this.dirStack = [];
+        this.openFolder(uris[0], false, false).then((ok: boolean) => {
+          if (!ok) {
+            this.status = '已选择「' + pickedName + '」但列目录失败 · 可再点「选择文件夹」重试';
           }
-          this.pickRootUri = uris[0];
-          this.dirStack = [];
-          this.openFolder(uris[0], false, false);
-        })
+        });
+      };
+      dv.select(opt)
+        .then((uris: Array<string>) => { handle(uris); })
         .catch((e: Object) => {
-          this.status = '回上层授权失败：' + JSON.stringify(e) + ' · 可点「选择文件夹」手动选上级目录';
-          hilog.error(DOMAIN, TAG, 'chooseFolderAt rejected: %{public}s', JSON.stringify(e));
+          hilog.warn(DOMAIN, TAG, 'chooseFolderAt with start rejected: %{public}s', JSON.stringify(e));
+          if (start.length > 0) {
+            // FOLDER 模式下 defaultFilePathUri 未必被接受：去掉起点再试一次，
+            // 至少保证选择器能弹出来，用户手动导航到目标目录即可。
+            const retry = new picker.DocumentSelectOptions();
+            retry.selectMode = picker.DocumentSelectMode.FOLDER;
+            retry.maxSelectNumber = 1;
+            this.status = '起点定位不被支持 · 已重开选择器，请手动进到「' + targetName + '」确认';
+            dv.select(retry)
+              .then((uris: Array<string>) => { handle(uris); })
+              .catch((e2: Object) => {
+                this.status = '回上层授权失败：' + JSON.stringify(e2) + ' · 可点「选择文件夹」手动选上级目录';
+                hilog.error(DOMAIN, TAG, 'chooseFolderAt retry rejected: %{public}s', JSON.stringify(e2));
+              });
+          } else {
+            this.status = '回上层授权失败：' + JSON.stringify(e) + ' · 可点「选择文件夹」手动选上级目录';
+            hilog.error(DOMAIN, TAG, 'chooseFolderAt rejected: %{public}s', JSON.stringify(e));
+          }
         });
     } catch (e) {
       this.status = '回上层授权不可用：' + JSON.stringify(e);
