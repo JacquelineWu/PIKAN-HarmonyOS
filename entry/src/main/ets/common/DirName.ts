@@ -87,3 +87,68 @@ export function dirDisplayName(base: string, raw: string, candidates: string[]):
   }
   return '目录';
 }
+
+/** 把 `file://docs/...` 这类文档 URI 还原成真实文件系统路径。
+ *  与 Index.ets 的 dirCandidates() 手工兜底同一口径：
+ *  `file://docs/storage/a/b` → `/storage/a/b`；非 file:// 原样返回（已去尾斜杠 / query）。 */
+export function realPathOf(p: string): string {
+  let s: string = stripTrailingSlash(p);
+  if (s.indexOf('file://') === 0) {
+    const rest: string = s.substring('file://'.length);
+    const slash: number = rest.indexOf('/');
+    if (slash < 0) {
+      return '';         // `file://docs` 这种碎片不是路径，别拿它算父级
+    }
+    s = rest.substring(slash);
+  }
+  return safeDecode(s);
+}
+
+/** 取父目录（真实路径口径）。
+ *
+ *  与旧版 `dirOf()` 的关键差别：**先去 `?` 参数与尾斜杠，再取父级**。
+ *  picker 返回的目录标识常带尾斜杠，旧实现 `lastIndexOf('/')` 落在最后一个字符上，
+ *  `substring(0, i)` 得到的还是自己（只少了一个斜杠）—— 于是「回上层」重新列同一个
+ *  目录，界面看起来完全没反应（2026-11-10 现场：`人像/编号202601 模特 猫/`）。
+ *  已是根 / 解析不出时返回空串，绝不返回自身。 */
+export function parentDirOf(path: string): string {
+  const s: string = realPathOf(path);
+  if (s.length === 0 || s === '/') {
+    return '';         // 已是根，没有父级
+  }
+  const i: number = s.lastIndexOf('/');
+  if (i < 0) {
+    return '';
+  }
+  let parent: string = s.substring(0, i);
+  if (parent.length === 0) {
+    parent = '/';
+  }
+  return stripTrailingSlash(parent);
+}
+
+/** 回上层时逐个尝试的父目录候选（按优先级，去重）：
+ *   ① 保留原始 scheme / 编码的父 URI —— picker 授权是按 URI 发的，这一形态最可能仍有效；
+ *   ② 解码后的父 URI —— 中文与 `%20` 空格目录名能读；
+ *   ③ 真实文件系统路径的父 —— 落到 `/storage/...` 形态。
+ *  每个候选还会被 openFolder() 里的 dirCandidates() 再展开一次，命中哪个用哪个。
+ *  绝不包含「自身」（尾斜杠造成的假父级），避免点了回上层却原地不动。 */
+export function parentDirCandidates(path: string): string[] {
+  const out: string[] = [];
+  const seen: Set<string> = new Set<string>();
+  const add = (s: string): void => {
+    if (s.length > 0 && !seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
+  };
+  const s: string = stripTrailingSlash(path);
+  const i: number = s.lastIndexOf('/');
+  if (i >= 0) {
+    const p: string = s.substring(0, i).length > 0 ? s.substring(0, i) : '/';
+    add(p);
+    add(safeDecode(p));
+  }
+  add(parentDirOf(path));
+  return out;
+}

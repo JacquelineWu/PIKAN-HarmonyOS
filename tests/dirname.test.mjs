@@ -9,7 +9,7 @@
  * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底。
  */
 import assert from 'node:assert/strict';
-import { baseName, dirDisplayName, stripTrailingSlash } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates } from '../entry/src/main/ets/common/DirName.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -80,6 +80,32 @@ for (const [label, base, raw, candidates, expected] of labelCases) {
 }
 check('dirDisplayName 结果恒非空',
   dirDisplayName('', '', []).length > 0, true);
+
+console.log('--- parentDirOf(): 回上层的父目录（尾斜杠 / 中文 / 文档 URI） ---');
+const CHILD = `${ROOT}/人像/编号202601 模特 猫`;
+const PARENT = `${ROOT}/人像`;
+check('现场路径：多级中文 + 空格 → 人像', parentDirOf(CHILD), PARENT);
+check('现场路径 + 尾斜杠（原始缺陷，旧 dirOf 返回自身）', parentDirOf(`${CHILD}/`), PARENT);
+check('现场路径 + 双尾斜杠', parentDirOf(`${CHILD}//`), PARENT);
+check('文档 URI + %XX 中文 + 尾斜杠',
+  parentDirOf(`file://docs${ROOT}/%E4%BA%BA%E5%83%8F/%E7%BC%96%E5%8F%B7202601%20%E6%A8%A1%E7%89%B9%20%E7%8C%AB/`),
+  PARENT);
+check('文档 URI + 中文 + ? 参数', parentDirOf(`file://docs${CHILD}/?mode=r`), PARENT);
+check('纯 ASCII 多级', parentDirOf('/a/b/c/'), '/a/b');
+check('单级 → 根', parentDirOf('/人像/'), '/');
+check('根 → 空串（已是最上层）', parentDirOf('/'), '');
+check('空串 → 空串', parentDirOf(''), '');
+check('文档 URI 碎片不算路径', realPathOf('file://docs'), '');
+check('父结果恒不等于自身', parentDirOf(`${CHILD}/`) === stripTrailingSlash(`${CHILD}/`), false);
+
+console.log('--- parentDirCandidates(): 回上层逐个尝试的候选 ---');
+const cands = parentDirCandidates(`file://docs${CHILD}/`);
+check('文档 URI 候选数 >= 2', cands.length >= 2, true);
+check('首选保留 URI 形态', cands[0], `file://docs${PARENT}`);
+check('包含真实路径父', cands.includes(PARENT), true);
+check('候选不含自身', cands.includes(stripTrailingSlash(`file://docs${CHILD}/`)), false);
+check('真实路径去重后只有父', parentDirCandidates(`${CHILD}/`).join('|'), PARENT);
+check('根路径不产生假父级', parentDirCandidates('/').join('|'), '/');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

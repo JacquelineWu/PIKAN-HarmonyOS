@@ -510,6 +510,31 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 回上层在「人像/编号202601 模特 猫」没反应（2026-11-10 修复）
+
+现象：选择文件夹 `/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像/编号202601 模特 猫`
+后，点左栏「回上层」完全没反应；期望回到 `…/人像/` 并显示该目录名。
+
+根因有两个，叠在一起：
+
+| # | 原因 | 后果 |
+|---|---|---|
+| ① | 本地 `dirOf()` **不去尾部斜杠** | picker 返回的目录标识常带 `/`，`lastIndexOf('/')` 落在最后一个字符，`substring(0, i)` 得到的还是**自己**（只少一个斜杠），`openFolder()` 又列了一遍同一个目录 → 界面原地不动 |
+| ② | picker 授权是**逐 URI** 的 | 祖先目录（`人像`）没拿到授权，只拿一个父候选去 `listFile` 常常全部失败；旧代码只在状态栏写一句「回上层失败」，很容易被当成没反应 |
+
+| 改动 | 说明 |
+|---|---|
+| `DirName.ts` 新增 `realPathOf / parentDirOf / parentDirCandidates` | 先去 `?` 与尾斜杠再取父级；`file://docs/...` 还原成 `/storage/...`；`%XX` 安全解码；已是根返回空串；**绝不返回自身** |
+| 父候选按优先级逐个试 | ① 保留 scheme 的父 URI → ② 解码后的父 → ③ 真实路径父，每个再经 `dirCandidates()` 展开一次，命中哪个用哪个 |
+| `browseUp()` 改 async + 循环 | 状态栏先显示 `回上层 → 人像`；成功才 `pop dirStack`，失败可重试；不再静默 |
+| `openFolder()` 新增 `allowFileFallback?` | 「回上层」传 false：不再弹「目录内多选」，`setItems()` 也就不会把刚进去的目录态清掉 |
+| 新增 `pickRootUri` | 记住最近一次「选择文件夹」的原始 uri；目录态被「目录内多选」清掉后仍能算出上层。成功进入上层后清空，避免连续回上层时算出「倒退回刚离开的目录」的候选 |
+| 新增 `chooseFolderAt()` | 所有父候选都因无授权列不出时，拉起 `FOLDER` picker 并把 `defaultFilePathUri` 指到父目录，用户确认一次即可补授权进入 |
+| `applyItems()` 标题栏 | `dirOf()` → `parentDirOf()`，统一走新口径 |
+
+验证：`tests/dirname.test.mjs` **46 例全通过**（新增 17 例覆盖尾斜杠、中文空格、`%XX`、文档 URI、`?` 参数、根路径、候选不含自身）。
+> 按 11-10 约定**未编译 HAP、未放桌面**，请在 DevEco Studio 里编译后实机确认。
+
 ## 取消左栏 8 个视图按钮（2026-11-10，v1.0.7）
 
 按用户要求把左栏底部 4 行 × 2 列的视图控制条整体去掉：

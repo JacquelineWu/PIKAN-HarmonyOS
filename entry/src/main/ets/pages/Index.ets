@@ -47,7 +47,7 @@ import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
-import { baseName, dirDisplayName, stripTrailingSlash } from '../common/DirName';
+import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, parentDirCandidates } from '../common/DirName';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -493,16 +493,9 @@ function ellipsizeMiddle(s: string, max: number): string {
   return s.substring(0, head) + '…' + s.substring(s.length - tail);
 }
 
-/** 从 uri / 路径里抠出所在目录（用于标题栏显示） */
-function dirOf(path: string): string {
-  let s = path;
-  const q = s.indexOf('?');
-  if (q >= 0) {
-    s = s.substring(0, q);
-  }
-  const i = s.lastIndexOf('/');
-  return i > 0 ? s.substring(0, i) : s;
-}
+/** 父目录计算已统一迁到 common/DirName.ts 的 parentDirOf() / parentDirCandidates()。
+ *  旧 dirOf() 不去尾斜杠：picker 给的目录常带 `/`，lastIndexOf('/') 落在末尾，
+ *  substring(0, i) 得到的还是自己 —— 这就是「回上层」原地不动的根因。 */
 
 /** 时间戳 → 'YY-MM-DD HH:mm'，用于左栏「日期」列（Win64 三栏档案列表）。 */
 function fmtDate(ms: number): string {
@@ -1030,6 +1023,9 @@ struct Index {
   // openFolder 实测「能 listFile 且子文件能 open」的真实路径。回上层 / 重扫 / mtime 自检
   // 一律用它：原始 uri 可能是 file://docs/... 或百分号编码，fs.statSync 认不出来。
   private browseBase: string = '';
+  /** 最近一次「选择文件夹」拿到的原始 uri。目录态若被「目录内多选」清掉，
+   *  仍可靠它推算出上层目录，不至于让「回上层」变成没反应。 */
+  private pickRootUri: string = '';
   private dirStack: string[] = [];          // 上层目录栈，存真实路径，供「..」/退格回退
   private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
   private dirPollTimer: number = -1;        // 目录轮询句柄
@@ -1736,7 +1732,7 @@ struct Index {
     // 目录态优先显示真实路径（原始 uri 常是 file://docs/... 或 %XX 编码，读起来像乱码）
     this.titlePath = this.browseBase.length > 0 ? this.browseBase :
       (this.browseDir.length > 0 ? this.browseDir :
-        (list.length > 0 ? dirOf(list[0].uri) : ''));
+        (list.length > 0 ? parentDirOf(list[0].uri) : ''));
     // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
     const start: number = this.restoreIndex(list);
     this.cur = list.length > 0 ? (start >= 0 ? start : 0) : -1;
@@ -3058,6 +3054,7 @@ struct Index {
           }
           hilog.info(DOMAIN, TAG, 'folder fallback picked %{public}d files', uris.length);
           this.setItems(uris, baseName(dirUri) + '（多选）');
+          this.pickRootUri = dirUri; // 目录态被 setItems 清了，记住原始目录供「回上层」用
         })
         .catch((e: Object) => {
           this.status = '目录内多选失败：' + JSON.stringify(e);
@@ -3087,6 +3084,7 @@ struct Index {
             return;
           }
           hilog.info(DOMAIN, TAG, 'chooseFolder picked uri=%{public}s', uris[0]);
+          this.pickRootUri = uris[0];
           this.dirStack = [];
           this.openFolder(uris[0], false);
         })
@@ -3104,7 +3102,9 @@ struct Index {
    *  ⚠️ 鸿蒙 DocumentViewPicker 授予的是 URI，fs.listFile / statSync 对它不一定有权限；
    *     失败时明确提示，不静默吞掉（Win64 走的是真实文件系统路径）。 */
   /** 返回是否真的进入了目录浏览态（失败时调用方不该改动目录栈）。 */
-  private async openFolder(dirUri: string, push: boolean): Promise<boolean> {
+  /** allowFileFallback：目录能列但子文件读不了时，是否弹「目录内多选」选择器。
+   *  「回上层」传 false —— 那种兜底会调 setItems 把目录态清掉，反而让回上层白做。 */
+  private async openFolder(dirUri: string, push: boolean, allowFileFallback?: boolean): Promise<boolean> {
     if (this.folderBusy) {
       return false; // 上一批还在列，别叠
     }
@@ -3229,7 +3229,7 @@ struct Index {
       // 拼出来的子路径没权限。这时别给用户留一屏空白，直接开一个「以该目录为起点」的
       // 文件多选选择器，Ctrl+A 全选即可看图（每个选中文件都单独授权，解码一定成功）。
       // ⚠️ 早退前绝不改 browseDir / browseBase / dirStack：此刻并没有真的进入目录浏览态。
-      if (imgs.length > 0 && !childReadable) {
+      if (imgs.length > 0 && !childReadable && allowFileFallback !== false) {
         this.status = '目录 ' + dirLabel + '：子文件无读取授权 · 已打开文件选择器，请全选图片';
         hilog.warn(DOMAIN, TAG, 'openFolder: fallback to multi-select, imgs=%{public}d', imgs.length);
         this.chooseFilesInDir(dirUri);
@@ -3262,6 +3262,9 @@ struct Index {
         this.status = '目录 ' + dirLabel + '：本层没有图片 · ' + dirs.length +
           ' 个子文件夹（点文件夹进入）· 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
         hilog.warn(DOMAIN, TAG, 'openFolder: 0 images among %{public}d entries', names.length);
+      } else if (!childReadable) {
+        this.status = '目录 ' + dirLabel + '：' + imgs.length + ' 张（子文件无读取授权，仅列目录）· ' +
+          dirs.length + ' 个子文件夹';
       } else {
         this.status = '目录 ' + dirLabel + '：' + imgs.length + ' 张可预览 · ' +
           dirs.length + ' 个子文件夹';
@@ -3350,6 +3353,7 @@ struct Index {
             this.status = '已取消选择';
             return;
           }
+          this.pickRootUri = ''; // 「选择图片」是新的文件源，脱离上次目录上下文
           this.setItems(uris, '本地文件');
         })
         .catch((e: Object) => {
@@ -3423,40 +3427,125 @@ struct Index {
 
   /** 回上层目录（Win64 77f7b6b）。
    *
-   *  以前只在 dirStack 非空时才动 —— 但 chooseFolder 是 `dirStack = []` + push=false
-   *  进入首个目录的，栈永远是空的，用户选完文件夹点「回上层」必然被一句
-   *  「没有上层目录」拦死。现在改成两条路：
-   *    · 进过子目录 → pop 栈里存的真实路径（必定可列）；
-   *    · 直接选的目录 → 从 browseBase 用 dirOf() 上溯一级真实路径。
-   *  另外先 peek 不 pop、等 openFolder 真成功了再弹栈，失败时栈不丢，可重试。 */
-  private browseUp(): void {
+   *  2026-11-10 现场：`人像/编号202601 模特 猫/` 点「回上层」完全没反应。两个叠加原因：
+   *   ① 旧 dirOf() 不去尾斜杠，picker 给的目录标识常带 `/`，算出来的「父级」其实是
+   *      自己，openFolder 又列了一遍同一个目录 —— 界面看起来原地不动；
+   *   ② picker 的授权是逐 URI 的，祖先目录（人像）常常没授权，单一候选列不出来。
+   *
+   *  现在用 parentDirCandidates() 生成「URI 父 / 解码父 / 真实路径父」逐个试，
+   *  命中哪个用哪个；全部失败才拉起定位到父目录的 FOLDER picker 补授权。
+   *  进过子目录时仍优先 pop dirStack，且成功之后才 pop（失败可重试）。 */
+  private async browseUp(): Promise<void> {
     if (this.folderBusy) {
       return; // 正在列目录，别叠（否则 openFolder 会静默返回，栈却被白弹一次）
     }
-    const base: string = this.browseBase.length > 0 ? this.browseBase : this.browseDir;
-    if (base.length === 0) {
-      this.status = '当前是图库 / 文件选择结果，没有上层目录（用「选择文件夹」进入目录浏览）';
+    // 三种锚点都拿来推父目录：browseBase 是实测能列的路径，browseDir 保留 picker
+    // 原始 scheme，pickRootUri 在目录态被「目录内多选」清掉后仍记得最初选的目录。
+    const anchors: string[] = [];
+    const seenAnchor: Set<string> = new Set<string>();
+    const addAnchor = (s: string): void => {
+      if (s.length > 0 && !seenAnchor.has(s)) {
+        seenAnchor.add(s);
+        anchors.push(s);
+      }
+    };
+    addAnchor(this.browseBase);
+    addAnchor(this.browseDir);
+    addAnchor(this.pickRootUri);
+    if (anchors.length === 0) {
+      this.status = '当前是文件选择结果，没有上层目录（用「选择文件夹」进入目录浏览）';
       return;
     }
+    const primary: string = anchors[0];
+    const norm = (s: string): string => stripTrailingSlash(s);
     const fromStack: boolean = this.dirStack.length > 0;
-    const parent: string = fromStack ? this.dirStack[this.dirStack.length - 1] : dirOf(base);
-    if (parent.length === 0 || parent === base) {
-      this.status = '已经是最上层目录 · 可用「选择文件夹」换一个目录';
-      return;
+    const parents: string[] = [];
+    const seenParent: Set<string> = new Set<string>();
+    const addParent = (s: string): void => {
+      if (s.length > 0 && !seenParent.has(s)) {
+        seenParent.add(s);
+        parents.push(s);
+      }
+    };
+    if (fromStack) {
+      addParent(this.dirStack[this.dirStack.length - 1]); // 进过子目录：栈里的真实路径最可靠
     }
-    hilog.info(DOMAIN, TAG, 'browseUp %{public}s → %{public}s (fromStack=%{public}d)',
-      base, parent, fromStack ? 1 : 0);
-    this.openFolder(parent, false).then((ok: boolean) => {
+    for (let a = 0; a < anchors.length; a++) {
+      const cands: string[] = parentDirCandidates(anchors[a]);
+      for (let j = 0; j < cands.length; j++) {
+        const p: string = cands[j];
+        if (norm(p) !== norm(anchors[a])) {
+          addParent(p); // 过滤尾斜杠造成的「假父级 = 自己」
+        }
+      }
+    }
+    let tried: number = 0;
+    let lastTried: string = '';
+    for (let i = 0; i < parents.length; i++) {
+      const parent: string = parents[i];
+      if (parent.length === 0 || norm(parent) === norm(primary)) {
+        continue; // 已到最上层 / 尾斜杠造成的「假父级」= 自己
+      }
+      tried++;
+      lastTried = parent;
+      hilog.info(DOMAIN, TAG, 'browseUp try %{public}s → %{public}s (cand %{public}d/%{public}d)',
+        primary, parent, i + 1, parents.length);
+      this.status = '回上层 → ' + baseName(parent);
+      // 第三参 false：不再弹「目录内多选」，否则 setItems 会把刚进去的目录态清掉
+      const ok: boolean = await this.openFolder(parent, false, false);
       if (ok) {
         if (fromStack) {
           this.dirStack.pop();
         }
+        // 已经真正进入上层目录，旧的「最初选择」锚点作废 —— 否则连续回上层时
+        // 它算出来的父级会指回刚离开的目录，造成「又退回去」的假象。
+        this.pickRootUri = '';
         hilog.info(DOMAIN, TAG, 'browseUp OK → %{public}s', this.browseBase);
-      } else {
-        this.status = '回上层失败（上级目录没有读取授权）· 可点「选择文件夹」重新选择上级目录';
-        hilog.warn(DOMAIN, TAG, 'browseUp FAILED, parent=%{public}s (dirStack kept)', parent);
+        return;
       }
-    });
+    }
+    if (tried === 0) {
+      this.status = '已经是最上层目录 · 可用「选择文件夹」换一个目录';
+      return;
+    }
+    this.status = '回上层到「' + baseName(lastTried) + '」需要目录授权 · 已打开目录选择器，请确认该文件夹';
+    hilog.warn(DOMAIN, TAG, 'browseUp all parents failed, anchor=%{public}s', primary);
+    // 逐 URI 授权模型下，祖先目录没授权时唯一可靠的补权方式：让用户确认一次。
+    // 用 parents[0]（URI 形态优先）作 picker 起点，比真实路径更容易被 defaultFilePathUri 接受。
+    this.chooseFolderAt(parents.length > 0 ? parents[0] : lastTried);
+  }
+
+  /** 回上层时祖先目录没有 URI 授权：拉起 FOLDER picker 并定位到该父目录。
+   *  用户确认一次即可拿到授权并真正进入（状态栏会先说明为什么会弹选择器）。 */
+  private chooseFolderAt(dirUri: string): void {
+    try {
+      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+      if (!ctx) {
+        this.status = '无法获取应用上下文';
+        return;
+      }
+      const dv = new picker.DocumentViewPicker(ctx);
+      const opt = new picker.DocumentSelectOptions();
+      opt.selectMode = picker.DocumentSelectMode.FOLDER;
+      opt.maxSelectNumber = 1;
+      opt.defaultFilePathUri = dirUri;
+      dv.select(opt)
+        .then((uris: Array<string>) => {
+          if (!uris || uris.length === 0) {
+            this.status = '已取消（仍停在原目录）';
+            return;
+          }
+          this.pickRootUri = uris[0];
+          this.dirStack = [];
+          this.openFolder(uris[0], false, false);
+        })
+        .catch((e: Object) => {
+          this.status = '回上层授权失败：' + JSON.stringify(e) + ' · 可点「选择文件夹」手动选上级目录';
+          hilog.error(DOMAIN, TAG, 'chooseFolderAt rejected: %{public}s', JSON.stringify(e));
+        });
+    } catch (e) {
+      this.status = '回上层授权不可用：' + JSON.stringify(e);
+    }
   }
 
   /** 切换全屏：只翻状态位，真正的重解码等 onAreaChange 把新画布尺寸报上来再做 */
