@@ -66,7 +66,7 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
 import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { ExifTransform, Size2, exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
-  colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
+  displayEdgeOf, colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -226,6 +226,9 @@ const PRELOAD_MAX_BYTES: number = 1024 * 1024 * 1024;
 const VIEW_EDGE_FACTOR: number = 1.5;
 const VIEW_EDGE_MIN: number = 1200;
 const VIEW_EDGE_MAX: number = 4096;
+/** 显示需求余量：左右页共用 ViewPlan.displayEdgeOf 的 headroom（旧 showNeed 口径 1.05）。
+ *  抽成常量是为了让「左页 / 右页 / 全清升级」三个调用点用同一个纯函数、同一组参数。 */
+const DISPLAY_HEADROOM: number = 1.05;
 /** 全屏时主视图解码倍率：画布变大后按新尺寸解到位，绝不把旧分辨率的 PixelMap 拉大。
  *  全屏用 2.0（普通态 1.5），上限仍是 VIEW_EDGE_MAX = 4096 控内存。 */
 const FULLSCREEN_VIEW_EDGE_FACTOR: number = 2.0;
@@ -2346,13 +2349,17 @@ struct Index {
    *  代号校验：切图后旧回调一律作废，避免右页显示成上一对的图。
    *
    *  2026-11-11：解码档位从 preloadEdge() 提到与左页相同的 viewEdge()；
-   *  命中的预载缓存若档位不足也继续重解，避免「低清图被拉成半屏」的锯齿/发虚。 */
+   *  命中的预载缓存若档位不足也继续重解，避免「低清图被拉成半屏」的锯齿/发虚。
+   *  第三轮：判据改成与左页**同一个** displayEdge()（ViewPlan.displayEdgeOf），
+   *  两边不会再出现「一边用 1536、一边用 1800」的档位差；重解结果写回缓存，
+   *  下一次翻回来直接命中，不重复解码。 */
   private loadRightPage(uri: string): void {
     this.rightToken++;
     const token: number = this.rightToken;
     this.releaseRightOwned();   // 上一张右页若是自解码的，先释放
-    const need: number = this.viewEdge();
     const hit: PreviewEntry | undefined = this.previewEntry(uri);
+    const srcLong: number = hit !== undefined ? Math.max(hit.w, hit.h) : 0;
+    const need: number = this.displayEdge(srcLong);
     if (hit !== undefined && hit.edge >= need) {
       this.rightOwned = undefined;
       this.rightPixelMap = hit.px;
@@ -2370,8 +2377,11 @@ struct Index {
           }
           return;
         }
-        this.rightOwned = e.px;
-        this.rightPixelMap = e.px;
+        // 交给缓存持有（不再自持有，避免与缓存淘汰双重 release）
+        this.rightOwned = undefined;
+        this.rightPixelMap = undefined;  // 先撤旧引用，让 upgradePreview 安全 release
+        const best: PreviewEntry = this.upgradePreview(e);
+        this.rightPixelMap = best.px;
       })
       .catch(() => {
         // 右页解不开就留空，左页照常显示（不把整屏拖成失败态）
@@ -3354,19 +3364,37 @@ struct Index {
     return decodePx(uri, edge);
   }
 
-  /** 查缓存；命中则移到队尾（LRU）。返回整条 Entry（过渡层还要用它的原图宽高） */
+  /** 查缓存；命中则移到队尾（LRU）。返回整条 Entry（过渡层还要用它的原图宽高）。
+   *
+   *  2026-11-11 第三轮：同一个 uri 可能同时存在 768 低清占位 / 1536 预载 / 1800 全清
+   *  （三条异步链并行），只取「从队尾数第一条」会在低清链慢到时把低档位图当命中。
+   *  改为在同 uri 里挑 **edge 最大的那条**：左右页永远拿到最高画质那张。 */
   private previewEntry(uri: string): PreviewEntry | undefined {
+    let bestIdx: number = -1;
     for (let i = this.previews.length - 1; i >= 0; i--) {
-      if (this.previews[i].uri === uri) {
-        const e: PreviewEntry = this.previews[i];
-        if (i !== this.previews.length - 1) {
-          this.previews.splice(i, 1);
-          this.previews.push(e);
-        }
-        return e;
+      if (this.previews[i].uri !== uri) {
+        continue;
+      }
+      if (bestIdx < 0 || this.previews[i].edge > this.previews[bestIdx].edge) {
+        bestIdx = i;
       }
     }
-    return undefined;
+    if (bestIdx < 0) {
+      return undefined;
+    }
+    const e: PreviewEntry = this.previews[bestIdx];
+    if (bestIdx !== this.previews.length - 1) {
+      this.previews.splice(bestIdx, 1);
+      this.previews.push(e);
+    }
+    return e;
+  }
+
+  /** 原图长边（decodePx 的 w/h 记的是原图尺寸，不是解码后尺寸）。
+   *  查不到返回 0 → displayEdgeOf 不夹上限，desiredSize 本来也不会把图放大。 */
+  private srcLongOf(uri: string): number {
+    const hit: PreviewEntry | undefined = this.previewEntry(uri);
+    return hit !== undefined ? Math.max(hit.w, hit.h) : 0;
   }
 
   /** 入缓存，并按「张数 + 总字节」双重上限淘汰最旧的 */
@@ -3389,6 +3417,53 @@ struct Index {
       }
     }
     this.syncCacheStat();
+  }
+
+  /** 把「按显示档位重解出来的全清图」写回缓存，返回**最终该上屏的那张**。
+   *
+   *  2026-11-11 第三轮：以前全清图是 viewOwned / rightOwned **自持有**、从不进缓存，
+   *  于是 previews 里同一个 uri 可能留着 768 低清占位或 1536 预载图，
+   *  左页命中它就判「够用」不再升级，而右页严格重解 —— 左边比右边糊。
+   *  现在同 uri 只留 edge 最大的那张：左右页都命中同一张全清图，每张只解一次（不卡）。
+   *  并发下若低清链慢到、或 zoom 变小导致新解档位更低，只会**升档不会降档**。
+   *
+   *  ⚠️ 调用方必须先撤掉 viewPixelMap / rightPixelMap 的旧引用再调本函数：
+   *     这里会同步 release 被替换掉的 PixelMap，紧接着调用方在同一帧换上新引用，不会花屏。 */
+  private upgradePreview(e: PreviewEntry): PreviewEntry {
+    const removed: PreviewEntry[] = [];
+    let best: PreviewEntry = e;
+    for (let i = this.previews.length - 1; i >= 0; i--) {
+      const old: PreviewEntry = this.previews[i];
+      if (old.uri !== e.uri || old.px === e.px) {
+        continue;
+      }
+      if (old.edge > best.edge) {
+        best = old;
+      }
+      this.previews.splice(i, 1);
+      this.preloadBytes -= old.bytes;
+      removed.push(old);
+    }
+    for (let j = 0; j < removed.length; j++) {
+      const old: PreviewEntry = removed[j];
+      if (old.px === best.px || old.px === this.lowPixelMap || old.px === this.rightPixelMap) {
+        continue; // 仍被过渡层 / 右页引用，或就是选中的那张 → 不 release
+      }
+      try {
+        old.px.release();
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'release replaced preview skipped');
+      }
+    }
+    if (e.px !== best.px) {
+      try {
+        e.px.release(); // 缓存里已有更高档位 → 丢弃这次低档位解码结果
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'release lower-grade preview skipped');
+      }
+    }
+    this.pushPreview(best);
+    return best;
   }
 
   /** 把缓存账目同步给右下角角标（只显示张数）。改动落在三处口子上：pushPreview / evictOutside / clearPreviews。 */
@@ -3516,11 +3591,12 @@ struct Index {
     const uri: string = this.items[idx].uri;
     const hit: PreviewEntry | undefined = this.previewEntry(uri);
     if (hit !== undefined) {
-      // ① 命中缓存 → 那张已经是「可显示清晰度」，直接上主视图，不等解码（翻页快的关键）
+      // ① 命中缓存 → 先上屏（翻页快的关键），再按左右页共用的判据看档位够不够
       this.showDecoded(hit);
       const need: number = this.showNeed(hit);
-      // ② 档位不够（多半是放大了）才停手后补一张全清；够就不必再解
-      //    ——早先不管够不够都解一次全清，每张多花几百毫秒，切图卡顿就是这么来的
+      // ② 档位不够才补一张全清；够就不必再解。
+      //    升级结果由 upgradePreview() 写回缓存，所以每张只解一次，不会每次翻页都重解
+      //    （早先不管够不够都解一次全清，每张多花几百毫秒，切图卡顿就是这么来的）。
       if (need <= 0 || hit.edge < need) {
         this.loadView(uri, token, UPGRADE_DELAY_MS);
       }
@@ -3553,18 +3629,14 @@ struct Index {
     this.viewHdrWanted = e.isHdr || isWideGamutOf(e.colorSpace);
   }
 
-  /** 这张图按当前 zoom 实际要占多少像素（长边），再留 5% 余量。
-   *  用来判断「缓存里这张够不够看」，够就不必再解全清。
-   *  原图本身就小于需求时按原图长边算 —— 再解也不会更清楚。 */
+  /** 这张图按当前画布 / zoom 实际需要解到多少（长边）。
+   *
+   *  2026-11-11 第三轮：判据抽到 ViewPlan.displayEdgeOf，与并排右页**共用同一个函数**。
+   *  旧口径只看「画布 × zoom × 1.05」（普通态约 1260），比右页的 viewEdge()（1800 /
+   *  全屏 3840）宽松得多，左页因此长期停留在预载的 1536 档位 —— 这就是「左边比右边差」。
+   *  srcLong 用条目里的原图宽高；原图小于需求时夹到原图长边，再解也不会更清楚。 */
   private showNeed(e: PreviewEntry): number {
-    const canvasLong: number = Math.max(this.canvasW, this.canvasH);
-    const long: number = Math.max(e.w, e.h);
-    if (canvasLong <= 0 || long <= 0) {
-      return 0;
-    }
-    const z: number = this.zoom > 0 ? this.zoom : 1;
-    const need: number = Math.ceil(canvasLong * z * 1.05);
-    return Math.min(need, long);
+    return this.displayEdge(Math.max(e.w, e.h));
   }
 
   // ---- 过渡动画 ----
@@ -3695,7 +3767,7 @@ struct Index {
     if (token !== this.curToken) {
       return; // 排队期间又切了图 → 这次升级没必要了
     }
-    const edge: number = this.viewEdge();
+    const edge: number = this.displayEdge(this.srcLongOf(uri));
     hilog.info(DOMAIN, TAG, 'loadView: begin edge=%{public}d', edge);
     const ret: PreviewEntry | undefined = await this.decodeTo(uri, edge);
     hilog.info(DOMAIN, TAG, 'loadView: decoded %{public}s', ret === undefined ? 'FAILED' : 'ok');
@@ -3723,11 +3795,14 @@ struct Index {
     }
     this.noteShown(uri); // 清晰图到位 → 这张确实显示成功，下次启动预热它
     this.releaseViewOwned();
-    this.viewOwned = ret.px;
-    this.viewPixelMap = ret.px;
-    this.imgW = ret.w;
-    this.imgH = ret.h;
-    this.setViewMeta(ret);
+    // 全清图交给缓存持有（viewOwned 留空），替换同 uri 的低档位 / 768 占位条目：
+    // 左页与右页此后都能命中同一张最高档位图，且不会与缓存淘汰双重 release。
+    this.viewPixelMap = undefined;   // 先撤旧引用，让 upgradePreview 安全 release
+    const best: PreviewEntry = this.upgradePreview(ret);
+    this.viewPixelMap = best.px;
+    this.imgW = best.w;
+    this.imgH = best.h;
+    this.setViewMeta(best);
     if (FOCUS_BLUR) {
       this.finishFocus(); // 清晰图到位 → 低清模糊层淡出（这才是「动态模糊」的收尾）
     } else {
@@ -3741,6 +3816,14 @@ struct Index {
   private viewEdge(): number {
     return viewEdgeOf(this.canvasW, this.canvasH, this.fullscreen,
       VIEW_EDGE_FACTOR, FULLSCREEN_VIEW_EDGE_FACTOR, VIEW_EDGE_MIN, VIEW_EDGE_MAX);
+  }
+
+  /** 左右页共用的显示档位判据（纯函数在 ViewPlan，可 Node 单测）。
+   *  srcLong = 原图长边；<= 0 表示未知。左右页、全清升级、尺寸变化重解全部走这里，
+   *  从根上杜绝「一边 1536、一边 1800」的档位差。 */
+  private displayEdge(srcLong: number): number {
+    return displayEdgeOf(this.viewEdge(), this.canvasW, this.canvasH,
+      this.zoom, DISPLAY_HEADROOM, srcLong);
   }
 
   /** 画布尺寸变了（多半是进出全屏）：按新尺寸「立刻」重解当前这张，不走 UPGRADE_DELAY_MS。

@@ -12,7 +12,8 @@
  * 以及同日澄清的「往上层按钮永不 grey out / 永不禁用、点了要有反应」，
  * 同日末的「预览右下角只显示缓存数量 + 缩放百分比」，
  * 以及「真全屏 / 最高画质 resample / ICC·HDR·EXIF 旋转」，
- * 以及同日第二轮 5 项实机修正（全屏放大 / ESC 还原 / 右页锯齿 / hover 无档案名 / 梅花间竹列表）。
+ * 以及同日第二轮 5 项实机修正（全屏放大 / ESC 还原 / 右页锯齿 / hover 无档案名 / 梅花间竹列表），
+ * 以及第三轮「左边显示比右边差 → 左右页统一最高画质」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -26,7 +27,7 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, F
   restoreUpEnabled, restoreUpHint } from '../entry/src/main/ets/common/ResumePlan.ts';
 import { PERSIST_SKIP, PERSIST_ACTIVATE, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../entry/src/main/ets/common/PersistPlan.ts';
-import { exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
+import { exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf, displayEdgeOf,
   colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../entry/src/main/ets/common/ViewPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
@@ -1202,6 +1203,24 @@ check('fullscreenStepsOf 进入含「无标题栏 / dock」步骤',
   fullscreenStepsOf(true).includes('maximize-no-title-dock'), true);
 check('fullscreenStepsOf 退出含 recover', fullscreenStepsOf(false).includes('recover'), true);
 
+console.log('--- ViewPlan 纯函数：左右页共用的显示档位 displayEdgeOf ---');
+check('displayEdgeOf 普通态以主视图档位为准（不再用宽松的 1260）',
+  displayEdgeOf(1800, 1200, 800, 1, 1.05, 4000), 1800);
+check('displayEdgeOf 全屏保持 3840 最好画质',
+  displayEdgeOf(3840, 1920, 1080, 1, 1.05, 4000), 3840);
+check('displayEdgeOf 放大 4 倍时按实际像素需求抬档',
+  displayEdgeOf(1800, 1200, 800, 4, 1.05, 6000), 5040);
+check('displayEdgeOf 夹到原图长边（再解也不会更清楚）',
+  displayEdgeOf(1800, 1200, 800, 4, 1.05, 3000), 3000);
+check('displayEdgeOf 原图尺寸未知时不夹上限',
+  displayEdgeOf(1800, 1200, 800, 4, 1.05, 0), 5040);
+check('displayEdgeOf 画布为 0 时回退主视图档位（绝不返回 0 让 desiredSize 算出 1x1）',
+  displayEdgeOf(1800, 0, 0, 1, 1.05, 4000), 1800);
+check('displayEdgeOf zoom 非正按 1 处理',
+  displayEdgeOf(1800, 1200, 800, 0, 1.05, 4000), 1800);
+check('displayEdgeOf 永不降档到主视图档位之下',
+  displayEdgeOf(1800, 1200, 800, 1, 1.05, 4000) >= 1800, true);
+
 console.log('--- 源码静态契约：真全屏 / 最高画质 resample / ICC·HDR·EXIF ---');
 const RESIZE_FN = INDEX.slice(INDEX.indexOf('private refreshForCanvasResize('),
   INDEX.indexOf('private armCanvasReloadFallback('));
@@ -1315,8 +1334,8 @@ check('② 退出步骤表含新增的窗口形态恢复步骤',
   fullscreenStepsOf(false).includes('decor-on') &&
   fullscreenStepsOf(false).includes('title-dock-hover-on') &&
   fullscreenStepsOf(false).includes('recover'), true);
-check('③ 并排右页与左页同画质：viewEdge 档位 + autoResize(false) + HDR 模式',
-  /const need: number = this\.viewEdge\(\);/.test(INDEX) &&
+check('③ 并排右页与左页同画质：displayEdge 档位 + autoResize(false) + HDR 模式',
+  /const need: number = this\.displayEdge\(srcLong\);/.test(INDEX) &&
   /hit\.edge >= need/.test(INDEX) &&
   /this\.decodeTo\(uri, need\)/.test(INDEX) &&
   /\.interpolation\(ImageInterpolation\.High\)/.test(RIGHT_IMAGE_FN) &&
@@ -1328,6 +1347,40 @@ check('⑤ 列表两行缝压到 1vp + 交替色格子（回归护栏）',
   /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX) &&
   /top: 1, bottom: 1/.test(INDEX) &&
   /\.backgroundColor\(this\.rowBgColor\(\)\)/.test(INDEX), true);
+
+console.log('--- 源码静态契约：左右页统一最高画质（第三轮：左边比右边差）---');
+check('displayEdgeOf 已 import，Index 有统一 displayEdge() 包装与 headroom 常量',
+  /displayEdgeOf, colorSpaceNameOf/.test(INDEX) &&
+  /const DISPLAY_HEADROOM: number = 1\.05;/.test(INDEX) &&
+  /private displayEdge\(srcLong: number\): number \{[\s\S]{0,300}return displayEdgeOf\(this\.viewEdge\(\), this\.canvasW, this\.canvasH,[\s\S]{0,140}DISPLAY_HEADROOM, srcLong\);/.test(INDEX), true);
+check('左页 showNeed 委托同一个 displayEdge（旧的宽松 1.05 公式已删）',
+  /private showNeed\(e: PreviewEntry\): number \{\s*return this\.displayEdge\(Math\.max\(e\.w, e\.h\)\);/.test(INDEX) &&
+  !/Math\.ceil\(canvasLong \* z \* 1\.05\)/.test(INDEX), true);
+check('左页全清升级也按 displayEdge 解码（不再写死 viewEdge）',
+  /const edge: number = this\.displayEdge\(this\.srcLongOf\(uri\)\);/.test(INDEX) &&
+  /private srcLongOf\(uri: string\): number \{/.test(INDEX), true);
+check('右页与左页共用 displayEdge 判据（同一个纯函数、同一组参数）',
+  /const srcLong: number = hit !== undefined \? Math\.max\(hit\.w, hit\.h\) : 0;/.test(INDEX) &&
+  /const need: number = this\.displayEdge\(srcLong\);/.test(INDEX) &&
+  /this\.decodeTo\(uri, need\)/.test(INDEX), true);
+check('全清图写回缓存：左右页此后命中同一张最高档位图',
+  /private upgradePreview\(e: PreviewEntry\): PreviewEntry \{/.test(INDEX) &&
+  /const best: PreviewEntry = this\.upgradePreview\(ret\);/.test(INDEX) &&
+  /const best: PreviewEntry = this\.upgradePreview\(e\);/.test(INDEX) &&
+  /this\.pushPreview\(best\);/.test(INDEX) &&
+  /return best;/.test(INDEX), true);
+check('同 uri 只升档不降档：缓存查询取 edge 最大、升级取 max edge',
+  /let bestIdx: number = -1;/.test(INDEX) &&
+  /this\.previews\[i\]\.edge > this\.previews\[bestIdx\]\.edge/.test(INDEX) &&
+  /if \(old\.edge > best\.edge\) \{\s*best = old;/.test(INDEX) &&
+  /if \(e\.px !== best\.px\) \{/.test(INDEX), true);
+check('升级前先撤显示引用，避免 release 正在显示的 PixelMap',
+  /this\.viewPixelMap = undefined;[^\n]*\n\s*const best: PreviewEntry = this\.upgradePreview\(ret\);/.test(INDEX) &&
+  /this\.rightPixelMap = undefined;[^\n]*\n\s*const best: PreviewEntry = this\.upgradePreview\(e\);/.test(INDEX), true);
+check('左右页显示层仍是最高画质（High + autoResize(false) + HDR 三处齐配）',
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
+  (INDEX.match(/\.interpolation\(ImageInterpolation\.High\)/g) || []).length >= 3 &&
+  (INDEX.match(/\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/g) || []).length === 3, true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

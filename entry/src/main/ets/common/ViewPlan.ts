@@ -99,6 +99,32 @@ export function preloadEdgeOf(canvasW: number, canvasH: number, fullscreen: bool
   return Math.max(minEdge, Math.min(cap, Math.round(v)));
 }
 
+/** 并排两页共用的「显示所需解码档位」（2026-11-11 第三轮修正：左边比右边糊）。
+ *
+ *  背景：左页 `showNeed()` 旧口径是「画布长边 × zoom × 1.05，再夹到原图长边」，
+ *  而右页判据是「缓存档位 >= viewEdge()」。两条判据不一致 → 左页常停留在预载
+ *  低档位（普通态 1536 / 全屏 2304），右页却已重解到 viewEdge()（1800 / 3840），
+ *  实机表现就是「左边明显不如右边清楚」。现在左右页一律调用本函数：
+ *    取 max(主视图解码档位, 按 zoom 放大后的实际像素需求)，再夹到原图长边。
+ *
+ *  `srcLong` = 原图长边（decodePx 的 w/h 记的就是原图尺寸）；<= 0 表示未知
+ *  （右页未命中缓存时），此时不夹上限。decodePx 的 desiredSize 本就不会把图放大，
+ *  且 `PreviewEntry.edge` 记的是**请求档位**，所以判据自洽、不会反复重解。 */
+export function displayEdgeOf(viewEdgeValue: number, canvasW: number, canvasH: number,
+  zoom: number, headroom: number, srcLong: number): number {
+  const canvasLong: number = Math.max(canvasW, canvasH);
+  if (canvasLong <= 0) {
+    return viewEdgeValue;
+  }
+  const z: number = zoom > 0 ? zoom : 1;
+  const byZoom: number = Math.ceil(canvasLong * z * headroom);
+  let need: number = Math.max(viewEdgeValue, byZoom);
+  if (srcLong > 0) {
+    need = Math.min(need, srcLong);
+  }
+  return need;
+}
+
 /** SDK `colorSpaceManager.ColorSpace` 的数值 → 中文短名。
  *
  *  ⚠️ 平台边界：HarmonyOS 26 的 colorSpaceManager 只有
