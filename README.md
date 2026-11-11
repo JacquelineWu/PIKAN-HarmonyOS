@@ -767,6 +767,30 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 > ⚠️ 若平台对该目录 URI 返回 `PERSISTENCE_FORBIDDEN`（某些 picker URI 不允许持久化），
 > `persistPermission` 会失败并记日志，重开时探测失败 → 依旧落只读名单态，**不会卡死、不会崩**。
 
+### 实机反馈：重开已能出图，但「往上层」还是按不动（2026-11-11 第三次修正）
+
+`p1` 之后重开能直接出图了，`setItems()` 却**无条件清空** `browseBase` / `browseDir` /
+`pickRootUri`，恢复出来是「图片列表态」，`browseUp()` 读到空 `current` →
+`UP_NAV_NONE` → 只给一句「当前是图片列表，没有上层目录」就返回。
+
+而 `p1` 已经把 picker 原始目录 URI 存进 `lastDirUri` 并在启动时激活了持久授权 ——
+它是纯字符串，完全可以还原目录层级，却只交给 `activatePermission()` 用。
+
+| 新增 | 作用 |
+|---|---|
+| `ResumePlan.restoreUpEnabled()` | `RESTORE_FULL` / `RESTORE_READONLY` 两种模式、且有持久授权目录 URI 时才回填（层级是纯信息，与授权是否有效无关） |
+| `DirName.upContextBaseOf()` | 从原始目录 URI 还原真实路径（`hierPathOf` 归一、`upNavStateOf` 校验，判不出层级返回空串） |
+| `DirName.upContextRawOf()` | 保留带 scheme 的原始 picker URI（`upParentCandidates` / 逐 URI 授权只认这个形态） |
+| `Index.restoreBrowseContext()` | 在 `setItems()` **之后**回填 `browseBase` / `browseDir` / `pickRootUri` / `titlePath` / `canGoUp` |
+
+- **纯字符串、零 IO**：绝不 `listFile` / `statSync` / `openFolder` / `startDirPoll` /
+  弹权限框 / 弹选择器，不把历史 appfreeze 请回启动关键路径。
+- 两条恢复路径（`restoreFromSnapshot()` 与单张兜底）都在 `setItems()` 之后调用；
+  状态栏两处追加「已恢复上次目录「X」· 可继续往上层 · `uc1`」。
+- `browseUp()` 的 READONLY 早退收窄为「只读态**且**没有目录层级」才生效 ——
+  层级已重建时继续走正常层级链，父目录列不出来由 `showUpListInApp()` 出清单。
+- 诊断标记 **`uc1`**（`UP_CTX_TAG`，不是版本号）。
+
 ### 实机反馈：点「往上层」不该弹系统选择目录 dialog（2026-11-11 第四次修正）
 
 用户原话：**「现在按回上层回弹出选择目录 dialog，不是我原意，原意是在 app 内可以显示上层档案目录或档案清单」**。
