@@ -26,7 +26,7 @@
 | 格式 | HEIC / HEIF / JPG / JPEG / PNG / WEBP / BMP / GIF，走鸿蒙系统解码器 |
 | 挑图入口 | 仅 `选择文件夹`（`DocumentSelectMode.FOLDER`）；**`打开图库`（v1.0.6）、`选择图片` 与 `回到上次`（11-10）三个按钮均已取消**，界面上不再出现（见「按钮区精简」章节） |
 | 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `往上层` / `退格` 按**目录层级**进入直接父目录（**不按浏览历史回退**，连续点击逐级到卷 / 硬盘逻辑最上层后停止）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
-| 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` 在无父级时**置灰**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
+| 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` 在无父级时**真正 grey out 禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
 | 鼠标键 | 预览区 **左键放大 ×1.5**（以光标为锚点）、**右键还原**（回适应窗口并归位）、**双击切换全屏**（撤销第一下单击的放大）；双击档案名同样切换全屏 |
@@ -42,7 +42,7 @@
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏与右下角角标实时显示 `缓存 N / 216 张 · xx MB` |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
-| 位置记忆 | `preferences` 记住「上次停在第几张」+ 列表快照；启动只预热上次成功显示的那张（**不自动恢复整份快照**，见 appfreeze 章节）；重新载入列表时 `restoreIndex` 仍会自动落回上次那张（不再有独立按钮） |
+| 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
 | 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` 退出；隐藏应用三块栏与系统状态栏 / 导航栏，左栏整列收起 |
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
@@ -184,6 +184,9 @@ win.setWindowSystemBarEnable([]);     // ③ 隐藏状态栏/导航栏 —— �
   才有 `terminateSelf()`；
 - 退出前**必须 `await flushPos()`** 再退出：落盘是异步文件 I/O，不等就 `terminateSelf()`
   会因为进程先结束而丢掉最后一次位置（位置记忆是防抖 500ms 写的，此时多半还在防抖窗口里）；
+- **11-11 补强**：`Esc` 不是唯一退出路径。切后台 / 锁屏 / 被系统回收走 `onPageHide()`，
+  那里用 `putSync` + `flushSync` **同步**写 6 个小 key（`flushPosSync()`），进程被杀也来得及；
+  `aboutToDisappear()` 再兜一次。详见「退出记住位置 / 重开自动显示」章节；
 - `terminateSelf()` 返回 Promise 且可能失败，失败只记日志，不弹任何提示。
 
 ### 变换分层
@@ -430,7 +433,7 @@ No.7 / 11 / 13 / 15 / 18 / 22 : PreferencesGetValue … completeTime = 03:43:54.
 
 | # | 修法 |
 |---|---|
-| 1 | `AUTO_RESUME_ON_START = false`：启动**只读 5 个小 key**，不再做「静默重扫图库 / 读快照恢复」。恢复动作留给用户点「打开图库」或「回到上次」—— 那时 `applyItems → restoreIndex` 依然会自动落回上次那张，功能没丢，只是不在启动时抢主线程。想要「一打开就自动回上次图」把它改回 `true` |
+| 1 | `AUTO_RESUME_ON_START = false`：启动**只读 5 个小 key**，不再做「静默重扫图库 / 读快照恢复」。恢复动作留给用户点「打开图库」或「回到上次」—— 那时 `applyItems → restoreIndex` 依然会自动落回上次那张，功能没丢，只是不在启动时抢主线程。**（11-11 历史记录）** 该常量现作为「绝不在启动重扫 / 弹权限」的**护栏**恒为 false；想要「一打开就自动显示上次那张图」用的是新开关 `AUTO_SHOW_LAST_ON_START`（见 11-11 章节），**不要**把它改回 `true` |
 | 2 | `SNAP_MAX` 3000 → 600、`SNAP_CHUNK` 600：一块就装下，读回快照只需 1 次 `get` |
 | 3 | `flushSnap()` 首次写盘时清掉旧格式残留（`OLD_SNAP_CHUNKS = 15`）—— 新装或清过数据前，老版本留下的十几块没人读的旧值还躺在文件里 |
 | 4 | 加计时打点：`readLastPos: got pos in N ms`、`snapshot: read N uris in N ms`，下一轮直接看数字 |
@@ -445,7 +448,7 @@ No.7 / 11 / 13 / 15 / 18 / 22 : PreferencesGetValue … completeTime = 03:43:54.
 | 环节 | 做法 |
 |---|---|
 | 记录 | 新增小 key `lastOkUri`。只在**真的解出画面**时才记：`startFocus()`（低清过渡层已可见）与 `loadView()` 成功分支各调一次 `noteShown(uri)`。切过去但没解出来的不算 —— 预热一张打不开的图没意义 |
-| 启动 | `readLastPos()` 里读到 `lastOkUri` 就调 `warmLast()`：推迟 `WARM_DELAY_MS = 300ms` 让开首帧，然后只解 1 张 `PRELOAD_EDGE = 768` 的图存进 `this.warm`。不重扫、不读快照 → 不可能再触发 `PreferencesGetValue` 卡死 |
+| 启动 | `readLastPos()` 里读到 `lastOkUri` 就调 `warmLast()`：推迟 `WARM_DELAY_MS = 300ms` 让开首帧，然后只解 1 张 `PRELOAD_EDGE = 768` 的图存进 `this.warm`。不重扫、不读快照 → 不可能再触发 `PreferencesGetValue` 卡死。**（11-11 注）** 这句只描述 `warmLast()` 本身；11-11 新增的「重开自动显示上次相片」排在 `RESUME_DELAY_MS = 900ms`（首帧 + 预热之后）才读快照，且 `SNAP_MAX` 已降到 600 一块装完 —— 与这里「不在启动关键路径读大快照」不矛盾，详见 11-11 章节 |
 | 接上 | `applyItems()` 里 `clearPreviews()` 之后把 `warm` 塞进缓存，随后 `showPreviewOf(cur)` 直接命中 → 首屏立刻出图，不用再等一次低清解码。若它不属于这一批（换了别的来源），`schedulePreload → evictOutside` 会顺手释放 |
 | 回收 | `aboutToDisappear()` 里若 `warm` 还没被接走就 `release()`，避免 PixelMap 泄漏 |
 
@@ -586,6 +589,104 @@ HiLog 里看到它就说明设备内存已尽用，角标是真实值。
 实机请在 DevEco Studio 编译后看右下角角标：`缓存 N / 216 张 · xx MB / 1.00 GB`，
 N 即设备实际能驻留的张数；HiLog 的 `preload: budget reached` 是预算用尽的正常收工。
 
+## 退出记住位置 / 重开自动显示上次相片，往上层真正 grey out（2026-11-11）
+
+用户两条需求：
+
+> 1）退出 APP 会记下上次的位置、相片，再次打开 APP 会显示之前的图片
+> 2）回上层 grey out
+
+### 根因：保存一直是好的，断的是「启动恢复」和「退出落盘」
+
+| 环节 | 11-11 之前 | 问题 |
+|---|---|---|
+| 记住位置 | `markPos → scheduleFlush(500ms) → flushPos` 写 6 个小 key + 分块快照 | 逻辑完整，但 `flushPos()` 是 **async**；`aboutToDisappear` 里只是「尽力而为」，切后台 / 进程被杀时 Promise 常常没跑完 → **位置丢失** |
+| 启动恢复 | `AUTO_RESUME_ON_START = false`，`readLastPos()` 读完只设一句 `resumeHint` 提示文字 + `warmLast()` 后台预热 1 张 | **根本不显示图片**。历史上因为「启动读 3000 条大快照 + 全量重扫图库」触发 `PreferencesGetValue` 卡死 8 秒，就把整个恢复动作关掉了（见 appfreeze 章节） |
+| 「往上层」置灰 | 明暗色 + `.opacity(0.45)`，但 `onClick` 仍在 | 灰着还能点、点了还弹提示 —— **不是 grey out** |
+
+### 需求 1：安全的启动恢复（绝不重蹈 appfreeze）
+
+新增 `common/ResumePlan.ts` 纯函数模块 + `Index.ets` 恢复链路。核心是**把恢复从「启动关键路径」推到「首帧之后」**：
+
+| 纯函数 | 作用 |
+|---|---|
+| `resumeAction()` | 决定 `SKIP`（用户已操作 / 已恢复过 / 开关关 / 无记忆）、`SNAPSHOT`（恢复整批列表）、`SINGLE`（只显示那一张） |
+| `resumeSingleUri()` | 优先「最后一次**成功显示**」的 `okUri`（预热的就是它），退化到位置里记的 `uri` |
+| `resumeDelaySafe()` | 恢复延迟必须**严格大于**预热延迟 `WARM_DELAY_MS=300` 且 `>= RESUME_MIN_SAFE_MS=600`；配错就拒绝调度 |
+| `exitFlushAction()` | 退出时 `SKIP`（无位置）/ `ASYNC`（prefs 没建好）/ `SYNC`（同步落盘） |
+| `resumeSnapCap()` | 恢复端再夹一道 `SNAP_MAX=600`，防旧残留的 3000 条被拉进启动路径 |
+| `upEnabledAfterResume()` | 恢复出来的是**图片列表态**（`browseBase=''`）→ 强制 `canGoUp=false`，把需求 2 绑进来 |
+
+`Index.ets` 的执行链：
+
+```
+aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
+              → warmLast(okUri)（300ms 后只解 1 张，存进 this.warm）
+              → scheduleShowLast()（只排一个 setTimeout，900ms 后触发）
+                  ↓ 首帧 / 窗口初始化 / 预热全部完成
+              → showLastOnStart()
+                  · resumeAction 决策，只跑一次（resumeDone）
+                  · 用户已自己选了文件夹 / 图片 → 立刻 SKIP，不抢视图
+                  · 只读 1 个小 key（snapCount）+ 分块快照
+                  · SNAPSHOT → restoreFromSnapshot() → setItems → applyItems
+                               → restoreIndex 精确落回上次那张 → showPreviewOf 出图
+                  · 读不出快照 → SINGLE 兜底：只显示上次那一张，
+                                  warm 已预解好 → applyItems adopt 进缓存 → 首屏立即命中
+```
+
+**四条硬边界**（每条都是历史上踩过的坑）：
+
+1. **绝不** `loadAllGallery()` 全量重扫、绝不申请权限、绝不弹选择器 —— 无交互、无 ANR；
+   旧的 `AUTO_RESUME_ON_START` 恒为 `false`，作为护栏常量保留。
+2. 恢复排在 `RESUME_DELAY_MS = 900ms` 之后，且经 `resumeDelaySafe()` 校验；
+   `aboutToAppear` 里一个快照都不读。
+3. `SNAP_MAX` 已从 3000 降到 600、一块装完，恢复端还有 `resumeSnapCap()` 再夹一道。
+4. 单张兜底会**撤销** `setItems` 的落盘副作用（`posPending` / `posTimer` / `snapDirty` / `lastPos`
+   全部复位）—— 否则 500ms 后 `flushPos()` 会把「只有 1 张」的列表写进快照，
+   **覆盖掉上次会话的整批 uri**，下次就再也恢复不出来了。
+
+> **平台限制**：HarmonyOS `DocumentViewPicker` 的 URI 授权是逐 URI、默认不持久的
+> （工程里没有 `persistPermission`）。重启后若系统回收了授权，恢复出来的部分图片可能打不开。
+> 此时 `showPreviewOf` 有 `Image(uri)` 兜底，且状态栏明确提示「若图片打不开请重新选择文件夹」；
+> 列表、位置、文件名都在，不会白屏也不会崩。用「选择文件夹」重新打开同一目录即可恢复全部图片。
+
+### 需求 1 的另一半：退出必须**同步**落盘
+
+`onPageHide()`（切后台 / 锁屏 / 被别的应用盖住）与 `aboutToDisappear()` 都调 `flushPosSync()`：
+
+- SDK 26 的 `putSync`（API 10）/`flushSync`（API 14）同步写 6 个小 key + 落盘，**毫秒级、必达**；
+- `exitFlushAction()` 判定：prefs 已在启动时惰性建好（`readLastPos` 会建）→ `SYNC`；
+  极端早退还没建好 → 退回 `FLUSH_ASYNC` 的 `flushPos()`；
+- **刻意不写大快照**（几百条 uri 同步写会拖慢页面隐藏），快照在换源时已由 500ms 防抖写过；
+  真没写过的极端情况由上面的 SINGLE 兜底覆盖；
+- `aboutToDisappear` 还会 `clearTimeout(resumeTimer)`，避免恢复在页面销毁后还去改视图。
+
+### 需求 2：「往上层」真正 grey out
+
+11-10 版只做了颜色 + 透明度变暗，`onClick` 还在。现在 `toolBtn` 加 `.enabled(enabled)`：
+
+- **视觉**：明暗色 + `.opacity(0.45)`，再叠系统禁用态；
+- **交互**：`.enabled(false)` 后 `onClick` 不再触发，按钮**完全不可交互**；
+- **状态**：`enabled` 只由 `canGoUp` 传入。有父级亮、到卷根 / 图片列表态 /
+  **启动恢复出来的图片列表态**一律灰 —— `applyItems()` 里
+  `canGoUp = upEnabledAfterResume(browseBase, canGoUpFrom(browseBase))` 是唯一刷新点；
+- 键盘 `退格` / `..` 行不是按钮，仍走 `browseUp()` 同源 guard 给「没有父级」提示，
+  **诊断信息没丢**，三条入口的行为结论仍一致；
+- 三个按钮共用 `toolBtn`，其余两个恒传 `true`，不会被误禁用。
+
+### 验证
+
+`node --experimental-strip-types tests/dirname.test.mjs` **238 → 293/293 通过**：
+新增 `ResumePlan` 纯函数用例（恢复决策 8 例、单张 uri、延迟安全、退出落盘、快照限幅、
+恢复态按钮）与源码静态契约（`onPageHide` / `putSync+flushSync` / 恢复函数体不含重扫与选择器 /
+单张兜底撤销落盘 / `.enabled(enabled)` / 其余按钮恒 true 等）。
+状态栏出现 **`rs1`** 即新包（`RESUME_TAG` 只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
+
+按 11-10 约定：**未编译 HAP、未放桌面、未升版本、未 push**。
+实机请在 DevEco Studio 编译后：看几张图 → 按 Home / 切后台 → 重开 APP，
+应自动回到上次那张图且状态栏带 `rs1`；此时「往上层」为禁用灰态，
+点「选择文件夹」进入有父级的目录后按钮才亮起并可逐级上移。
+
 ## 往上层：改为 Windows 文件管理器的目录层级语义（2026-11-10）
 
 按钮从「回上层」改称 **「往上层」**，语义从「沿浏览历史回退」改成对齐 Windows 文件管理器的
@@ -619,18 +720,18 @@ N 即设备实际能驻留的张数；HiLog 的 `preload: budget reached` 是预
 
 | 触发点 | 统一动作 |
 |---|---|
-| `applyItems()` | **唯一刷新点**：同时更新 `source` / `rowCount` / `listW` / `titlePath` / `canGoUp`；`canGoUp = canGoUpFrom(browseBase)` |
+| `applyItems()` | **唯一刷新点**：同时更新 `source` / `rowCount` / `listW` / `titlePath` / `canGoUp`；11-11 起 `canGoUp = upEnabledAfterResume(browseBase, canGoUpFrom(browseBase))`（图片列表态强制 false） |
 | `openFolder()` | 成功才写 `browseBase`（实测能列的真实路径），失败不改任何状态；顶层时不列 `..` 行 |
 | `browseUp()` | 成功经 `openFolder → applyItems` 一起刷新当前路径、目录展示、按钮状态，并清掉与层级无关的 `pickRootUri` 旧锚点 |
 | 三条入口 | 按钮 / `..` 行 / `退格` 全部收口到 `browseUp()`，行为完全一致 |
 
-- **按钮状态**：`toolBtn('往上层', 'up', true, this.canGoUp)`。有父级亮、到卷根或图片列表态置灰；
-  置灰态点击也走 `browseUp()` 的同源 guard，只给「已到卷 / 硬盘的逻辑最上层 · 没有父级了」
-  /「当前是图片列表」提示，**绝不移动目录**（比点了完全没反应更易排查）。
-  置灰用明暗色 + `.opacity()`；SDK 26 的 `CommonMethod` 里确有 `enabled(value: boolean)`，
-  但**刻意不用** `.enabled(false)`：那样点击完全没反应，而顶层已不列 `..` 行，
-  用户就再也看不到「为什么不能再往上」的原因。保留 `onClick`、由同源 guard 拦住，
-  既不移动目录，也能自行排查。
+- **按钮状态**：`toolBtn('往上层', 'up', true, this.canGoUp)`。有父级亮、到卷根或图片列表态禁用。
+  > **11-11 修订**：11-10 版只做明暗色 + `.opacity()` 的**视觉**置灰，`onClick` 仍在、点了还弹提示，
+  > 不是用户要的 grey out。现改为 `.enabled(enabled)` **真正禁用**（SDK 26 `CommonMethod` 有此属性）
+  > + 视觉置灰双保险：无父级时按钮完全不可交互。
+  > 键盘 `退格` / `..` 行不是按钮，仍走 `browseUp()` 同源 guard，给出
+  > 「已到卷 / 硬盘的逻辑最上层 · 没有父级了」/「当前是图片列表」提示，诊断信息没丢。
+  > 三个按钮共用 `toolBtn`，只有「往上层」传 `this.canGoUp`，其余恒传 `true`。
 - **目录展示**：卷根没有父级时 `rows` 不生成 `..` 行，与按钮置灰、状态提示三者一致。
 - **无浏览历史**：`Index.ets` 里已彻底删掉历史栈，`openFolder()` 的参数也从 `push` 改名为
   `resetView`（只控制「是否从第一张开始」，与父级推算无关）。
@@ -657,7 +758,8 @@ Windows 盘符路径同样逐级：`C:/Users/foo/Pictures/2020 → … → C:`�
 `UP_NAV_TAG` 只是诊断标记，**不是版本号**。
 
 按 11-10 约定：**未编译 HAP、未放桌面、未升版本（仍 1.0.7）、未 push**。
-请在 DevEco Studio 里编译后实机点几次「往上层」确认逐级上移与到顶置灰。
+请在 DevEco Studio 里编译后实机点几次「往上层」确认逐级上移与到顶禁用。
+> 按钮「真正 grey out」与「重开自动显示上次相片」是 11-11 的后续需求，见下一章节。
 
 ## 修复：hover 缩略图「不停闪」（2026-11-10，接上节）
 

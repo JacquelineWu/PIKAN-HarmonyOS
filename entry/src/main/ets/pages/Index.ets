@@ -55,6 +55,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, pickerStartO
   textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../common/PreloadBudget';
+import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
+  resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
+  upEnabledAfterResume } from '../common/ResumePlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -67,6 +70,8 @@ const APP_VERSION: string = '1.0.7';
 /** 「往上层」目录层级导航的诊断标记（仅用于右下角诊断串截图辨认新旧包，
  *  不是版本号，不改 AppScope/app.json5）。旧包诊断串里是 anchors/stack，新包是 up4/L 层级。 */
 const UP_NAV_TAG: string = 'up4';
+/** 「启动恢复上次相片」的诊断标记（也不是版本号）。状态栏出现 rs1 即表示装的是新包。 */
+const RESUME_TAG: string = 'rs1';
 /** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
  *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
 const CANVAS_BG: string = '#5F5F5F';
@@ -604,17 +609,35 @@ const SNAP_MAX: number = 600;
  *  分块存成「换行分隔的字符串」，既避开单值过大，也免去 JSON.parse 的类型麻烦。
  *  现在 SNAP_MAX 已降到 600，一块就装得下 —— 启动要把快照读回来时只需 1 次 get。 */
 const SNAP_CHUNK: number = 600;
-  /** 启动时是否自动「静默重扫图库 / 读快照恢复」。
+  /** 【护栏，永远保持 false】启动时是否走旧的「静默重扫图库 / 权限申请」路径。
  *
- *  默认 **false**：启动阶段主线程要忙首帧渲染、窗口初始化，此时再去读快照、甚至跑一次
- *  全量图库扫描，极易被 watchdog 判定为 APP_INPUT_BLOCK（实测就是这么冻住的 8 秒）。
- *  关掉之后启动只读几个小 key（毫秒级），恢复动作留给用户主动点「回到上次」——
- *  那时 applyItems → restoreIndex 依然会自动落回上次那张，功能没丢，只是不在启动时抢主线程。
- *
- *  另外：关掉它**不等于**启动时什么都不干 —— 见 warmLast()，那张「上次成功显示的图」
- *  会在后台单独解好等着，用户挑图 / 回到上次时首屏直接命中缓存。
- *  想要「一打开就自动回到上次图」就把它改回 true（大图库下有 ANR 风险）。 */
+ *  早期 appfreeze 的真根因就是启动路径上的 PreferencesGetValue + 全量图库扫描：
+ *  主线程被卡 8 秒，watchdog 判 APP_INPUT_BLOCK，整个机器冻住。
+ *  这条路径**不再使用**，常量保留只是把「绝不能在启动时重扫 / 弹权限框」写死成代码事实。
+ *  新的启动恢复走 AUTO_SHOW_LAST_ON_START（见下），只读小 key + 分块快照，绝不重扫。 */
 const AUTO_RESUME_ON_START: boolean = false;
+
+/** 启动时是否自动「显示上次那张相片」（2026-11-11 需求 1）。
+ *
+ *  保存链路（markPos → flushPos）一直是好的，断的是**启动恢复**：
+ *  以前重开 APP 只在空态显示一行「上次看到 …」文字，用户还得自己重新选文件夹。
+ *  现在默认 **true**：首帧之后自动把上次的图片显示出来，并尽量恢复整批列表 + 精确落位。
+ *
+ *  安全边界（每条都是历史踩过的坑，不要放宽）：
+ *   · 首帧 / 窗口初始化期间绝不动 preferences —— 恢复排到 RESUME_DELAY_MS 之后；
+ *   · 绝不 loadAllGallery() 全量重扫、绝不申请权限、绝不弹选择器（无交互、无 ANR）；
+ *   · 只读 1 个小 key（snapCount）+ 分块快照，SNAP_MAX 已降到 600（原 3000 会卡死）；
+ *   · 恢复失败 / 授权过期 → 退回「只显示那一张」，UI 不会空白也不会崩；
+ *   · 只跑一次（resumeDone），用户已经自己选了东西就立刻让路（不抢视图）。
+ *
+ *  想关掉自动恢复把它设为 false 即可（回到「只显示提示文字」的旧行为）。 */
+const AUTO_SHOW_LAST_ON_START: boolean = true;
+/** 启动恢复推迟多久：必须 > WARM_DELAY_MS（300），让首帧渲染、窗口初始化和
+ *  「上次那张」的单张预热都先完成，之后才轮到读快照 / 建列表。 */
+const RESUME_DELAY_MS: number = 900;
+/** 恢复延迟的硬下限（resumeDelaySafe 校验用）：低于这个值一律拒绝调度，
+ *  防止以后有人把 RESUME_DELAY_MS 调太小，把恢复又塞回启动关键路径。 */
+const RESUME_MIN_SAFE_MS: number = 600;
 const SNAP_KEY_COUNT: string = 'snapCount';
 const SNAP_KEY_PREFIX: string = 'snap_';   // snap_0 / snap_1 / …
 /** 旧格式最多会留下多少块（3000 / 200 = 15）—— 用于首写时把历史残留清理掉 */
@@ -1238,6 +1261,11 @@ struct Index {
   private posTimer: number = -1;                        // 写盘防抖句柄
   private snapDirty: boolean = false;                   // 图片列表变了（换源）→ 下次写盘时顺带存快照
   private okUri: string = '';                           // 最后一次「成功显示」的 uri（下次启动预热它）
+  /** 启动恢复：只跑一次，且用户已经自己选了东西就立刻让路。 */
+  private resumeDone: boolean = false;
+  private resumeTimer: number = -1;
+  /** 用户是否已经主动操作过（选文件夹 / 选图 / 往上层）。恢复绝不能抢用户当前的视图。 */
+  private userActed: boolean = false;
   /** 本次运行是否已经弹过「读取图库」权限申请。
    *  只弹一次：权限一旦被拒，恢复列表时不该反复弹同一个框。 */
   private permAsked: boolean = false;
@@ -1298,7 +1326,15 @@ struct Index {
     hilog.info(DOMAIN, TAG,
       'PIKAN %{public}s start · preload %{public}d fwd / %{public}d max · spread=%{public}d · dirPoll=%{public}d',
       APP_VERSION, PRELOAD_FWD, PRELOAD_COUNT, SPREAD_PORTRAIT ? 1 : 0, DIR_POLL_MS);
-    this.readLastPos(); // 异步读，不阻塞首帧
+    this.readLastPos(); // 异步读几个小 key，不阻塞首帧；恢复排到首帧之后（见 scheduleShowLast）
+  }
+
+  /** 切后台 / 锁屏 / 被别的应用盖住：这是「退出 APP」最常走的路径。
+   *  ⚠️ 必须**同步**落盘：flushPos() 是 async 的 put + flush，进程随后被杀时
+   *     Promise 可能根本没跑完，「上次的位置 / 相片」就丢了。
+   *     putSync / flushSync 写的是几个小 key（毫秒级），不写大快照，不会卡住切后台。 */
+  onPageHide(): void {
+    this.flushPosSync();
   }
 
   aboutToDisappear(): void {
@@ -1325,7 +1361,11 @@ struct Index {
     this.clearWheel();
     this.clearTopbarTimer();
     this.sizeSeq++; // 作废还在跑的体积补测任务
-    this.flushPos(); // 退出前把最后一次位置落盘（async，尽力而为）
+    if (this.resumeTimer !== -1) {
+      clearTimeout(this.resumeTimer); // 别让恢复在页面已经销毁后还去改视图
+      this.resumeTimer = -1;
+    }
+    this.flushPosSync(); // 退出前把最后一次位置**同步**落盘（进程被杀也不丢）
     if (this.fullscreen) {
       // 页面销毁时若还在全屏，把系统状态栏 / 导航栏还回去，别把窗口状态留在隐藏态
       this.applyWindowFullScreen(false);
@@ -1383,8 +1423,13 @@ struct Index {
       if (ok.length > 0) {
         this.warmLast(ok);
       }
+      // 2026-11-11 需求 1：首帧之后自动把上次的相片显示出来。
+      // 排程放在「提前 return」之前：即使没有完整的 LastPos（只解出过一张图、
+      // 只有 okUri），也能靠单张兜底显示画面，不会白屏。
+      // 这里只排一个 setTimeout，读快照 / 建列表都推迟到 RESUME_DELAY_MS 之后。
+      this.scheduleShowLast();
       if (idx < 0 && uri.length === 0) {
-        return; // 首次启动，没有记忆（预热已经排上了，可以正常返回）
+        return; // 首次启动，没有位置记忆（预热 + 恢复调度都已排上）
       }
       const rawName = await p.get(POS_KEY_NAME, '');
       const rawCount = await p.get(POS_KEY_COUNT, 0);
@@ -1410,12 +1455,101 @@ struct Index {
           this.trySnapRestore();
         }
       } else {
-        // 启动时只记位置、不做重活（恢复动作不再有独立按钮入口）
-        // （见 AUTO_RESUME_ON_START 注释：启动时读快照 + 重扫会触发 APP_INPUT_BLOCK）。
-        this.status = '上次看到「' + saved.name + '」第 ' + (saved.idx + 1) + ' 张 · 可用「选择文件夹」重新打开目录';
+        // 不做「静默重扫 / 权限申请」那套重活（见 AUTO_RESUME_ON_START 护栏注释）。
+        // 恢复动作已由 scheduleShowLast() 排到首帧之后，这里只给一句进行中提示。
+        this.status = '正在恢复上次看到的「' + saved.name + '」第 ' +
+          (saved.idx + 1) + ' 张 · ' + RESUME_TAG;
       }
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'readLastPos failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 排一次「首帧后显示上次相片」。只排一个定时器，重复调用无副作用。
+   *  ⚠️ 绝不在这里读 preferences / 读快照 / 建列表：这里还在启动调用栈上。 */
+  private scheduleShowLast(): void {
+    if (!AUTO_SHOW_LAST_ON_START || this.resumeDone || this.resumeTimer !== -1) {
+      return;
+    }
+    if (!resumeDelaySafe(RESUME_DELAY_MS, WARM_DELAY_MS, RESUME_MIN_SAFE_MS)) {
+      hilog.warn(DOMAIN, TAG, 'resume: unsafe delay %{public}d / warm %{public}d / min %{public}d, skip',
+        RESUME_DELAY_MS, WARM_DELAY_MS, RESUME_MIN_SAFE_MS);
+      return;
+    }
+    this.resumeTimer = setTimeout(() => {
+      this.resumeTimer = -1;
+      this.showLastOnStart();
+    }, RESUME_DELAY_MS);
+  }
+
+  /** 首帧之后真正执行恢复。只读「1 个小 key（snapCount）+ 分块 uri 快照」，
+   *  绝不重扫图库、绝不弹权限框、绝不弹选择器 —— 无交互、无 ANR。
+   *
+   *  两条路径最终都会经过 applyItems() → showPreviewOf()，所以
+   *  「当前路径 / 目录展示 / 往上层按钮状态」与正常载入完全一致：
+   *  恢复出来的是**图片列表态**（browseBase=''），往上层按钮自然 grey out。 */
+  private async showLastOnStart(): Promise<void> {
+    if (this.resumeDone) {
+      return;
+    }
+    this.resumeDone = true; // 只跑一次：无论成功、失败还是用户已抢先操作
+    const saved: LastPos | undefined = this.lastPos;
+    const savedUri: string = saved !== undefined ? saved.uri : '';
+    const single: string = resumeSingleUri(savedUri, this.okUri);
+    // 用户在这 900ms 里已经自己选了文件夹 / 图片，或列表已经有内容 → 立刻让路。
+    const userActed: boolean = this.userActed || this.items.length > 0 ||
+      this.pickerBusy || this.folderBusy;
+    let snapCount: number = 0;
+    try {
+      const store: preferences.Preferences | undefined = await this.posStore();
+      if (store !== undefined) {
+        const rawCount = await store.get(SNAP_KEY_COUNT, 0);
+        snapCount = resumeSnapCap(typeof rawCount === 'number' ? rawCount : 0, SNAP_MAX);
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'resume: read snapCount failed: %{public}s', JSON.stringify(e));
+    }
+    const act: number = resumeAction(userActed, false, AUTO_SHOW_LAST_ON_START,
+      snapCount, savedUri, this.okUri, true);
+    if (act === RESUME_SKIP) {
+      hilog.info(DOMAIN, TAG, 'resume: skip (userActed=%{public}d snap=%{public}d uri=%{public}d)',
+        userActed ? 1 : 0, snapCount, single.length > 0 ? 1 : 0);
+      return;
+    }
+    if (act === RESUME_SNAPSHOT) {
+      const ok: boolean = await this.restoreFromSnapshot(); // setItems → applyItems → restoreIndex → 出图
+      if (ok) {
+        this.status = '已恢复上次会话 · ' + this.items.length + ' 张 · 第 ' +
+          (this.cur + 1) + ' 张 · ' + RESUME_TAG + '（若图片打不开请重新选择文件夹）';
+        hilog.info(DOMAIN, TAG, 'resume: snapshot restored %{public}d items at %{public}d',
+          this.items.length, this.cur);
+        return;
+      }
+      hilog.warn(DOMAIN, TAG, 'resume: snapshot empty/unreadable → fall back to single');
+    }
+    // 最轻兜底：只显示上次那一张。列表只有 1 张也没关系，画面不会空白；
+    // warmLast() 已把它预解好，applyItems 会 adopt 进缓存 → 首屏立即命中。
+    // act 走到这里只可能是 RESUME_SINGLE，或 RESUME_SNAPSHOT 读不出可用快照后的降级。
+    if ((act === RESUME_SINGLE || act === RESUME_SNAPSHOT) && single.length > 0) {
+      const src: string = saved !== undefined && saved.src.length > 0 ? saved.src : '上次会话';
+      this.setItems([single], src);
+      // ⚠️ setItems → applyItems 末尾会 markPos() + snapDirty=true，500ms 后 flushPos
+      //    会把「只有 1 张」的列表写进快照，覆盖掉上次会话的整批 uri；位置记忆也会被
+      //    改成 count=1 / idx=0。单张只是个临时兜底画面，**绝不能污染持久化数据**。
+      //    这里撤销本次 setItems 的落盘副作用，保留原来的 lastPos / 快照。
+      if (this.posTimer !== -1) {
+        clearTimeout(this.posTimer);
+        this.posTimer = -1;
+      }
+      this.posPending = undefined;
+      this.snapDirty = false;
+      if (saved !== undefined) {
+        this.lastPos = saved;
+      }
+      this.status = '已显示上次看到的「' +
+        (saved !== undefined && saved.name.length > 0 ? saved.name : baseName(single)) +
+        '」· ' + RESUME_TAG + '（用「选择文件夹」可重新打开整批图片）';
+      hilog.info(DOMAIN, TAG, 'resume: single shown, snapshot preserved');
     }
   }
 
@@ -1540,6 +1674,46 @@ struct Index {
       await store.flush(); // 不 flush 只写到内存，进程被杀会丢
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'save last pos failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 【同步】把「上次的位置 + 那张相片」落盘 —— 只给 onPageHide / aboutToDisappear 用。
+   *
+   *  为什么必须有它：flushPos() 的 `put` / `flush` 都是 Promise，切后台后进程随时被回收，
+   *  那几个异步写常常一个都没完成 —— 表现就是「重开不记得上次看到哪张」。
+   *  putSync + flushSync（API 10 / 14）同步写 6 个小 key，毫秒级、必达。
+   *
+   *  ⚠️ 这里**刻意不写大快照**：快照是几百条 uri，切后台同步写大 value 会拖慢页面隐藏，
+   *     而且快照在换源时已由 flushPos() 的防抖写过；退出只需要补上「最后停在哪一张」。
+   *     真正没写过的极端情况（刚换源 500ms 内就退出）由启动时的单张兜底覆盖。 */
+  private flushPosSync(): void {
+    let p: LastPos | undefined = this.posPending;
+    if (p === undefined) {
+      p = this.lastPos; // 防抖已经写过一轮，但 lastPos 始终是最新的
+    }
+    const store: preferences.Preferences | undefined = this.prefs;
+    const act: number = exitFlushAction(p !== undefined, store !== undefined);
+    if (act === FLUSH_SKIP) {
+      return;
+    }
+    if (act === FLUSH_ASYNC || store === undefined || p === undefined) {
+      this.flushPos(); // prefs 还没建好（极端早退），只能退回异步尽力而为
+      return;
+    }
+    try {
+      store.putSync(POS_KEY_IDX, p.idx);
+      store.putSync(POS_KEY_URI, p.uri);
+      store.putSync(POS_KEY_NAME, p.name);
+      store.putSync(POS_KEY_COUNT, p.count);
+      store.putSync(POS_KEY_SRC, p.src);
+      store.putSync(POS_KEY_OK, this.okUri);
+      store.flushSync();
+      this.posPending = undefined;
+      hilog.info(DOMAIN, TAG, 'flushPosSync: idx=%{public}d uri=%{public}s',
+        p.idx, p.uri.length > 0 ? 'yes' : 'no');
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'flushPosSync failed: %{public}s', JSON.stringify(e));
+      this.flushPos();
     }
   }
 
@@ -1883,8 +2057,9 @@ struct Index {
     // 「往上层」按钮状态的**唯一**刷新点：与 titlePath 同源，都取自当前真实路径。
     // 任何换源 / 进子目录 / 往上层 / 重扫 / 快照恢复都会经过 applyItems，
     // 因此按钮明暗、当前路径、目录展示三者永远一起更新，不会各说各话。
-    // 非目录浏览态 browseBase='' → canGoUp=false（按钮置灰）。
-    this.canGoUp = canGoUpFrom(this.browseBase);
+    // 非目录浏览态 browseBase=''（含启动恢复出来的图片列表态）→ 没有父级 →
+    // upEnabledAfterResume 强制 false，按钮 grey out；想往上层先「选择文件夹」进目录。
+    this.canGoUp = upEnabledAfterResume(this.browseBase, canGoUpFrom(this.browseBase));
     // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
     const start: number = keepView ? -1 : this.restoreIndex(list);
     if (keepView) {
@@ -3251,6 +3426,7 @@ struct Index {
   }
 
   private chooseFolder(): void {
+    this.userActed = true; // 用户一动手，启动恢复就不该再抢视图
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (!ctx) {
@@ -3570,6 +3746,7 @@ struct Index {
   }
 
   private openFiles(): void {
+    this.userActed = true; // 用户主动挑图：启动恢复让路
     try {
       // getContext(this) 已废弃，改用 getUIContext().getHostContext()
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
@@ -3625,9 +3802,9 @@ struct Index {
         this.chooseFolder();
         break;
       case 'up':
-        // 按钮置灰（canGoUp=false：已到卷根 / 非目录浏览态）时点击也收口到 browseUp()，
-        // 它按 canGoUpFrom 二次校验后只给「没有父级」提示，绝不移动目录。
-        // 按钮 / 退格 / '..' 行三条入口行为因此完全一致。
+        // 按钮在 canGoUp=false 时已被 .enabled(false) 禁用，点击到不了这里；
+        // 键盘退格 / '..' 行仍走 browseUp()，它按 canGoUpFrom 二次校验后只给
+        // 「没有父级」提示，绝不移动目录。三条入口的**行为结论**因此完全一致。
         this.browseUp();
         break;
       case 'sort':
@@ -4034,9 +4211,15 @@ struct Index {
   // UI 片段
   // ------------------------------------------------------------------
 
-  /** enabled=false 只做视觉置灰，不引入 .enabled()：置灰态点击仍会走 doAction →
-   *  browseUp() 的同源 guard，给出「已到顶层 / 没有父级」提示而不会移动目录，
-   *  比点了完全没反应更好排查。三个按钮共用，只有「往上层」传 canGoUp。 */
+  /** 2026-11-11 需求 2：「往上层」要真正 grey out。
+   *  11-10 版只做了颜色 / 透明度变暗，却没禁用点击 —— 灰着还能点、点了还弹提示，
+   *  不是用户要的 grey out。现在 .enabled(enabled) 让无父级时按钮**完全不可交互**：
+   *   · 视觉：明暗色 + .opacity(0.45)，系统禁用态再叠一层灰；
+   *   · 交互：.enabled(false) 后 onClick 不再触发；
+   *   · 状态：enabled 只由 canGoUp 传入（applyItems 同源刷新），有父级亮、到卷根 /
+   *     图片列表态 / 启动恢复态一律灰；
+   *   · 键盘退格 / '..' 行不是按钮，仍走 browseUp() 的同源 guard 给「没有父级」提示，
+   *     诊断信息没丢。三个按钮共用，只有「往上层」传 canGoUp，其余恒传 true。 */
   @Builder
   toolBtn(label: string, act: string, flex: boolean, enabled: boolean) {
     Button(label)
@@ -4050,6 +4233,7 @@ struct Index {
       .margin(3)
       .layoutWeight(flex ? 1 : 0)
       .opacity(enabled ? 1.0 : 0.45)
+      .enabled(enabled)
       .onClick(() => this.doAction(act))
   }
 

@@ -7,13 +7,17 @@
  *   /storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像
  * 时左栏抬头空白。同时覆盖中文、%XX 编码、file://docs 文档 URI、
  * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底，
- * 以及「往上层」按目录层级逐级上行（不按浏览历史、不越级、不循环、到卷根停止）。
+ * 「往上层」按目录层级逐级上行（不按浏览历史、不越级、不循环、到卷根停止），
+ * 以及 2026-11-11 的「退出记住位置 / 启动自动显示上次相片 / 往上层真正 grey out」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../entry/src/main/ets/common/PreloadBudget.ts';
+import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, FLUSH_SYNC,
+  resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
+  upEnabledAfterResume } from '../entry/src/main/ets/common/ResumePlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -379,7 +383,8 @@ check('置灰用明暗色 + opacity（不依赖新组件属性）',
   /\.fontColor\(enabled \?/.test(INDEX) && /\.opacity\(enabled \? 1\.0 : 0\.45\)/.test(INDEX), true);
 check('源码不再有浏览历史栈 dirStack', /dirStack/.test(INDEX), false);
 check('openFolder 参数改名 resetView（无压栈语义）', /resetView: boolean/.test(INDEX), true);
-check('applyItems 同源刷新 canGoUp', /this\.canGoUp = canGoUpFrom\(this\.browseBase\)/.test(INDEX), true);
+check('applyItems 同源刷新 canGoUp（恢复态再经 upEnabledAfterResume 收口）',
+  /this\.canGoUp = upEnabledAfterResume\(this\.browseBase, canGoUpFrom\(this\.browseBase\)\)/.test(INDEX), true);
 const UP_FN = INDEX.slice(INDEX.indexOf('private async browseUp('), INDEX.indexOf('private chooseFolderAt('));
 check('browseUp 用 upLevelOf 求直接父级', /const target: string = upLevelOf\(current\)/.test(UP_FN), true);
 check('browseUp 用 canGoUpFrom 同源判定', /const canUp: boolean = canGoUpFrom\(current\)/.test(UP_FN), true);
@@ -446,6 +451,123 @@ check('角标仍显示 PRELOAD_COUNT 与 PRELOAD_MAX_BYTES',
   /'缓存 ' \+ this\.cacheCount \+ ' \/ ' \+ PRELOAD_COUNT \+ ' 张'/.test(INDEX) &&
   /'\/ ' \+ fmtBytes\(PRELOAD_MAX_BYTES\)/.test(INDEX), true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+console.log('--- ResumePlan: 启动恢复 / 退出落盘决策（2026-11-11 需求 1） ---');
+check('resumeAction 常量互不相同',
+  new Set([RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT]).size, 3);
+check('flush 常量互不相同',
+  new Set([FLUSH_SKIP, FLUSH_SYNC, FLUSH_ASYNC]).size, 3);
+check('有快照 + 首帧后 → 恢复整批列表',
+  resumeAction(false, false, true, 600, '/a/1.jpg', '/a/1.jpg', true), RESUME_SNAPSHOT);
+check('有快照但还在启动关键路径 → 只显示单张（绝不读大 value）',
+  resumeAction(false, false, true, 600, '/a/1.jpg', '/a/1.jpg', false), RESUME_SINGLE);
+check('快照为空但有 okUri → 单张兜底',
+  resumeAction(false, false, true, 0, '', '/a/1.jpg', true), RESUME_SINGLE);
+check('快照为空、只有位置 uri → 单张兜底',
+  resumeAction(false, false, true, 0, '/a/1.jpg', '', true), RESUME_SINGLE);
+check('用户已主动操作 → SKIP（不抢视图）',
+  resumeAction(true, false, true, 600, '/a/1.jpg', '/a/1.jpg', true), RESUME_SKIP);
+check('已经恢复过 → SKIP（只跑一次）',
+  resumeAction(false, true, true, 600, '/a/1.jpg', '/a/1.jpg', true), RESUME_SKIP);
+check('开关关闭 → SKIP（回到旧行为）',
+  resumeAction(false, false, false, 600, '/a/1.jpg', '/a/1.jpg', true), RESUME_SKIP);
+check('既没快照也没 uri → SKIP（首次启动，不白屏乱猜）',
+  resumeAction(false, false, true, 0, '', '', true), RESUME_SKIP);
+
+console.log('--- resumeSingleUri(): 优先「成功显示过」的那张 ---');
+check('okUri 优先', resumeSingleUri('/a/saved.jpg', '/a/ok.jpg'), '/a/ok.jpg');
+check('okUri 为空退回 savedUri', resumeSingleUri('/a/saved.jpg', ''), '/a/saved.jpg');
+check('两者都空', resumeSingleUri('', ''), '');
+
+console.log('--- resumeDelaySafe(): 恢复必须让开首帧 + 预热 ---');
+check('900 / 300 / 600 安全', resumeDelaySafe(900, 300, 600), true);
+check('等于预热延迟 → 不安全', resumeDelaySafe(300, 300, 600), false);
+check('小于预热延迟 → 不安全', resumeDelaySafe(200, 300, 600), false);
+check('低于最小让路时间 → 不安全', resumeDelaySafe(500, 300, 600), false);
+check('负延迟 → 不安全', resumeDelaySafe(-1, 300, 600), false);
+check('负的预热延迟 → 不安全', resumeDelaySafe(900, -1, 600), false);
+
+console.log('--- exitFlushAction(): 退出必须同步落盘 ---');
+check('没位置可写 → SKIP', exitFlushAction(false, true), FLUSH_SKIP);
+check('prefs 未建好 → 退回异步', exitFlushAction(true, false), FLUSH_ASYNC);
+check('有位置 + prefs 就绪 → 同步', exitFlushAction(true, true), FLUSH_SYNC);
+
+console.log('--- resumeSnapCap(): 恢复端再夹一道 SNAP_MAX ---');
+check('旧残留 3000 条夹到 600', resumeSnapCap(3000, 600), 600);
+check('小于上限原样', resumeSnapCap(120, 600), 120);
+check('0 条', resumeSnapCap(0, 600), 0);
+check('负数', resumeSnapCap(-5, 600), 0);
+check('上限非正视为 0', resumeSnapCap(600, 0), 0);
+
+console.log('--- upEnabledAfterResume(): 恢复态「往上层」必须 grey out ---');
+check('图片列表态 browseBase 为空 → 强制 false', upEnabledAfterResume('', false), false);
+check('即使 canGoUp 误传 true，空路径仍禁用', upEnabledAfterResume('', true), false);
+check('目录浏览态有父级 → 亮起', upEnabledAfterResume('/storage/Users/currentUser/Download', true), true);
+check('目录浏览态到卷根 → 禁用', upEnabledAfterResume('/storage/Users/currentUser', false), false);
+
+console.log('--- 源码静态契约：启动恢复 / 退出落盘 / 真正 grey out ---');
+check('新开关默认开、旧重扫护栏仍为 false',
+  /const AUTO_SHOW_LAST_ON_START: boolean = true;/.test(INDEX) &&
+  /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX), true);
+check('恢复延迟 900ms > 预热 300ms 且 >= 下限 600ms',
+  /const RESUME_DELAY_MS: number = 900;/.test(INDEX) &&
+  /const WARM_DELAY_MS: number = 300;/.test(INDEX) &&
+  /const RESUME_MIN_SAFE_MS: number = 600;/.test(INDEX), true);
+check('ResumePlan 纯函数已引入', /from '..\/common\/ResumePlan'/.test(INDEX), true);
+check('恢复调度只排 setTimeout，不放在 aboutToAppear 同步路径',
+  /private scheduleShowLast\(\): void \{/.test(INDEX) &&
+  /this\.resumeTimer = setTimeout\(/.test(INDEX), true);
+check('恢复前用 resumeDelaySafe 校验延迟',
+  /if \(!resumeDelaySafe\(RESUME_DELAY_MS, WARM_DELAY_MS, RESUME_MIN_SAFE_MS\)\)/.test(INDEX), true);
+check('恢复只跑一次 + 用户操作让路',
+  /this\.resumeDone = true;/.test(INDEX) &&
+  /const userActed: boolean = this\.userActed \|\| this\.items\.length > 0/.test(INDEX), true);
+// 把 showLastOnStart 函数体单独切出来检查：里面绝不能出现重扫 / 权限 / 选择器调用。
+const RESUME_FN = INDEX.slice(INDEX.indexOf('private async showLastOnStart('),
+  INDEX.indexOf('/** 启动预热：把「上次成功显示的最后一张」'));
+check('showLastOnStart 函数体不含全量重扫 / 权限申请 / 选择器',
+  /loadAllGallery|queryAllPhotos|ensureGalleryPermission|DocumentViewPicker|PhotoViewPicker/
+    .test(RESUME_FN), false);
+check('旧的静默重扫护栏恒 false（不会在启动时被打开）',
+  /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX), true);
+check('恢复读的只是 snapCount 小 key，且经 resumeSnapCap 限幅',
+  /store\.get\(SNAP_KEY_COUNT, 0\)/.test(INDEX) &&
+  /resumeSnapCap\(/.test(INDEX), true);
+check('恢复失败退回单张显示', /resume: snapshot empty\/unreadable → fall back to single/.test(INDEX), true);
+check('单张兜底撤销落盘副作用（不覆盖快照 / 位置）',
+  /this\.posPending = undefined;/.test(INDEX) && /this\.snapDirty = false;/.test(INDEX), true);
+check('用户主动入口置 userActed',
+  /this\.userActed = true; \/\/ 用户一动手/.test(INDEX) &&
+  /this\.userActed = true; \/\/ 用户主动挑图/.test(INDEX), true);
+check('onPageHide 同步落盘',
+  /onPageHide\(\): void \{\s*this\.flushPosSync\(\);/.test(INDEX), true);
+check('aboutToDisappear 也同步落盘 + 清恢复定时器',
+  /this\.flushPosSync\(\); \/\/ 退出前把最后一次位置\*\*同步\*\*落盘/.test(INDEX) &&
+  /clearTimeout\(this\.resumeTimer\); \/\/ 别让恢复在页面已经销毁后还去改视图/.test(INDEX), true);
+check('flushPosSync 用 putSync + flushSync（同步必达）',
+  /store\.putSync\(POS_KEY_IDX, p\.idx\);/.test(INDEX) &&
+  /store\.putSync\(POS_KEY_URI, p\.uri\);/.test(INDEX) &&
+  /store\.putSync\(POS_KEY_OK, this\.okUri\);/.test(INDEX) &&
+  /store\.flushSync\(\);/.test(INDEX), true);
+check('flushPosSync 不写大快照（只补小 key）',
+  /private flushPosSync\(\): void \{[\s\S]{0,1400}?flushSync\(\);/.test(INDEX), true);
+check('flushPosSync 用 exitFlushAction 决策并保留异步兜底',
+  /const act: number = exitFlushAction\(p !== undefined, store !== undefined\);/.test(INDEX) &&
+  /if \(act === FLUSH_ASYNC \|\| store === undefined \|\| p === undefined\)/.test(INDEX), true);
+check('toolBtn 真正 .enabled(enabled) 禁用（需求 2）',
+  /\.enabled\(enabled\)/.test(INDEX), true);
+check('往上层按钮仍绑定 canGoUp',
+  /this\.toolBtn\('往上层', 'up', true, this\.canGoUp\)/.test(INDEX), true);
+check('恢复态按钮状态由 upEnabledAfterResume 同源刷新',
+  /this\.canGoUp = upEnabledAfterResume\(this\.browseBase, canGoUpFrom\(this\.browseBase\)\);/.test(INDEX), true);
+check('其余按钮恒传 true（不会被误禁用）',
+  /this\.toolBtn\('全屏', 'full', false, true\)/.test(INDEX) &&
+  /this\.toolBtn\('选择文件夹', 'folder', true, true\)/.test(INDEX), true);
+check('诊断标记 rs1 不是版本号',
+  /const RESUME_TAG: string = 'rs1'/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+check('AppScope 版本未改', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
