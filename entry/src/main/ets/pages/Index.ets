@@ -110,6 +110,11 @@ const CANVAS_BG: string = '#5F5F5F';
 /** 缩放角标的口径：true = 相对「原图像素」的倍率（100% = 1:1，与 ACDSee / Photoshop 一致）；
  *  false = 相对「适应窗口」的倍率（旧行为，适应窗口时显示 100%）。 */
 const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;
+/** 右下角「目录诊断串」显示开关（2026-11-11 用户要求：预览右下角只显示
+ *  「缓存数量」与「缩放百分比」两项）。默认 false = 完全不画诊断行。
+ *  需要实机截图排查时临时改成 true 即可：diagLine 的赋值逻辑全部保留，
+ *  不改任何业务流程、不用重新加代码。 */
+const SHOW_DIAG_BADGE: boolean = false;
 /** 左栏是否隐藏以 . 开头的档案名 / 目录名（Win64 4600bcc） */
 const HIDE_DOT_FILES: boolean = true;
 /** 是否启用「竖图对开」（连续两张竖图左右并排）。对应 Win64 6347756。
@@ -181,7 +186,7 @@ const DBL_CLICK_UNDO_MS: number = 400;
  *  2026-11-11 由 50 扩到 100（用户：「尽量缓存前后 100 张图」）——
  *  长图库连翻 / 快速跳读更容易命中，翻页不等解码。
  *  「尽量」= 窗口目标放宽到 100，实际驻留由 PRELOAD_COUNT / PRELOAD_MAX_BYTES 双重预算裁剪；
- *  右下角角标「缓存 N / 216 张 · xx MB」显示真实值，不强行保证 201 张全驻留。 */
+ *  右下角角标「缓存 N 张」显示真实值（不再显示内存占用 / 上限），不强行保证 201 张全驻留。 */
 const PRELOAD_FWD: number = 100;
 /** 预载窗口：当前位置「往前」的张数 —— 没有它的话，快速往回滚就一张都命中不了缓存。
  *  改这两个常量就等于改窗口大小；缓存是**跟着当前位置滑动**的（见 evictOutside），
@@ -207,7 +212,7 @@ const PRELOAD_QUANT: number = 256;
  *  窗口 201 张 × 1536 档位（3:2 图约 6.3MB/张）≈ 1.27GB；方图（1536² 约 9.4MB/张）≈ 1.9GB。
  *  2026-11-11 由 512MB 提到 1GB：旧上限只够约 80 张，窗口扩到 100 后会被立刻挤掉，等于白扩。
  *  ⚠️ 鸿蒙设备内存普遍小于 PC，1GB 是「尽量」的安全天花板 —— 触顶即按 LRU 淘汰并收工
- *     （preloadSaturated 防止「解→淘汰→再解」死循环），实际驻留数看角标「N / 216 张」。
+ *     （preloadSaturated 防止「解→淘汰→再解」死循环），实际驻留数看角标「N 张」。
  *  ⚠️ 内存吃紧的机器：把 PRELOAD_MAX_BYTES 调回 512MB，或把 PRELOAD_MAX_EDGE 调到 1280
  *     （单张约 4.4MB，1GB 反而能装下整窗 201 张）—— 不要调低 PRELOAD_MIN_EDGE，
  *     档位小于屏幕实际像素会让每张命中缓存的图都得再解一次全清（切图卡顿老问题）。 */
@@ -1349,12 +1354,15 @@ struct Index {
   private preloadBytes: number = 0;                   // 当前缓存估算占用
   /** 右下角角标要显示的缓存账目（镜像）。
    *  真正的账本是上面两个普通字段（预载每解一张就动一次，做成 @State 会让整棵树反复重建），
-   *  只在「入缓存 / 淘汰 / 清空」三个口子上 sync 一次给 UI —— 频率最多几十次/轮，够看又不抖。 */
+   *  只在「入缓存 / 淘汰 / 清空」三个口子上 sync 一次给 UI —— 频率最多几十次/轮，够看又不抖。
+   *  2026-11-11 起角标只画 cacheCount（「缓存 N 张」）；cacheBytes 保留为内部账目镜像，
+   *  不再显示 MB / 上限，需要临时看内存占用时把它接回 Text 即可。 */
   @State cacheCount: number = 0;
   @State cacheBytes: number = 0;
-  /** 目录浏览诊断行：把「装的是哪一版 + picker 实际返回的 uri 形态」画在屏幕上。
-   *  之前四次修复共用 versionCode 4 / 1.0.4，实机无法分辨装的是旧包还是新包；
-   *  而 agent 侧截不到屏、读不到 hilog，只能靠这一行让用户截图带回来。 */
+  /** 目录浏览诊断行：把「装的是哪一版 + picker 实际返回的 uri 形态」记下来。
+   *  之前四次修复共用 versionCode 4 / 1.0.4，实机无法分辨装的是旧包还是新包，
+   *  所以这一行曾经画在右下角供截图。2026-11-11 起右下角只留两项信息，
+   *  默认由 SHOW_DIAG_BADGE=false 隐藏；赋值逻辑全部保留，排查时把开关改 true 即可再截图。 */
   @State diagLine: string = '';
   private preloadSeq: number = 0;                     // 预载任务代号，切换图片时自增使旧链作废
   private preloadBusy: boolean = false;
@@ -3235,7 +3243,7 @@ struct Index {
     this.syncCacheStat();
   }
 
-  /** 把缓存账目同步给右下角角标。改动落在三处口子上：pushPreview / evictOutside / clearPreviews。 */
+  /** 把缓存账目同步给右下角角标（只显示张数）。改动落在三处口子上：pushPreview / evictOutside / clearPreviews。 */
   private syncCacheStat(): void {
     this.cacheCount = this.previews.length;
     this.cacheBytes = this.preloadBytes;
@@ -5096,11 +5104,11 @@ struct Index {
           .padding(12)
           .hitTestBehavior(HitTestMode.Transparent)
 
-          // 右下角角标：目录诊断 + 缓存账目 + 缩放倍率
+          // 右下角角标：只显示「缓存数量」与「缩放百分比」两项（2026-11-11 用户要求）。
+          // 目录诊断串默认隐藏（SHOW_DIAG_BADGE=false）；需要实机截图排查时把开关改 true，
+          // diagLine 的赋值逻辑一直在，改一行常量即可恢复，不动任何业务流程。
           Column() {
-            // 目录浏览态的诊断快照（非目录态为空，完全不显示）。
-            // 用户实机反馈「左栏修复没生效」时，截一张图就能带上这三组信息。
-            if (this.diagLine.length > 0) {
+            if (SHOW_DIAG_BADGE && this.diagLine.length > 0) {
               Text(this.diagLine)
                 .fontSize(10)
                 .fontColor('#9aa5b8')
@@ -5112,19 +5120,11 @@ struct Index {
                 .borderRadius(4)
                 .margin({ bottom: 6 })
             }
-            // 缓存：驻留张数 / 估算占用（圆括号里是张数上限与字节上限，便于看窗口是否填满）
+            // 缓存：只显示驻留张数；内存占用 / 张数上限 / 字节上限都不再画
             Row() {
-              Text('缓存 ' + this.cacheCount + ' / ' + PRELOAD_COUNT + ' 张')
+              Text('缓存 ' + this.cacheCount + ' 张')
                 .fontSize(11)
                 .fontColor('#9aa5b8')
-              Text(fmtBytes(this.cacheBytes))
-                .fontSize(12)
-                .fontColor('#dfe5ef')
-                .margin({ left: 8 })
-              Text('/ ' + fmtBytes(PRELOAD_MAX_BYTES))
-                .fontSize(10)
-                .fontColor('#5a6272')
-                .margin({ left: 4 })
             }
             .padding({ left: 8, right: 8, top: 4, bottom: 4 })
             .backgroundColor('#cc12161c')
@@ -5254,8 +5254,8 @@ struct Index {
             .layoutWeight(1)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
-          // 可观测（Win64 015464f）：预载 N 张 · xx MB，与右下角角标同源
-          Text('预载 ' + this.cacheCount + ' 张 · ' + fmtBytes(this.cacheBytes))
+          // 可观测：预载 N 张，与右下角角标同源（2026-11-11 起不再显示 MB 占用）
+          Text('预载 ' + this.cacheCount + ' 张')
             .fontSize(11)
             .fontColor('#8b95a8')
             .margin({ right: 12 })

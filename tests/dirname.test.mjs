@@ -9,7 +9,8 @@
  * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底，
  * 「往上层」按目录层级逐级上行（不按浏览历史、不越级、不循环、到卷根停止），
  * 2026-11-11 的「退出记住位置 / 启动自动显示上次相片」，
- * 以及同日澄清的「往上层按钮永不 grey out / 永不禁用、点了要有反应」。
+ * 以及同日澄清的「往上层按钮永不 grey out / 永不禁用、点了要有反应」，
+ * 同日末的「预览右下角只显示缓存数量 + 缩放百分比」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -477,9 +478,11 @@ check('evictOutside 用窗口集合查表（窗口翻倍后不 O(P×W)）',
   /const win: Set<string> = this\.windowUris\(\)/.test(INDEX) &&
   /if \(win\.has\(e\.uri\)\)/.test(INDEX), true);
 check('不再逐条调 inWindow', /this\.inWindow\(/.test(INDEX), false);
-check('角标仍显示 PRELOAD_COUNT 与 PRELOAD_MAX_BYTES',
-  /'缓存 ' \+ this\.cacheCount \+ ' \/ ' \+ PRELOAD_COUNT \+ ' 张'/.test(INDEX) &&
-  /'\/ ' \+ fmtBytes\(PRELOAD_MAX_BYTES\)/.test(INDEX), true);
+check('角标不再显示 PRELOAD_COUNT / PRELOAD_MAX_BYTES 上限，但预算常量仍在（11-11 只留张数）',
+  /'缓存 ' \+ this\.cacheCount \+ ' \/ ' \+ PRELOAD_COUNT \+ ' 张'/.test(INDEX) === false &&
+  /'\/ ' \+ fmtBytes\(PRELOAD_MAX_BYTES\)/.test(INDEX) === false &&
+  /const PRELOAD_COUNT: number = 216;/.test(INDEX) &&
+  /const PRELOAD_MAX_BYTES: number = 1024 \* 1024 \* 1024;/.test(INDEX), true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log('--- ResumePlan: 启动恢复 / 退出落盘决策（2026-11-11 需求 1） ---');
@@ -1099,6 +1102,39 @@ check('按钮 / 退格 / .. 行三条入口仍全部收口 browseUp',
   (INDEX.match(/this\.browseUp\(\)/g) || []).length >= 3, true);
 check('按钮永不禁用（非注释行无 .enabled）', /\.enabled\(/.test(CODE_LINES) === false, true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+console.log('--- 源码静态契约：预览右下角只显示「缓存数量 + 缩放百分比」两项 ---');
+const BADGE = INDEX.slice(INDEX.indexOf('// 右下角角标：只显示'),
+  INDEX.indexOf('// 全屏时右上角浮出'));
+const BADGE_ALWAYS = BADGE.slice(BADGE.indexOf('// 缓存：只显示'));
+const BADGE_CODE = BADGE_ALWAYS.split('\n')
+  .filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
+check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
+  /const SHOW_DIAG_BADGE: boolean = false;/.test(INDEX), true);
+check('诊断行的渲染被开关包住，diagLine 赋值点一个没删',
+  /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(BADGE) &&
+  (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
+check('右下角恒显示区只有 2 个 Text 组件（缓存数量 + 缩放百分比）',
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length, 2);
+check('缓存行只写「缓存 N 张」，不出现 MB / 上限 / 张数分母',
+  /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(BADGE_CODE) &&
+  /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes/.test(BADGE_CODE) === false, true);
+check('缩放百分比仍在右下角，100% = 原图像素 1:1 口径未改',
+  /Text\(this\.zoomPercentText\(\)\)/.test(BADGE_CODE) &&
+  /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
+check('状态栏「预载 N 张」不再带 MB 占用',
+  /Text\('预载 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) &&
+  /fmtBytes\(this\.cacheBytes\)/.test(INDEX) === false, true);
+check('fmtBytes 未被误删（左栏字节列 + 左上角信息浮层仍在用）',
+  (INDEX.match(/fmtBytes\(/g) || []).length >= 3, true);
+check('预载预算常量与 syncCacheStat 保持原样（只改显示，不改逻辑）',
+  /const PRELOAD_COUNT: number = 216;/.test(INDEX) &&
+  /const PRELOAD_MAX_BYTES: number = 1024 \* 1024 \* 1024;/.test(INDEX) &&
+  /this\.cacheBytes = this\.preloadBytes;/.test(INDEX), true);
+check('按钮永不禁用 / 版本号未升 / 防冻结闸门不减',
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8, true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
