@@ -20,13 +20,14 @@
  *   · HEIC / JPG / PNG / WEBP / BMP / GIF 解码 —— 走鸿蒙系统 Image 解码器（系统 codec）
  *   · GPU 加速 —— ArkUI Image 组件由平台渲染服务做纹理上传 + 合成缩放/旋转，已硬件加速
  *   · 鼠标滚轮控制上一张 / 下一张（Ctrl + 滚轮 = 缩放，互不冲突）
- *   · 缩放 / 旋转 ±90° / 水平垂直镜像 / 拖拽平移 / 双指捏合 / 双击复位
- *   · 全屏：F11 或顶栏「全屏」按钮进入，Esc / F11 / 右上角「退出全屏」退出；
- *     隐藏应用三块栏 + 隐藏系统状态栏/导航栏，画布铺满屏幕
+ *   · 缩放 / 旋转 ±90° / 水平垂直镜像 / 拖拽平移 / 双指捏合；
+ *     第七轮起**左键单击不再放大**，双击画布 = 进入 / 退出全屏
+ *   · 全屏：F11 / 双击进入，Esc / F11 / 双击退出；隐藏应用三块栏 +
+ *     隐藏系统状态栏/导航栏，画布铺满屏幕
  *   · 键盘：← → 翻页，↑ ↓ 缩放，空格 幻灯片，R 旋转，F 1:1，0 复位，Esc 关闭应用
  *   · 快速：缩略图随 List 虚拟化懒加载，仅可见项参与解码
- *   · 后台预载：自动预先解码当前位置「前后各 100 张」（可直接显示的清晰度），
- *     窗口随位置滑动、触到内存预算就收工；切换时命中即上屏、不再补解码
+ *   · 后台预载：载入时把整库按「可直接显示」档位解码成 PixelMap 并缓存复用；
+ *     解码数据按 uri 复用 + 在途合并（同一张不重复解），滚轮切图只查缓存、零解码
  *   · 切图过渡：默认 FOCUS_BLUR = false，命中预载瞬时上屏、无动画；
  *     未命中才先用 768px 低清占位，清晰图就绪后瞬时替换
  *
@@ -72,7 +73,10 @@ import { ExifTransform, Size2, exifTransformOf, exifSizeOf, viewEdgeOf, preloadE
   colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
   packWindowRect, parseWindowRect, windowRectUsable,
-  shouldSaveWindowRect, collapsedOf } from '../common/SessionState';
+  shouldSaveWindowRect, collapsedOf, windowModeFlagOf,
+  shouldRestoreMaximized, shouldScheduleWindowRestore } from '../common/SessionState';
+import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
+  decodeKeyOf } from '../common/DecodeCache';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -180,15 +184,16 @@ const GALLERY_USE_PHOTO_PICKER: boolean = true;
 /** 直接扫描图库时的安全上限，避免超大图库一次性吃满内存 */
 const SCAN_CAP: number = 20000;
 
-/** 鼠标键缩放倍率（相对步进）：左键放大 50%（×1.5）。
- *  Win64 84adb7a 起右键改为「还原」（回到适应窗口并归位），不再放大 —— 与 ACDSee 一致。
- *  ZOOM_RIGHT 保留仅为兼容旧配置，当前路径不使用。 */
+/** 鼠标键缩放倍率（旧配置，第七轮起**停用**）：左键放大 50%（×1.5）。
+ *  用户要求「取消左 click 放大功能，仅保留双击进入全屏」→ onMouseButton 不再调用
+ *  zoomAt(ZOOM_LEFT)。两个常量保留只为兼容旧配置与文档，当前路径均不使用。
+ *  右键仍为「还原」（回到适应窗口并归位）—— 与 ACDSee 一致。 */
 const ZOOM_LEFT: number = 1.5;
 const ZOOM_RIGHT: number = 2.0;
-/** 按下到抬起若移动超过该距离（vp）就判定为「拖拽平移」，不触发点击缩放 */
+/** 按下到抬起若移动超过该距离（vp）就判定为「拖拽平移」，不触发点击 */
 const CLICK_MOVE_TOL: number = 4;
-/** 双击判定窗口（ms）：在这个时间内的单击放大，会被随后的双击「撤销」掉，
- *  保证「双击进出全屏，画面保持原样」（Win64 84adb7a）。 */
+/** 双击判定窗口（ms）：保留给「双击档案名 / 双击画布」时撤销残留单击快照用；
+ *  第七轮起左键单击本身不放大，这个值只作防御性兼容。 */
 const DBL_CLICK_UNDO_MS: number = 400;
 
 /** 预载窗口：当前位置「往后」的张数（主要浏览方向）。
@@ -214,6 +219,14 @@ const QUICK_EDGE: number = 768;
  *  切图卡顿就是这么来的。缓存要存「可直接显示」的清晰度，命中就上屏，不再补解码。 */
 const PRELOAD_MIN_EDGE: number = 1024;
 const PRELOAD_MAX_EDGE: number = 1536;
+/** 第七轮：预载解码档位的硬上限。预载不再只解「偏保守的低档位」，而是按
+ *  decodeEdgeOf() 抬到「当前画布可直接显示」的档位 —— 同一张图只在载入时解一次，
+ *  滚轮切到任意一张都直接复用已解码 PixelMap，不再当场补一次全清解码。
+ *  2048 是「画质到位」与「1GB 缓存预算能多装几张」的折中：普通画布（约 1600vp）
+ *  按 1.05 headroom 只需要约 1700 像素，2048 已满足，命中即上屏、无需再解；
+ *  比直接按 displayEdge()(约 2400~3840) 解全库多驻留约一倍的张数，滚轮连翻更稳。
+ *  全屏时仍用 FULLSCREEN_PRELOAD_MAX_EDGE=2560 放宽。 */
+const PRELOAD_DECODE_MAX_EDGE: number = 2048;
 /** 预载档位 = 画布长边 × 该系数，再向上量化到 PRELOAD_QUANT 的倍数（留一点放大余量） */
 const PRELOAD_EDGE_FACTOR: number = 1.15;
 const PRELOAD_QUANT: number = 256;
@@ -777,6 +790,9 @@ const OLD_SNAP_CHUNKS: number = 15;
 const META_KEY_PREFIX: string = 'snapMeta_';    // 与 snap_N 一一对应的「体积,日期」块
 const WIN_KEY_RECT: string = 'winRect';          // 'left,top,width,height'（px）
 const WIN_KEY_COLLAPSED: string = 'listCollapsed'; // 1 = 收起；0 / 缺失 = 展开
+/** 第七轮：窗口形态小 key。1 = 退出前是最大化（含系统 FULL_SCREEN 形态）；
+ *  0 / 缺失 = 自由窗口。与 winRect 分开存：最大化时不能被 rect 恢复打回普通尺寸。 */
+const WIN_KEY_MAXIMIZED: string = 'winMaximized';
 const WIN_MIN_W: number = 320;
 const WIN_MIN_H: number = 240;
 const WIN_MAX_W: number = 16384;
@@ -1225,7 +1241,9 @@ struct ArchiveRow {
     Row() {
       // 左栏不再常驻缩略图：统一只给一个 18vp 的类型标记，档案名多出 38vp。
       // 缩略图只在 mouse over 整行时由 bindPopup 浮出（见 hoverThumb）。
-      Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : '·'))
+      // 第七轮：移除档案行最左侧的「圆点」标记（图片行 / 灰行留空），
+      // 上层 / 目录行仍保留 ↑ / ▣ 导航符号，行内各列对齐不变。
+      Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : ''))
         .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
         .fontColor(this.iconColor())
         .width(18)
@@ -1459,7 +1477,7 @@ struct Index {
   private shiftDown: boolean = false; // Shift + R/H/V/B 组合键（Win64 10-29 起）
   private baseTx: number = 0;
   private baseTy: number = 0;
-  // 单击放大前的视图快照：双击来临时用它撤销「第一下单击」，保证进出全屏画面不变
+  // 单击视图快照（第七轮起左键不放大，恒为 -1）：保留给双击档案名 / 双击画布做防御性兼容
   private clickSnapZoom: number = -1;
   private clickSnapTx: number = 0;
   private clickSnapTy: number = 0;
@@ -1564,15 +1582,22 @@ struct Index {
   // ---- 会话界面状态（2026-11-12）：窗口大小 / 位置 与 左栏收起态 ----
   /** 启动时从 preferences 读回的窗口 rect 文本；空串 = 没有记忆 / 首次安装。 */
   private savedWindowRect: string = '';
+  /** 启动时读回的窗口形态：1 = 退出前最大化 / 系统全屏，0 = 自由窗口。 */
+  private savedWindowMaximized: number = 0;
   private winRectTimer: number = -1;         // 拖窗口 rect 的防抖写盘句柄
-  private winRectApplied: boolean = false;  // 本次启动窗口 rect 只恢复一次
+  private winRectApplied: boolean = false;  // 本次启动窗口 rect / 形态只恢复一次
   /** 空态区的一行提示（「上次看到 …」）。必须是 @State：它是异步读回来的，要靠它刷新 UI。
    *  而 lastPos 本身刻意不是 @State —— 切图时每帧都改它会导致整个界面反复重建。 */
   @State resumeHint: string = '';
 
   // ---- 后台预载缓存（不用 @State：靠 @State cur / viewPixelMap 变化触发重建即可）----
+  /** 已解码图片数据的缓存：每条 PreviewEntry.px 就是一张可直接上屏的 PixelMap。
+   *  第七轮起所有解码结果都从这里复用，同一 uri 只保留 edge 最大的那张。 */
   private previews: PreviewEntry[] = [];              // 简易 LRU：命中移到队尾，超容量从队头淘汰
   private preloadBytes: number = 0;                   // 当前缓存估算占用
+  /** 在途解码：key = decodeKeyOf(uri, edge)，同一张 + 同一档位只解一次，
+   *  并发的预载 / 主视图 / 右页 / 低清占位请求共用同一个 Promise（减少重复解码）。 */
+  private decodeInflight: Map<string, Promise<PreviewEntry | undefined>> = new Map();
   /** 右下角角标要显示的缓存账目（镜像）。
    *  真正的账本是上面两个普通字段（预载每解一张就动一次，做成 @State 会让整棵树反复重建），
    *  只在「入缓存 / 淘汰 / 清空」三个口子上 sync 一次给 UI —— 频率最多几十次/轮，够看又不抖。
@@ -1743,9 +1768,12 @@ struct Index {
       // 都是小 key，和上面 4 个一起在首帧之后异步读，绝不碰大快照、绝不重扫。
       const rawRect = await p.get(WIN_KEY_RECT, '');
       const rawCollapsed = await p.get(WIN_KEY_COLLAPSED, 0);
+      const rawMaximized = await p.get(WIN_KEY_MAXIMIZED, 0);
       this.savedWindowRect = typeof rawRect === 'string' ? rawRect : '';
       this.listCollapsed = collapsedOf(typeof rawCollapsed === 'number' ? rawCollapsed : 0);
+      this.savedWindowMaximized = typeof rawMaximized === 'number' ? rawMaximized : 0;
       // 排程放在所有提前 return 之前：即使没有完整 LastPos，窗口也要恢复。
+      // 第七轮：只最大化过、从未存下自由窗口 rect 的用户也要排程（不能因 rect 为空短路）。
       this.scheduleRestoreWindowRect();
       // 预热「上次成功显示的那张」：后台解 1 张，与下面读位置/恢复完全解耦，
       // 就算它失败也只是少一次缓存命中，不影响任何别的路径。
@@ -2025,7 +2053,8 @@ struct Index {
    *  ⚠️ 绝不在这里动窗口 API：启动关键路径上取到的 windowRect 可能不准
    *     （官方 FAQ：aboutToAppear 阶段窗口尚未可见），统一推迟到窗口稳定后。 */
   private scheduleRestoreWindowRect(): void {
-    if (this.savedWindowRect.length === 0 || this.winRectApplied) {
+    if (this.winRectApplied ||
+      !shouldScheduleWindowRestore(this.savedWindowRect, this.savedWindowMaximized)) {
       return;
     }
     setTimeout(() => {
@@ -2033,18 +2062,15 @@ struct Index {
     }, WIN_RECT_RESTORE_MS);
   }
 
-  /** 把上次退出时的窗口 rect 应用到主窗口。
-   *  · 只在自由窗口（FLOATING）态生效：最大化 / 全屏是既有交互，绝不被启动恢复抢走；
+  /** 把上次退出时的窗口**形态**与 rect 应用到主窗口（第七轮：最大化也要恢复）。
+   *  · 启动已是最大化 / 全屏 → 保持现状，绝不改动用户窗口；
+   *  · 上次是最大化 → maximize(EXIT_IMMERSIVE) 恢复最大化，且**不做 resize / moveWindowTo**
+   *    （那两步会把刚恢复的最大化打回普通尺寸，正是「重启后回退」的根因）；
+   *  · 否则按 rect 恢复自由窗口的大小与位置；
    *  · 每步独立 try/catch：某一步在该机型不支持时只记日志，不影响图片恢复链；
    *  · 窗口实例由 EntryAbility 异步放进 AppStorage，没就绪就短延时重试。 */
   private async applySavedWindowRect(retry: number): Promise<void> {
     if (this.winRectApplied) {
-      return;
-    }
-    const rect: WindowRect | undefined = parseWindowRect(this.savedWindowRect);
-    if (rect === undefined ||
-      !windowRectUsable(rect, WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
-      hilog.info(DOMAIN, TAG, 'winRect: no usable saved rect, keep system default');
       return;
     }
     const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
@@ -2058,7 +2084,8 @@ struct Index {
     }
     let floating: boolean = false;
     try {
-      floating = win.getWindowStatus() === window.WindowStatusType.FLOATING;
+      const st = win.getWindowStatus();
+      floating = st === window.WindowStatusType.FLOATING;
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'winRect: getWindowStatus failed');
       return;
@@ -2069,6 +2096,24 @@ struct Index {
       return;
     }
     this.winRectApplied = true; // 只恢复一次，之后用户怎么拖 / resize 都不再干预
+    // ① 上次退出是最大化 → 恢复最大化，绝不按 rect 缩回普通尺寸。
+    //    EXIT_IMMERSIVE = 带标题栏 / dock 的常规最大化，正是用户手动最大化后的形态。
+    if (shouldRestoreMaximized(this.savedWindowMaximized, true, this.fullscreen)) {
+      try {
+        await win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE);
+        hilog.info(DOMAIN, TAG, 'winRect: restored maximized window (no rect resize)');
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'winRect: maximize failed: %{public}s', JSON.stringify(e));
+      }
+      return;
+    }
+    // ② 自由窗口：按上次 rect 恢复大小与位置。
+    const rect: WindowRect | undefined = parseWindowRect(this.savedWindowRect);
+    if (rect === undefined ||
+      !windowRectUsable(rect, WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
+      hilog.info(DOMAIN, TAG, 'winRect: no usable saved rect, keep system default');
+      return;
+    }
     try {
       await win.resize(rect.width, rect.height);
     } catch (e) {
@@ -2083,9 +2128,11 @@ struct Index {
       rect.left, rect.top, rect.width, rect.height);
   }
 
-  /** 抓当前窗口 rect（px）并**同步**落盘 —— 退出前必达，进程被杀也不丢。
+  /** 抓当前窗口形态 + rect（px）并**同步**落盘 —— 退出前必达，进程被杀也不丢。
    *  左栏收起态一并写下去，保证「重启前后界面状态一致」。
-   *  全屏 / 非自由窗口态不更新 rect 记忆（那是临时形态，不是用户调好的窗口）。 */
+   *  第七轮：最大化形态单独写 winMaximized，与 winRect 互不覆盖：
+   *  最大化时不更新自由窗口 rect，自由窗口时不把最大化标记留成 1。
+   *  全屏 / 形态未知态不覆写记忆（那是临时形态或瞬时状态）。 */
   private saveWindowRectSync(): void {
     const store: preferences.Preferences | undefined = this.prefs;
     if (store === undefined) {
@@ -2100,11 +2147,32 @@ struct Index {
     }
     const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
     let floating: boolean = false;
+    let maximized: boolean = false;
+    let statusKnown: boolean = false;
     if (win !== undefined) {
       try {
-        floating = win.getWindowStatus() === window.WindowStatusType.FLOATING;
+        const st = win.getWindowStatus();
+        floating = st === window.WindowStatusType.FLOATING;
+        // 用户点标题栏最大化按钮可能落到 MAXIMIZE，也可能落到 FULL_SCREEN（带/不带沉浸），
+        // 两者重启后都按「常规最大化」恢复，标题栏 / dock 照常显示。
+        maximized = st === window.WindowStatusType.MAXIMIZE ||
+          st === window.WindowStatusType.FULL_SCREEN;
+        statusKnown = floating || maximized;
       } catch (e) {
         hilog.warn(DOMAIN, TAG, 'winRect: getWindowStatus failed');
+      }
+    }
+    // 形态小 key：MINIMIZE / UNDEFINED / SPLIT_SCREEN 一律不覆写，避免切一次后台就丢掉记忆。
+    // APP 自持的真全屏也不写（那是临时形态，退出后回到原来的常规窗口）。
+    if (win !== undefined && statusKnown && !this.fullscreen) {
+      const flag: number = windowModeFlagOf(this.fullscreen, maximized, floating, statusKnown);
+      if (flag >= 0) {
+        try {
+          store.putSync(WIN_KEY_MAXIMIZED, flag);
+          wrote = true;
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'winRect: save maximized flag failed');
+        }
       }
     }
     if (win !== undefined && shouldSaveWindowRect(this.fullscreen, floating)) {
@@ -2271,7 +2339,9 @@ struct Index {
   private warmLast(uri: string): void {
     setTimeout(() => {
       const t0: number = Date.now();
-      this.decodeTo(uri, this.preloadEdge())
+      // allowReuse=false：warm 必须自有一张 PixelMap（aboutToDisappear 会 release），
+      // 绝不能拿缓存里那张共用，否则换源 / 退出时会把缓存的图释放掉。
+      this.decodeTo(uri, this.preloadEdge(), false)
         .then((e: PreviewEntry | undefined) => {
           if (e === undefined) {
             hilog.warn(DOMAIN, TAG, 'warm: decode failed');
@@ -2646,7 +2716,9 @@ struct Index {
     const hit: PreviewEntry | undefined = this.previewEntry(uri);
     const srcLong: number = hit !== undefined ? Math.max(hit.w, hit.h) : 0;
     const need: number = this.displayEdge(srcLong);
-    if (hit !== undefined && hit.edge >= need) {
+    const reuseNeed: number = this.reuseEdge(srcLong);
+    // 第七轮：命中已解码数据且档位够当前显示 → 直接复用，不再为 oversampling 重解一次。
+    if (hit !== undefined && shouldReuseDecoded(hit.edge, reuseNeed)) {
       this.rightOwned = undefined;
       this.rightPixelMap = hit.px;
       return;
@@ -2654,13 +2726,7 @@ struct Index {
     this.decodeTo(uri, need)
       .then((e: PreviewEntry | undefined) => {
         if (token !== this.rightToken || e === undefined) {
-          if (e !== undefined) {
-            try {
-              e.px.release();
-            } catch (err) {
-              // ignore
-            }
-          }
+          this.releaseUncachedEntry(e);
           return;
         }
         // 交给缓存持有（不再自持有，避免与缓存淘汰双重 release）
@@ -3088,9 +3154,9 @@ struct Index {
     this.status = '缩放 ' + this.zoomPercentText();
   }
 
-  /** 鼠标按键（对齐 Win64 84adb7a）：
-   *  左键 = 放大 50%（以光标为锚点，连点累积）；右键 = 还原（适应窗口并归位）；
-   *  双击 = 切换全屏，且会**撤销第一下单击的放大**，让进出全屏画面保持原样。
+  /** 鼠标按键（第七轮：取消左键放大，只保留双击进全屏）：
+   *  左键 = **不缩放**（单击只当作双击的第一下，视图保持原样）；右键 = 还原（适应窗口并归位）；
+   *  双击 = 切换全屏，由 TapGesture(count: 2) 收口。
    *  用「按下→抬起位移」区分点击与拖拽：拖拽是平移手势，不应顺带触发缩放。 */
   private onMouseButton(event: MouseEvent): void {
     if (event.action === MouseAction.Press) {
@@ -3129,17 +3195,16 @@ struct Index {
       if (btn !== MouseButton.Left) {
         return;
       }
-      // 记下放大前的状态：若这是「双击的第一下」，随后的双击手势会把它恢复回去
-      this.clickSnapZoom = this.zoom;
-      this.clickSnapTx = this.tx;
-      this.clickSnapTy = this.ty;
+      // 第七轮：左键单击不再放大（用户要求「取消左 click 放大功能，仅保留双击进入全屏」）。
+      // 只把「无待撤销放大」的状态写清楚：双击的 TapGesture 随后收口切全屏，
+      // 双击第一下不会改变视图，onDoubleTapCanvas / undoLastClickZoom 也无需回退任何缩放。
+      this.clickSnapZoom = -1;
       this.clickSnapAt = Date.now();
-      // 立即执行，不做任何延迟 —— 单击放大是最高频操作，延迟会明显发滞
-      this.zoomAt(ZOOM_LEFT, event.x, event.y);
     }
   }
 
-  /** 双击画布：撤销第一下单击的放大 → 切换全屏（Win64 84adb7a / 7ff850d）。 */
+  /** 双击画布：切全屏（第七轮起左键单击不放大，这里只做防御性的旧快照回退）。
+   *  仍是「双击进入 / 退出全屏」的唯一收口，滚轮 / 列表双击走的也都是 toggleFull()。 */
   private onDoubleTapCanvas(): void {
     if (this.clickSnapZoom >= 0 && Date.now() - this.clickSnapAt <= DBL_CLICK_UNDO_MS) {
       this.zoom = this.clickSnapZoom;
@@ -3150,7 +3215,7 @@ struct Index {
     this.toggleFull();
   }
 
-  /** 撤销最近一次单击放大（供双击档案名复用），不影响其它视图状态。 */
+  /** 防御性兼容：若还残留「单击放大」快照就撤销（第七轮起恒无），供双击档案名复用。 */
   private undoLastClickZoom(): void {
     if (this.clickSnapZoom >= 0 && Date.now() - this.clickSnapAt <= DBL_CLICK_UNDO_MS) {
       this.zoom = this.clickSnapZoom;
@@ -3296,6 +3361,8 @@ struct Index {
       return;
     }
     this.loadMeta(this.cur);
+    // 第七轮：滚轮 / 翻页切图只做「定位 → 查已解码缓存 → 复用上屏」，解码全部在
+    // 载入时的后台全量预载链里完成，绝不在滚轮事件里才启动解码（详见 showPreviewOf）。
     this.showPreviewOf(this.cur);
     this.refreshSpread();
     // 第二个参数 smooth=false：快速翻页时不要播滚动动画，否则每次切换都重启一段动画，
@@ -3652,24 +3719,81 @@ struct Index {
   //   · 预算触顶就收工（preloadSaturated）：窗口比设备内存装得下的时候，
   //     再解一张只会把窗口里另一张挤掉，链会变成「解→淘汰→再解」的死循环。
   //     前后交替补齐（preloadOrder）保证预算不足时两个方向都有覆盖。
-  //   · 档位不能按原图分辨率预载（几十张就是几个 GB），故夹在 [1024, 1536]。
+  //   · 档位不能按原图分辨率预载（几十张就是几个 GB），故由 preloadEdge() 夹在
+  //     [1024, PRELOAD_DECODE_MAX_EDGE] 内；PRELOAD_MAX_BYTES 才是最终防 OOM 硬闸。
+  //   · 第七轮：decodeEdgeOf() 把预载档位抬到「当前画布可直接显示」的档位，
+  //     每张图只在载入时解一次，滚轮切图只复用已解码 PixelMap（不再补一次全清）；
+  //     shouldReuseDecoded() / reuseEdge() 按实际显示像素判「够不够」，
+  //     decodeKeyOf() 合并同一 (uri,edge) 的并发解码，杜绝重复解码。
   //
   //  ⚠️ 旧版把预载定为 768px「仅供模糊占位」，于是每张命中缓存的图都还要再解一次
   //  「画布长边×2」的全清 —— 大图那一次能解到 1 秒以上，切图卡顿就是这么来的。
   // ------------------------------------------------------------------
 
-  /** 按给定长边上限解码一张图。失败返回 undefined（不影响正常显示路径）。
-   *  edge = QUICK_EDGE(768) 得到低清占位；edge = preloadEdge() 得到「可显示清晰度」的预载；
-   *  edge = viewEdge() 得到放大时用的全清图。三种场景共用同一套系统 codec。 */
-  private decodeTo(uri: string, edge: number): Promise<PreviewEntry | undefined> {
+  /** 解码入口（第七轮：所有解码先查「已解码数据缓存」并复用，减少重复解码）。
+   *  edge = QUICK_EDGE(768) 低清占位；edge = preloadEdge() 可显示档位预载；
+   *  edge = displayEdge() 放大时的全清图。三种场景共用同一套系统 codec。
+   *
+   *  ① allowReuse=true 且缓存里已有档位足够的 PixelMap → **直接返回那条已解码数据，零解码**；
+   *  ② 同一 (uri, edge) 已有在途解码 → 共用同一个 Promise，并发请求只解一次；
+   *  ③ 都没有才真正 decodePx；失败 uri 记黑名单，避免无限重试。
+   *  ⚠️ 预热 warm 必须自有一张 PixelMap（aboutToDisappear 会 release），故传 allowReuse=false。
+   *  ⚠️ 复用 / 合并拿到的条目归缓存所有，调用方在「代号已作废」时要用
+   *     releaseUncachedEntry() 判断后再释放，绝不能直接 px.release()（会花屏）。 */
+  private decodeTo(uri: string, edge: number,
+    allowReuse: boolean = true): Promise<PreviewEntry | undefined> {
     // ⚠️ 只读名单态的总闸门：所有主视图 / 预载 / 右页 / 预热解码都从这里过。
     //    恢复出来的是一批授权已失效的死 uri，任何一次 decodePx 都是同步跨进程 openSync；
     //    在这里集中短路，比在每个调用点各挡一次更可靠，也杜绝漏网。
     if (!bulkIoAllowed(this.restoreMode)) {
       return Promise.resolve<PreviewEntry | undefined>(undefined);
     }
-    // 抽离到模块级 decodePx：列表缩略图也用同一份解码逻辑（同一套系统 codec）
-    return decodePx(uri, edge);
+    if (!allowReuse) {
+      return decodePx(uri, edge);
+    }
+    const hit: PreviewEntry | undefined = this.previewEntry(uri);
+    if (hit !== undefined && shouldReuseDecoded(hit.edge, edge)) {
+      return Promise.resolve<PreviewEntry | undefined>(hit); // 复用已解码数据，不再解一次
+    }
+    const key: string = decodeKeyOf(uri, edge);
+    const inflight: Promise<PreviewEntry | undefined> | undefined = this.decodeInflight.get(key);
+    if (inflight !== undefined) {
+      return inflight; // 同一张 + 同一档位只解一次：预载 / 主视图 / 右页并发也不重复解
+    }
+    const job: Promise<PreviewEntry | undefined> = decodePx(uri, edge)
+      .then((e: PreviewEntry | undefined): PreviewEntry | undefined => {
+        this.decodeInflight.delete(key);
+        if (e === undefined) {
+          this.failed.add(uri);
+        }
+        return e;
+      })
+      .catch((): PreviewEntry | undefined => {
+        this.decodeInflight.delete(key);
+        this.failed.add(uri);
+        return undefined;
+      });
+    this.decodeInflight.set(key, job);
+    return job;
+  }
+
+  /** 只释放「还没被缓存接管」的解码结果。
+   *  复用 / 在途合并拿到的 PixelMap 归 previews 所有，调用方代号作废时绝不能 release；
+   *  判断依据就是缓存里是否已存在同一张 px。 */
+  private releaseUncachedEntry(e: PreviewEntry | undefined): void {
+    if (e === undefined) {
+      return;
+    }
+    for (let i = 0; i < this.previews.length; i++) {
+      if (this.previews[i].px === e.px) {
+        return; // 缓存已接管：所有权归缓存，调用方不动
+      }
+    }
+    try {
+      e.px.release();
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'release uncached decode skipped');
+    }
   }
 
   /** 查缓存；命中则移到队尾（LRU）。返回整条 Entry（过渡层还要用它的原图宽高）。
@@ -3711,8 +3835,20 @@ struct Index {
     return PRELOAD_ALL ? fullCacheTargetOf(this.items.length, PRELOAD_ALL_CAP) : PRELOAD_COUNT;
   }
 
-  /** 入缓存，并按「张数 + 总字节」双重上限淘汰最旧的 */
+  /** 入缓存，并按「张数 + 总字节」双重上限淘汰最旧的。
+   *  第七轮：decodeTo 复用 / 在途合并会把「已在缓存里的那张」再交回来一次，
+   *  这里必须先查重 —— 同一张 PixelMap 只保留一条，否则账目翻倍、淘汰时会双重 release。 */
   private pushPreview(e: PreviewEntry): void {
+    for (let i = 0; i < this.previews.length; i++) {
+      if (this.previews[i].px === e.px) {
+        // 复用命中：只刷新 LRU 位置，不重复入列、不重复计字节。
+        const same: PreviewEntry = this.previews[i];
+        this.previews.splice(i, 1);
+        this.previews.push(same);
+        this.syncCacheStat();
+        return;
+      }
+    }
     this.previews.push(e);
     this.preloadBytes += e.bytes;
     while ((this.previews.length > this.cacheCap() || this.preloadBytes > PRELOAD_MAX_BYTES) &&
@@ -3852,6 +3988,7 @@ struct Index {
     }
     this.previews = [];
     this.preloadBytes = 0;
+    this.decodeInflight.clear(); // 换源：旧批次在途解码的合并键一并作废
     this.syncCacheStat();
     // 缓存被清空后，当前显示的若正是缓存里的那张，就不能再指向它
     this.viewPixelMap = undefined;
@@ -3913,17 +4050,23 @@ struct Index {
     const uri: string = this.items[idx].uri;
     const hit: PreviewEntry | undefined = this.previewEntry(uri);
     if (hit !== undefined) {
-      // ① 命中缓存 → 先上屏（翻页快的关键），再按左右页共用的判据看档位够不够
+      // ① 命中缓存 → **直接复用已解码的 PixelMap 上屏**，滚轮切图路径零解码。
+      //    全库在载入时就由后台预载链解到可显示档位（preloadEdge → decodeEdgeOf），
+      //    所以「切到某张才开始解码」这件事在常规连续查看里根本不会发生。
       this.showDecoded(hit);
-      const need: number = this.showNeed(hit);
-      // ② 档位不够才补一张全清；够就不必再解。
-      //    升级结果由 upgradePreview() 写回缓存，所以每张只解一次，不会每次翻页都重解
-      //    （早先不管够不够都解一次全清，每张多花几百毫秒，切图卡顿就是这么来的）。
-      if (need <= 0 || hit.edge < need) {
+      // ② 只有「已解码数据连当前画布实际显示像素都不够」才后台补一张：
+      //    判据用 reuseEdge()（按画布 × zoom 的实际像素），不再用含 oversampling 的
+      //    displayEdge() 逼着每张命中缓存的图再解一次。补解走 UPGRADE_DELAY_MS 延迟，
+      //    且结果写回缓存供下次复用 —— 同一张图最多解一次。
+      const reuseNeed: number = this.reuseEdge(Math.max(hit.w, hit.h));
+      const fullNeed: number = this.showNeed(hit);
+      if (!shouldReuseDecoded(hit.edge, reuseNeed) && fullNeed > hit.edge) {
         this.loadView(uri, token, UPGRADE_DELAY_MS);
       }
     } else {
-      // ③ 未命中 → 768 低清占位（避免空白）+ 立刻解可显示清晰度
+      // ③ 预算裁剪后极少数「后台链还没铺到」的图：低清占位 + 可显示档位解码。
+      //    decodeTo 的复用 / 在途合并保证并发请求不重复解同一张；
+      //    解完由 upgradePreview 写回缓存，之后滚轮再翻到它就是命中即上屏。
       this.clearBlur();
       this.loadQuick(uri, token);
       this.loadView(uri, token, 0);
@@ -4049,13 +4192,8 @@ struct Index {
   private async loadQuick(uri: string, token: number): Promise<void> {
     const q: PreviewEntry | undefined = await this.decodeTo(uri, QUICK_EDGE);
     if (token !== this.curToken) {
-      if (q !== undefined) {
-        try {
-          q.px.release();
-        } catch (e) {
-          hilog.warn(DOMAIN, TAG, 'release stale quick skipped');
-        }
-      }
+      // 复用 / 在途合并拿到的那张归缓存所有，不能直接 release（会花屏）。
+      this.releaseUncachedEntry(q);
       return;
     }
     if (q === undefined) {
@@ -4093,15 +4231,10 @@ struct Index {
     hilog.info(DOMAIN, TAG, 'loadView: begin edge=%{public}d', edge);
     const ret: PreviewEntry | undefined = await this.decodeTo(uri, edge);
     hilog.info(DOMAIN, TAG, 'loadView: decoded %{public}s', ret === undefined ? 'FAILED' : 'ok');
-    // 解码期间又切了图 → 丢弃这次结果（并释放我们自己刚解出来的那张），绝不能盖到新图上
+    // 解码期间又切了图 → 丢弃这次结果（只释放「还没被缓存接管」的那张），绝不能盖到新图上。
+    // 复用 / 在途合并拿到的 PixelMap 归缓存所有，这里绝不能 release。
     if (token !== this.curToken) {
-      if (ret !== undefined) {
-        try {
-          ret.px.release();
-        } catch (e) {
-          hilog.warn(DOMAIN, TAG, 'release stale view skipped');
-        }
-      }
+      this.releaseUncachedEntry(ret);
       return;
     }
     if (ret === undefined) {
@@ -4146,6 +4279,14 @@ struct Index {
   private displayEdge(srcLong: number): number {
     return displayEdgeOf(this.viewEdge(), this.canvasW, this.canvasH,
       this.zoom, DISPLAY_HEADROOM, srcLong);
+  }
+
+  /** 「已解码数据够不够直接上屏」的判据（第七轮）。
+   *  与 displayEdge() 的区别：后者是**解码目标**（含 1.5×~2× oversampling），
+   *  前者只按当前画布 × zoom 实际要显示的像素算。命中缓存时用前者判断，
+   *  已解码数据够清晰就直接上屏，不必为了 oversampling 再把同一张图重解一遍。 */
+  private reuseEdge(srcLong: number): number {
+    return reuseEdgeOf(this.canvasW, this.canvasH, this.zoom, DISPLAY_HEADROOM, srcLong);
   }
 
   /** 画布尺寸变了（多半是进出全屏）：按新尺寸「立刻」重解当前这张，不走 UPGRADE_DELAY_MS。
@@ -4224,11 +4365,18 @@ struct Index {
 
   /** 预载档位：按画布尺寸动态取，向上量化到 PRELOAD_QUANT 的倍数。
    *  全屏时上限放宽到 FULLSCREEN_PRELOAD_MAX_EDGE（普通态 1536），让前后 100 张也跟着画布放大。
-   *  ⚠️ 必须是 ceil 不是 floor：向下量化会让档位小于屏幕实际像素，命中缓存还得再解一次全清。 */
+   *  ⚠️ 必须是 ceil 不是 floor：向下量化会让档位小于屏幕实际像素，命中缓存还得再解一次全清。
+   *
+   *  第七轮：再用 decodeEdgeOf() 抬到「当前画布可直接显示」的档位（夹在
+   *  PRELOAD_DECODE_MAX_EDGE / FULLSCREEN_PRELOAD_MAX_EDGE 内控内存）。
+   *  这样每张图**只在载入时的后台预载链里解一次**，滚轮切到任意一张都直接复用
+   *  已解码 PixelMap 上屏，切图路径不再启动解码 —— 这正是「不得在滚轮切换时才开始解码」。 */
   private preloadEdge(): number {
-    return preloadEdgeOf(this.canvasW, this.canvasH, this.fullscreen,
+    const base: number = preloadEdgeOf(this.canvasW, this.canvasH, this.fullscreen,
       PRELOAD_EDGE_FACTOR, PRELOAD_QUANT, PRELOAD_MIN_EDGE, PRELOAD_MAX_EDGE,
       FULLSCREEN_PRELOAD_MAX_EDGE);
+    const cap: number = this.fullscreen ? FULLSCREEN_PRELOAD_MAX_EDGE : PRELOAD_DECODE_MAX_EDGE;
+    return decodeEdgeOf(base, this.displayEdge(0), cap);
   }
 
   /** 启动后台预载。已在跑就只自增代号，让现有链自动跟到最新位置，避免并发多条链。
@@ -4336,14 +4484,9 @@ struct Index {
   private onAllDecoded(seq: number, idx: number, uri: string,
     entry: PreviewEntry | undefined): void {
     if (seq !== this.allSeq) {
-      if (entry !== undefined) {
-        try {
-          entry.px.release();
-        } catch (e) {
-          hilog.warn(DOMAIN, TAG, 'release stale all-preload skipped');
-        }
-      }
-      return; // 换源：旧结果丢弃，别盖到新数据源
+      // 换源：旧结果丢弃；复用 / 合并来的那张归缓存，不能直接 release。
+      this.releaseUncachedEntry(entry);
+      return;
     }
     this.allDone.add(idx);
     if (entry !== undefined) {
@@ -5930,11 +6073,11 @@ struct Index {
                 .fontSize(13)
                 .fontColor('#5a6272')
                 .margin({ top: 12 })
-              Text('左键放大 50% · 右键放大 100% · 拖拽平移')
+              Text('双击进入全屏 · 右键还原 · 拖拽平移')
                 .fontSize(11)
                 .fontColor('#454c5a')
                 .margin({ top: 6 })
-              Text('双击复位 · Ctrl + 滚轮缩放')
+              Text('滚轮切换图片 · Ctrl + 滚轮缩放')
                 .fontSize(11)
                 .fontColor('#454c5a')
                 .margin({ top: 2 })
@@ -6032,7 +6175,7 @@ struct Index {
           .padding(12)
           .hitTestBehavior(HitTestMode.Transparent)
 
-          // 右下角角标：只显示「缓存数量」与「缩放百分比」两项（2026-11-11 用户要求）。
+          // 右下角角标：只显示「缩放百分比」一项（第七轮：移除百分比上方的「缓存 N 张」）。
           // 目录诊断串默认隐藏（SHOW_DIAG_BADGE=false）；需要实机截图排查时把开关改 true，
           // diagLine 的赋值逻辑一直在，改一行常量即可恢复，不动任何业务流程。
           Column() {
@@ -6048,16 +6191,8 @@ struct Index {
                 .borderRadius(4)
                 .margin({ bottom: 6 })
             }
-            // 缓存：只显示驻留张数；内存占用 / 张数上限 / 字节上限都不再画
-            Row() {
-              Text('缓存 ' + this.cacheCount + ' 张')
-                .fontSize(11)
-                .fontColor('#9aa5b8')
-            }
-            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-            .backgroundColor('#cc12161c')
-            .borderRadius(4)
-
+            // 「缓存 N 张」文案 / 控件已移除：缓存账目仍由 syncCacheStat 维护（内部可观测），
+            // 只是不再画在百分比上方，右下角只剩这一行缩放百分比。
             Row() {
               Text(this.zoomPercentText())
                 .fontSize(12)
@@ -6066,7 +6201,6 @@ struct Index {
                 .backgroundColor('#cc12161c')
                 .borderRadius(4)
             }
-            .margin({ top: 6 })
           }
           .width('100%')
           .height('100%')
@@ -6160,7 +6294,7 @@ struct Index {
           // 约定：向上滚（负值）＝ 上一张；若实机方向相反，把下面的 v < 0 改成 v > 0
           this.onWheel(v < 0 ? -1 : 1);
         })
-        // 左键放大 50%（锚点）/ 右键还原 / 双击切换全屏
+        // 左键不放大（第七轮）/ 右键还原 / 双击切换全屏
         .onMouse((event: MouseEvent) => {
           this.onMouseButton(event);
         })

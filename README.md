@@ -525,6 +525,79 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第七轮：最大化状态重启保持 / 解码数据缓存复用 / 圆点·缓存张数·左键放大精简（2026-11-12）
+
+### 用户诉求（五项，一次落地）
+
+1. APP 窗口最大化后重启、重新打开窗口仍保持最大化，不回退到普通尺寸；
+2. 缓存解码后的图片数据并复用，减少重复解码、提升连续查看时的解码与切换速度，
+   **不得在鼠标滚轮切换图片时才开始解码**；
+3. 移除档案列表最左侧的圆点标记；
+4. 移除右侧百分比区域上方显示的「缓存多少张」文案 / 控件；
+5. 取消左键单击放大，仅保留双击进入全屏。
+
+完成后滚轮切换图片、窗口状态恢复、双击全屏三项仍正常可用，且不影响其它既有交互。
+
+### ① 最大化状态：形态与 rect 分开记
+
+| 之前 | 第七轮 |
+|---|---|
+| 只存 `winRect`，`shouldSaveWindowRect()` 只在 FLOATING 时写；最大化时既不记形态、启动也不会 `maximize()` | 新增小 key `winMaximized`（1/0），与 `winRect` 分开持久化 |
+| 启动 `applySavedWindowRect()` 见到非 FLOATING 就直接保持现状 | 启动仍是 **FLOATING** 且记忆=1 → `win.maximize(EXIT_IMMERSIVE)` 恢复常规最大化（带标题栏 / dock），**绝不 resize / moveWindowTo**（那两步会把最大化打回普通尺寸） |
+| — | 启动已最大化 / 全屏 → 保持现状；APP 自持真全屏、MINIMIZE / UNDEFINED / SPLIT_SCREEN 等未知形态 → **不覆写**记忆 |
+| — | 只最大化过、从未存过自由窗口 rect 的用户也要排程（`shouldScheduleWindowRestore()`），不能因 rect 为空短路 |
+
+`SessionState.ts` 新增三个纯函数 `windowModeFlagOf / shouldRestoreMaximized / shouldScheduleWindowRestore`；
+SDK 26 `WindowStatusType` 的 `MAXIMIZE(2)` 与 `FULL_SCREEN(1)` 都算「最大化」，重启后统一按
+`MaximizePresentation.EXIT_IMMERSIVE` 恢复。状态仍在 `markWindowRect()`（拖窗口 / 最大化触发的
+根容器 `onAreaChange`）与 `onPageHide / aboutToDisappear` 里 `putSync + flushSync` 同步落盘。
+
+### ② 解码后的图片数据缓存复用（滚轮切图零解码）
+
+新增 `common/DecodeCache.ts`（纯函数，Node 可直接回归）：
+
+| 函数 | 作用 |
+|---|---|
+| `decodeEdgeOf(preloadEdge, displayNeed, cap)` | 预载档位抬到「可直接显示」，夹在 `PRELOAD_DECODE_MAX_EDGE=2048`（全屏 2560）内控内存 |
+| `reuseEdgeOf(canvasW, canvasH, zoom, headroom, srcLong)` | 按**实际显示像素**判「已解码数据够不够」，不拿含 oversampling 的 `displayEdge()` 逼着每张重解 |
+| `shouldReuseDecoded(cachedEdge, needEdge)` | 够就直接复用缓存里的 PixelMap，不解码 |
+| `decodeKeyOf(uri, edge)` | 同一张 + 同一档位只解一次，并发请求共用 Promise |
+
+`Index.ets` 侧：
+- `previews` 明确为「已解码 PixelMap 的缓存」；`decodeTo()` 先查缓存、再查 `decodeInflight`，
+  都没有才 `decodePx()`；`pushPreview()` 对同一 `px` 去重，`releaseUncachedEntry()` 保证
+  「代号作废」时只释放还没被缓存接管的那张（复用 / 合并来的绝不能 release）。
+- `showPreviewOf()` 命中缓存 → `showDecoded(hit)` 直接上屏；只有 `reuseEdge()` 不够且全清档位
+  更高时才延迟后台补解。预载在 `applyItems()` 载入时就铺满整库，
+  **滚轮 / 翻页路径本身不含任何解码启动动作**。
+- 1GB 预算裁剪后极少数未铺到的张仍由 `loadQuick + loadView` 兜底，解码结果写回缓存，
+  下次翻到即命中即上屏。
+
+档位折中：普通画布约 1600vp × 1.05 ≈ 1700 像素需求，预载 2048 已满足；
+比按 `displayEdge()`（2400~3840）解全库多驻留约一倍张数，连续翻页更稳。
+左右两页、全清升级、resize 重解统一走 `shouldReuseDecoded()`，画质判据一致。
+
+### ③④⑤ 界面精简
+
+| 项 | 改动 |
+|---|---|
+| 档案行最左侧圆点 | `Text(... : '·')` → `: ''`（图片行 / 灰行留空），上层 `↑` / 目录 `▣` 保留，`.width(18)` 列对齐不变 |
+| 右下角「缓存 N 张」 | 百分比上方那一行整个移除，右下角只剩 `zoomPercentText()`；缓存账目仍由 `syncCacheStat()` 维护，**状态栏「预载 N 张」保持不变**（本次只移除百分比上方那一处） |
+| 左键放大 | `onMouseButton()` 的 `zoomAt(ZOOM_LEFT, ...)` 删除，左键单击不再改变视图；`TapGesture(count: 2) → onDoubleTapCanvas() → toggleFull()` 仍是唯一的双击进 / 出全屏入口；右键还原、Ctrl+滚轮缩放、拖拽平移、键盘缩放均不变 |
+
+空态提示文案同步改为「双击进入全屏 · 右键还原 · 拖拽平移」「滚轮切换图片 · Ctrl + 滚轮缩放」。
+
+### 回归护栏
+
+- 滚轮 `onAxisEvent → onWheel(v<0?-1:1)`、ESC / F11 / 双击全屏、窗口沉浸 API
+  （`ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER` / `recover`）、最高画质三处
+  `autoResize(false)`、版本号 `1.0.7` / `versionCode 7`、按钮永不禁用 —— 全部未动。
+- `node --experimental-strip-types tests/dirname.test.mjs` → **733 / 733 PASS**（新增
+  `DecodeCache` / `SessionState` 纯函数与第七轮源码静态契约）。
+- `git diff --check` 干净；括号增量与 HEAD 一致（0）。
+- 按长期约束：本轮只改源码 / 文档 / 纯函数测试并本地 commit；**不编译 HAP、不放桌面、
+  不跑 build.sh、不升版本、不 push**，DevEco Studio 编译由用户侧完成。
+
 ## 第六轮：重启后档案日期不丢失 + 窗口大小 / 位置恢复（2026-11-12）
 
 ### 用户诉求
@@ -781,7 +854,7 @@ DevEco Studio 编译由用户侧完成。
 
 | 位置 | 现在显示 | 去掉了什么 |
 |---|---|---|
-| 预览区右下角（上） | `缓存 N 张` | `/ 216 张`、`xx MB`、`/ 1.00 GB` |
+| 预览区右下角（上） | `缓存 N 张` | `/ 216 张`、`xx MB`、`/ 1.00 GB`。**第七轮起这一整行已移除**，右下角只剩缩放百分比（见文首「第七轮」） |
 | 预览区右下角（下） | `25 %`（`zoomPercentText()`，100% = 原图像素 1:1） | 无，口径不变 |
 | 底部状态栏 | `预载 N 张` | ` · xx MB` |
 | 目录诊断串 | **默认不画** | `SHOW_DIAG_BADGE = false` 隐藏整行 |
@@ -1452,6 +1525,7 @@ Windows 盘符路径同样逐级：`C:/Users/foo/Pictures/2020 → … → C:`�
 
 快捷键替代：滚轮翻页、**Ctrl + 滚轮**缩放、`↑` / `↓` 缩放、左键放大 ×1.5、右键还原、
 `R` / `Shift+R` 旋转、`Shift+H` / `Shift+V` 镜像、右键画布或 `0` 复位适应、`F` 切 1:1、双击全屏。
+> **第七轮已取消「左键放大 ×1.5」**：左键单击不再改变视图，仅双击进入 / 退出全屏（见文首「第七轮」）。
 若以后要恢复按钮，把 `build()` 里的 `Column()` 与 8 个 `toolBtn()`，以及 `doAction()` 的 8 个 case 加回即可。
 
 ## 取消「打开图库」按钮（2026-11-10，v1.0.6）
@@ -1735,6 +1809,8 @@ API 26 起 `MouseEvent` 不再提供 `scrollY` / `ctrlKey`，`@ohos.multimodalIn
 ### 鼠标左 / 右键缩放
 
 预览区 `.onMouse()` 里，**左键 ×1.5（放大 50%）、右键 ×2.0（放大 100%）**，均以**光标位置为锚点**。
+> **第七轮已取消左键放大**（右键也早已改为「还原」）：本节为历史设计记录，当前行为是
+> 左键单击不缩放、右键还原、双击进 / 出全屏；锚点数学仍被 `zoomAt()`（键盘 / Ctrl+滚轮路径）复用。
 
 - **区分点击与拖拽**：拓展时也 down→move→up 三态。按下到抬起若位移超过 `CLICK_MOVE_TOL`（4vp）
   就判定为拖拽平移，**不触发点击缩放** —— 否则「按住拖动画布」会顺带缩放。

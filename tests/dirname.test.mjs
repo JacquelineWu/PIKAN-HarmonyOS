@@ -16,7 +16,8 @@
  * 以及第三轮「左边显示比右边差 → 左右页统一最高画质」，
  * 以及第四轮「ESC 对齐双击 / resize 实时适配 / 全量缓存并发预解码加速滚轮」，
  * 以及第五轮「resize 实机仍不生效 → @Builder 参数 / 累积阈值 / 节流 / 根容器兜底」，
- * 以及第六轮「重启后档案日期不丢失 / 窗口大小与位置恢复 / 界面状态一致」。
+ * 以及第六轮「重启后档案日期不丢失 / 窗口大小与位置恢复 / 界面状态一致」，
+ * 以及第七轮「最大化状态重启保持 / 解码数据缓存复用 / 移圆点 / 去缓存张数 / 取消左键放大」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -37,7 +38,10 @@ import { exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf, displayEdgeOf,
   colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../entry/src/main/ets/common/ViewPlan.ts';
 import { metaLineOf, parseMetaLine, encodeMeta, decodeMeta, metaForUri,
   packWindowRect, parseWindowRect, windowRectUsable,
-  shouldSaveWindowRect, collapsedOf } from '../entry/src/main/ets/common/SessionState.ts';
+  shouldSaveWindowRect, collapsedOf, windowModeFlagOf,
+  shouldRestoreMaximized, shouldScheduleWindowRestore } from '../entry/src/main/ets/common/SessionState.ts';
+import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
+  decodeKeyOf } from '../entry/src/main/ets/common/DecodeCache.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -742,11 +746,17 @@ check('只读态不启动预载 / 补体积 / 对开探测',
 check('只读态清掉残留视图与缓存账目（不显示上一批旧图）',
   /this\.releaseViewOwned\(\);\s*\n\s*this\.viewPixelMap = undefined;\s*\n\s*this\.viewFailed = false;/.test(INDEX), true);
 const DECODE_FN = INDEX.slice(INDEX.indexOf('private decodeTo('),
-  INDEX.indexOf('private decodeTo(') + 600);
+  INDEX.indexOf('private decodeTo(') + 1900);
 check('解码总闸门在 decodeTo（只读态直接 resolve undefined）',
-  /private decodeTo\(uri: string, edge: number\): Promise<PreviewEntry \| undefined> \{/.test(DECODE_FN) &&
+  /private decodeTo\(uri: string, edge: number,\s*allowReuse: boolean = true\): Promise<PreviewEntry \| undefined> \{/.test(DECODE_FN) &&
   /if \(!bulkIoAllowed\(this\.restoreMode\)\) \{[\s\S]{0,160}return Promise\.resolve<PreviewEntry \| undefined>\(undefined\);/.test(DECODE_FN) &&
   /return decodePx\(uri, edge\);/.test(DECODE_FN), true);
+check('第七轮：decodeTo 复用已解码数据 + 在途合并（不重复解码）',
+  /shouldReuseDecoded\(hit\.edge, edge\)/.test(DECODE_FN) &&
+  /const key: string = decodeKeyOf\(uri, edge\);/.test(DECODE_FN) &&
+  /this\.decodeInflight\.get\(key\)/.test(DECODE_FN) &&
+  /this\.decodeInflight\.set\(key, job\)/.test(DECODE_FN) &&
+  /const hit: PreviewEntry \| undefined = this\.previewEntry\(uri\);/.test(DECODE_FN), true);
 for (const [label, fn] of [
   ['fillSizes', 'private fillSizes(): void {'],
   ['schedulePreload', 'private schedulePreload(): void {'],
@@ -1130,11 +1140,11 @@ check('按钮 / 退格 / .. 行三条入口仍全部收口 browseUp',
 check('按钮永不禁用（非注释行无 .enabled）', /\.enabled\(/.test(CODE_LINES) === false, true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
-console.log('--- 源码静态契约：预览右下角只显示「缓存数量 + 缩放百分比」两项 ---');
+console.log('--- 源码静态契约：预览右下角只显示「缩放百分比」（第七轮移除缓存 N 张）---');
 // 结束锚点用代码（onAreaChange），不用注释文字 —— 注释改文案不该让契约失效。
 const BADGE = INDEX.slice(INDEX.indexOf('// 右下角角标：只显示'),
   INDEX.indexOf('.onAreaChange((oldV: Area, newV: Area)'));
-const BADGE_ALWAYS = BADGE.slice(BADGE.indexOf('// 缓存：只显示'));
+const BADGE_ALWAYS = BADGE.slice(BADGE.indexOf('// 「缓存 N 张」文案'));
 const BADGE_CODE = BADGE_ALWAYS.split('\n')
   .filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
 check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
@@ -1142,15 +1152,16 @@ check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
 check('诊断行的渲染被开关包住，diagLine 赋值点一个没删',
   /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(BADGE) &&
   (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
-check('右下角恒显示区只有 2 个 Text 组件（缓存数量 + 缩放百分比）',
-  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length, 2);
-check('缓存行只写「缓存 N 张」，不出现 MB / 上限 / 张数分母',
-  /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(BADGE_CODE) &&
-  /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes/.test(BADGE_CODE) === false, true);
+check('右下角恒显示区只剩 1 个 Text（缩放百分比），缓存 N 张已移除',
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 1 &&
+  /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
+  /缓存 N 张/.test(BADGE_CODE) === false, true);
+check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
+  /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
 check('缩放百分比仍在右下角，100% = 原图像素 1:1 口径未改',
   /Text\(this\.zoomPercentText\(\)\)/.test(BADGE_CODE) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
-check('状态栏「预载 N 张」不再带 MB 占用',
+check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
   /Text\('预载 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) &&
   /fmtBytes\(this\.cacheBytes\)/.test(INDEX) === false, true);
 check('fmtBytes 未被误删（左栏字节列 + 左上角信息浮层仍在用）',
@@ -1262,9 +1273,13 @@ check('pendingReload 有兜底超时（窗口 API 不产生 onAreaChange 也重�
   /this\.clearCanvasReloadFallback\(\);/.test(INDEX), true);
 check('viewEdge / preloadEdge 交给 ViewPlan 且带全屏参数',
   /return viewEdgeOf\(this\.canvasW, this\.canvasH, this\.fullscreen,/.test(INDEX) &&
-  /return preloadEdgeOf\(this\.canvasW, this\.canvasH, this\.fullscreen,/.test(INDEX) &&
+  /const base: number = preloadEdgeOf\(this\.canvasW, this\.canvasH, this\.fullscreen,/.test(INDEX) &&
   /FULLSCREEN_VIEW_EDGE_FACTOR, VIEW_EDGE_MIN, VIEW_EDGE_MAX\)/.test(INDEX) &&
   /FULLSCREEN_PRELOAD_MAX_EDGE\);/.test(INDEX), true);
+check('第七轮：预载解码档位抬到可直接显示（decodeEdgeOf + 内存上限）',
+  /const PRELOAD_DECODE_MAX_EDGE: number = 2048;/.test(INDEX) &&
+  /const cap: number = this\.fullscreen \? FULLSCREEN_PRELOAD_MAX_EDGE : PRELOAD_DECODE_MAX_EDGE;/.test(INDEX) &&
+  /return decodeEdgeOf\(base, this\.displayEdge\(0\), cap\);/.test(INDEX), true);
 check('decodePx 读 EXIF Orientation 并在解码阶段旋转 / 镜像',
   /src\.getImageProperty\(image\.PropertyKey\.ORIENTATION\)/.test(INDEX) &&
   /opts\.rotate = exif\.degrees;/.test(INDEX) &&
@@ -1343,9 +1358,10 @@ check('② 退出步骤表含新增的窗口形态恢复步骤',
   fullscreenStepsOf(false).includes('decor-on') &&
   fullscreenStepsOf(false).includes('title-dock-hover-on') &&
   fullscreenStepsOf(false).includes('recover'), true);
-check('③ 并排右页与左页同画质：displayEdge 档位 + autoResize(false) + HDR 模式',
+check('③ 并排右页与左页同画质：displayEdge 档位 + 解码数据复用 + autoResize(false) + HDR 模式',
   /const need: number = this\.displayEdge\(srcLong\);/.test(INDEX) &&
-  /hit\.edge >= need/.test(INDEX) &&
+  /const reuseNeed: number = this\.reuseEdge\(srcLong\);/.test(INDEX) &&
+  /shouldReuseDecoded\(hit\.edge, reuseNeed\)/.test(INDEX) &&
   /this\.decodeTo\(uri, need\)/.test(INDEX) &&
   /\.interpolation\(ImageInterpolation\.High\)/.test(RIGHT_IMAGE_FN) &&
   /\.autoResize\(false\)/.test(RIGHT_IMAGE_FN) &&
@@ -1527,8 +1543,10 @@ check('③ 换数据源 clearPreviews 作废旧批次并允许重新铺满',
   /this\.allOrder = \[\];/.test(INDEX) && /this\.allDone\.clear\(\);/.test(INDEX), true);
 check('③ 解码失败进黑名单（不再无限重试同一张）',
   /this\.failed\.add\(uri\);\s*this\.probeFail\+\+;/.test(INDEX), true);
-check('③ 换源时旧解码结果释放，不盖到新数据源',
-  /if \(seq !== this\.allSeq\) \{[\s\S]{0,260}entry\.px\.release\(\);/.test(INDEX), true);
+check('③ 换源时旧解码结果交给 releaseUncachedEntry（复用条目不误释放）',
+  /if \(seq !== this\.allSeq\) \{[\s\S]{0,260}this\.releaseUncachedEntry\(entry\);/.test(INDEX) &&
+  /private releaseUncachedEntry\(e: PreviewEntry \| undefined\): void \{/.test(INDEX) &&
+  /if \(this\.previews\[i\]\.px === e\.px\) \{/.test(INDEX), true);
 check('③ 回退路径仍在（PRELOAD_ALL=false 可用旧窗口链）',
   /const order: number\[\] = preloadOrder\(backSpan, fwdSpan\)/.test(INDEX) &&
   /this\.evictOutside\(\);/.test(INDEX) &&
@@ -1699,6 +1717,111 @@ check('② 回归护栏：既有档案列表 / 窗口交互常量未动',
   (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
   /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX) &&
   /win\.maximize\(window\.MaximizePresentation\.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER\)/.test(INDEX), true);
+
+console.log('--- SessionState 纯函数：窗口形态（第七轮：最大化重启保持）---');
+check('windowModeFlagOf 最大化 → 1', windowModeFlagOf(false, true, false, true), 1);
+check('windowModeFlagOf 自由窗口 → 0', windowModeFlagOf(false, false, true, true), 0);
+check('windowModeFlagOf APP 真全屏 → 0（临时形态不写记忆）', windowModeFlagOf(true, true, false, true), 0);
+check('windowModeFlagOf 形态未知 → -1（不覆写记忆）', windowModeFlagOf(false, false, false, false), -1);
+check('windowModeFlagOf 非浮动非最大化（最小化）→ -1', windowModeFlagOf(false, false, false, true), -1);
+check('shouldRestoreMaximized 记忆1 + 启动浮动 + 非全屏 → 恢复', shouldRestoreMaximized(1, true, false), true);
+check('shouldRestoreMaximized 记忆0 不恢复', shouldRestoreMaximized(0, true, false), false);
+check('shouldRestoreMaximized 启动已最大化不干预', shouldRestoreMaximized(1, false, false), false);
+check('shouldRestoreMaximized APP 全屏不干预', shouldRestoreMaximized(1, true, true), false);
+check('shouldRestoreMaximized NaN 不恢复', shouldRestoreMaximized(NaN, true, false), false);
+check('shouldScheduleWindowRestore rect 空但最大化记忆=1 仍排程', shouldScheduleWindowRestore('', 1), true);
+check('shouldScheduleWindowRestore 有 rect 也排程', shouldScheduleWindowRestore('1,2,3,4', 0), true);
+check('shouldScheduleWindowRestore 两者皆无 → 不排程', shouldScheduleWindowRestore('', 0), false);
+check('shouldScheduleWindowRestore NaN flag 不排程', shouldScheduleWindowRestore('', NaN), false);
+
+console.log('--- DecodeCache 纯函数：预载档位 / 解码数据复用判据 ---');
+check('decodeEdgeOf 抬到显示档位', decodeEdgeOf(1536, 1800, 2560), 1800);
+check('decodeEdgeOf 夹到内存上限', decodeEdgeOf(1536, 3840, 2560), 2560);
+check('decodeEdgeOf 不把档位往下降', decodeEdgeOf(2048, 1024, 1536), 2048);
+check('decodeEdgeOf 原预载档位已更高就沿用', decodeEdgeOf(2560, 1800, 2560), 2560);
+check('decodeEdgeOf cap=0 不夹', decodeEdgeOf(1024, 3840, 0), 3840);
+check('decodeEdgeOf 非有限数按 0 处理', decodeEdgeOf(NaN, NaN, NaN), 0);
+check('reuseEdgeOf 按实际显示像素（headroom 1.05）', reuseEdgeOf(1200, 800, 1, 1.05, 0), 1260);
+check('reuseEdgeOf zoom=2 抬档', reuseEdgeOf(1200, 800, 2, 1.05, 0), 2520);
+check('reuseEdgeOf 夹到原图长边', reuseEdgeOf(1200, 800, 1, 1.05, 1000), 1000);
+check('reuseEdgeOf 画布未就绪 → 0', reuseEdgeOf(0, 0, 1, 1.05, 0), 0);
+check('reuseEdgeOf 非法 zoom/headroom 回退 1', reuseEdgeOf(1000, 600, NaN, 0, 0), 1000);
+check('shouldReuseDecoded 档位够 → 复用', shouldReuseDecoded(2048, 1743), true);
+check('shouldReuseDecoded 档位不够 → 补解', shouldReuseDecoded(1536, 1743), false);
+check('shouldReuseDecoded need=0 直接复用', shouldReuseDecoded(768, 0), true);
+check('shouldReuseDecoded 非法值不复用', shouldReuseDecoded(NaN, 1024), false);
+check('decodeKeyOf uri+edge 组成合并键', decodeKeyOf('file://a.jpg', 2048), 'file://a.jpg@2048');
+check('decodeKeyOf 不同档位不同键', decodeKeyOf('u', 768) !== decodeKeyOf('u', 2048), true);
+
+console.log('--- 源码静态契约：第七轮（最大化 / 解码复用 / 圆点 / 缓存张数 / 左键放大）---');
+const WINRESTORE_FN = INDEX.slice(INDEX.indexOf('private async applySavedWindowRect('),
+  INDEX.indexOf('private saveWindowRectSync('));
+check('① 新纯函数与新小 key 已接入 Index',
+  /from '\.\.\/common\/DecodeCache'/.test(INDEX) &&
+  /decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,/.test(INDEX) &&
+  /windowModeFlagOf,/.test(INDEX) &&
+  /shouldRestoreMaximized, shouldScheduleWindowRestore/.test(INDEX) &&
+  /const WIN_KEY_MAXIMIZED: string = 'winMaximized';/.test(INDEX), true);
+check('① readLastPos 读回形态，且 rect 为空也能排程',
+  /const rawMaximized = await p\.get\(WIN_KEY_MAXIMIZED, 0\);/.test(INDEX) &&
+  /this\.savedWindowMaximized = typeof rawMaximized === 'number' \? rawMaximized : 0;/.test(INDEX) &&
+  /!shouldScheduleWindowRestore\(this\.savedWindowRect, this\.savedWindowMaximized\)/.test(INDEX), true);
+check('① 启动恢复最大化：EXIT_IMMERSIVE，且在 resize 之前就返回（不缩回普通尺寸）',
+  /shouldRestoreMaximized\(this\.savedWindowMaximized, true, this\.fullscreen\)/.test(WINRESTORE_FN) &&
+  /await win\.maximize\(window\.MaximizePresentation\.EXIT_IMMERSIVE\);/.test(WINRESTORE_FN) &&
+  /if \(!floating\) \{[\s\S]{0,220}this\.winRectApplied = true;\s*return;/.test(WINRESTORE_FN) &&
+  WINRESTORE_FN.indexOf('maximize(window.MaximizePresentation.EXIT_IMMERSIVE)') <
+    WINRESTORE_FN.indexOf('await win.resize(rect.width, rect.height)') &&
+  /await win\.resize\(rect\.width, rect\.height\);/.test(WINRESTORE_FN), true);
+check('① 退出同步落盘形态：MAXIMIZE / FULL_SCREEN 都算最大化，未知形态不覆写',
+  /st === window\.WindowStatusType\.MAXIMIZE \|\|/.test(INDEX) &&
+  /st === window\.WindowStatusType\.FULL_SCREEN/.test(INDEX) &&
+  /if \(win !== undefined && statusKnown && !this\.fullscreen\)/.test(INDEX) &&
+  /const flag: number = windowModeFlagOf\(this\.fullscreen, maximized, floating, statusKnown\);/.test(INDEX) &&
+  /store\.putSync\(WIN_KEY_MAXIMIZED, flag\);/.test(INDEX) &&
+  /store\.flushSync\(\);/.test(INDEX), true);
+check('② 解码数据缓存：inflight 合并 + pushPreview 去重 + 换源清空',
+  /private decodeInflight: Map<string, Promise<PreviewEntry \| undefined>> = new Map\(\);/.test(INDEX) &&
+  /const key: string = decodeKeyOf\(uri, edge\);/.test(INDEX) &&
+  /this\.decodeInflight\.set\(key, job\);/.test(INDEX) &&
+  /if \(this\.previews\[i\]\.px === e\.px\) \{/.test(INDEX) &&
+  /this\.decodeInflight\.clear\(\);/.test(INDEX) &&
+  /private releaseUncachedEntry\(e: PreviewEntry \| undefined\): void \{/.test(INDEX), true);
+check('② 命中缓存即复用上屏，档位够就不解码（滚轮切图零解码）',
+  /this\.showDecoded\(hit\);/.test(INDEX) &&
+  /const reuseNeed: number = this\.reuseEdge\(Math\.max\(hit\.w, hit\.h\)\);/.test(INDEX) &&
+  /if \(!shouldReuseDecoded\(hit\.edge, reuseNeed\) && fullNeed > hit\.edge\)/.test(INDEX) &&
+  /this\.loadView\(uri, token, UPGRADE_DELAY_MS\);/.test(INDEX) &&
+  /private reuseEdge\(srcLong: number\): number \{/.test(INDEX), true);
+check('② 解码全部在载入时的后台全量预载链启动，warm 强制自有 PixelMap',
+  /this\.schedulePreload\(\);/.test(APPLY_FN) &&
+  /private startAllPreload\(\): void \{/.test(INDEX) &&
+  /const edge: number = this\.preloadEdge\(\);/.test(INDEX) &&
+  /this\.decodeTo\(uri, this\.preloadEdge\(\), false\)/.test(INDEX) &&
+  /滚轮 \/ 翻页切图只做/.test(INDEX), true);
+check('③ 档案行最左侧圆点已移除（上层 / 目录符号保留，列宽不变）',
+  /Text\(this\.kind === ROW_UP \? '↑' : \(this\.kind === ROW_FOLDER \? '▣' : ''\)\)/.test(INDEX) &&
+  /ROW_FOLDER \? '▣' : '·'/.test(INDEX) === false &&
+  /\.width\(18\)/.test(INDEX), true);
+check('④ 右下角百分比上方「缓存 N 张」文案 / 控件已移除',
+  /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
+  /右下角角标：只显示「缩放百分比」一项/.test(INDEX) &&
+  /Text\(this\.zoomPercentText\(\)\)/.test(INDEX), true);
+check('⑤ 左键单击不再放大，双击仍切全屏（TapGesture count 2）',
+  /this\.zoomAt\(ZOOM_LEFT, event\.x, event\.y\);/.test(INDEX) === false &&
+  /左键单击不再放大/.test(INDEX) &&
+  /this\.clickSnapZoom = -1;/.test(INDEX) &&
+  /TapGesture\(\{ count: 2 \}\)/.test(INDEX) &&
+  /this\.onDoubleTapCanvas\(\);/.test(INDEX) &&
+  /private onDoubleTapCanvas\(\): void \{[\s\S]{0,300}this\.toggleFull\(\);/.test(INDEX), true);
+check('⑥ 回归护栏：滚轮切图 / 窗口 API / 最高画质 / 版本 / 按钮不禁用都未动',
+  /\.onAxisEvent\(\(event: AxisEvent\)/.test(INDEX) &&
+  /this\.onWheel\(v < 0 \? -1 : 1\);/.test(INDEX) &&
+  /win\.maximize\(window\.MaximizePresentation\.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER\)/.test(INDEX) &&
+  /await win\.recover\(\)/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
+  /\.enabled\(/.test(CODE_LINES) === false, true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

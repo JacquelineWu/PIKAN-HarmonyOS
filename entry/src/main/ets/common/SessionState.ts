@@ -15,7 +15,9 @@
  *    绝不会破坏原来「只读名单态」的恢复链；
  *  · 窗口 rect 用 4 个 px 整数打包成 1 个小 key，启动恢复前先做可用范围校验，
  *    防止把一次异常的全屏/离屏尺寸写死成「用户调好的窗口」；
- *  · 全屏 / 非自由窗口态不更新 rect 记忆（那是临时形态，不是用户调好的窗口）。
+ *  · 全屏 / 非自由窗口态不更新 rect 记忆（那是临时形态，不是用户调好的窗口）；
+ *  · 第七轮新增：窗口形态（最大化 / 自由窗口）单独一个小 key，与 rect 分开存，
+ *    最大化过再重启也不会回退成普通尺寸，同时保留「上一次自由窗口」的 rect 供取消最大化用。
  */
 
 /** 有限数判断：刻意不依赖 Number 命名空间的静态成员
@@ -152,4 +154,37 @@ export function shouldSaveWindowRect(fullscreen: boolean, floating: boolean): bo
  *  保证左栏的字节 / 日期两列在重启后照常显示，不会被意外隐藏）。 */
 export function collapsedOf(raw: number): boolean {
   return finiteOf(raw) && raw === 1;
+}
+
+/** 窗口形态记忆（2026-11-12 第七轮：最大化状态重启后不回退到普通尺寸）。
+ *
+ *  返回写进 preferences 的小整数：1 = 最大化（含系统 FULL_SCREEN 形态）、
+ *  0 = 自由窗口、-1 = 当前形态未知（UNDEFINED / MINIMIZE / SPLIT_SCREEN）→ **不覆写**记忆。
+ *
+ *  · appFullscreen 是 APP 自己用 ENTER_IMMERSIVE 进入的「真全屏」临时形态，
+ *    绝不能写成最大化，否则下次启动会把全屏当常规窗口恢复；
+ *  · 最小化 / 未定义态也不覆写：那多半是切后台 / 启动瞬间的瞬时状态，
+ *    用户上一次「调好的窗口形态」应继续沿用（否则最小化一次就丢掉最大化记忆）。 */
+export function windowModeFlagOf(appFullscreen: boolean, maximized: boolean,
+  floating: boolean, known: boolean): number {
+  if (appFullscreen) {
+    return 0;
+  }
+  if (!known || (!maximized && !floating)) {
+    return -1;
+  }
+  return maximized ? 1 : 0;
+}
+
+/** 启动是否要把窗口恢复成最大化：记忆里是 1、当前是自由窗口、且不在 APP 真全屏。
+ *  启动若已是最大化 / 全屏，applySavedWindowRect 会直接保持现状，不再调任何窗口 API。 */
+export function shouldRestoreMaximized(flag: number, floating: boolean, appFullscreen: boolean): boolean {
+  return finiteOf(flag) && flag === 1 && floating && !appFullscreen;
+}
+
+/** 是否要给「窗口状态恢复」排程：有 rect 记忆 **或** 有最大化记忆都要跑一次。
+ *  仅最大化过、从未存下自由窗口 rect 的用户也必须恢复最大化，不能因 rect 为空就短路。 */
+export function shouldScheduleWindowRestore(rectText: string, flag: number): boolean {
+  const s: string = rectText === undefined || rectText === null ? '' : String(rectText);
+  return s.length > 0 || (finiteOf(flag) && flag === 1);
 }
