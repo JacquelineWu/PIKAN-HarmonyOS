@@ -525,6 +525,70 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第六轮：重启后档案日期不丢失 + 窗口大小 / 位置恢复（2026-11-12）
+
+### 用户诉求
+
+> 左侧档案列表继续显示每个档案的日期，不因关闭并重新打开 APP 而隐藏或丢失；
+> APP 启动时恢复退出前的 windows 大小与位置，退出后再次返回 APP 时仍维持该 windows 大小与位置。
+> 保持现有档案列表和 windows 交互行为不变，确保重启前后显示内容与界面状态一致。
+
+### 根因（都不在 UI 层）
+
+| # | 现象 | 根因 |
+|---|---|---|
+| ① 日期变 `--` | 左栏日期列 `Text(this.mtime > 0 ? fmtDate(this.mtime) : '--')` 的数据来自 `ImageItem.mtime`。`flushSnap()` 只把 **uri** 写进快照；重启走 `restoreFromSnapshot() → setItems(uris, src)`，构造 `ImageItem` 时没有 `mtime`（也没有 `size`） | 快照格式里没有元数据 |
+| ② 补不回来 | `fillSizes()` 只补体积、**从不补 mtime**；且只读名单态（`RESTORE_READONLY`）下被 `bulkIoAllowed()` 闸门直接挡住，连体积都不补 | 运行时补测这条路本来就走不通 |
+| ③ 界面状态不一致 | `@State listCollapsed` 默认 `false` 且从未落盘；用户收起过左栏，重启后变回展开 | 收起态没有持久化 |
+| ④ 窗口大小位置 | 代码里**完全没有**窗口 rect 的保存 / 恢复 | 未实现 |
+
+正常「选择文件夹」（`openFolder()`）路径下 `items` 是带 `st.mtime` 的，所以退出前日期是好的；
+一重启走快照恢复就全丢 —— 这正是「关闭并重开」才出现的原因。
+
+### 修法
+
+**档案元数据（体积 + 日期）**
+
+- 新增 `common/SessionState.ts`（纯函数，Node 可单测）：`metaLineOf / parseMetaLine /
+  encodeMeta / decodeMeta / metaForUri`，一行 `size,mtime`，非法值一律回退 `-1,0`。
+- `flushSnap()` 写 `snap_N` 的同时写 **`snapMeta_N`**（与 uri 行一一对应，独立小 key，
+  不改既有 `snap_N` 格式 → 老存档照样读得出来）；清理旧块时一并删。
+- `readSnapMeta()` / `readMetaForUri()` 恢复时读回；`setItems(uris, src, meta?)` 新增**可选**
+  第三参，注入 `size` / `mtime`。不传则保持原有行为（体积后台补、日期原口径），交互不变。
+- 两条恢复路径都覆盖：整批快照恢复传 `metas`；单张兜底用 `metaForUri()` 按 uri 找（不靠下标）。
+- 这些只是 preferences 小 key，不是逐 URI 的同步磁盘 IO，**不绕过 ro1 `bulkIoAllowed` 总闸门**。
+
+**窗口大小 / 位置**
+
+- 官方 API（`@ohos.window`）：`getWindowProperties().windowRect`（`left/top/width/height`，px）、
+  `resize(w,h)`、`moveWindowTo(x,y)`、`getWindowStatus()`；小 key `winRect = 'l,t,w,h'`。
+- 保存：`saveWindowRectSync()` 用 `putSync + flushSync` **同步必达**，挂在 `onPageHide()` /
+  `aboutToDisappear()`；根 `onAreaChange` 与三处收起态切换点走 `markWindowRect()` 600ms 防抖，
+  拖动中被强杀也尽量不丢。
+- 恢复：`readLastPos()` 读回后 `scheduleRestoreWindowRect()` 推迟 **900ms**（官方 FAQ 明确
+  `aboutToAppear` 阶段窗口尚未可见、`windowRect` 可能不准；也避开启动 watchdog），
+  `applySavedWindowRect()` 先 `windowRectUsable()` 校验，再 `resize` → `moveWindowTo`，
+  窗口实例没就绪按 120ms × 2 重试；**只跑一次**（`winRectApplied`），之后用户怎么拖都不干预。
+- 只在 **FLOATING 自由窗口**态恢复；全屏 / 最大化是既有交互，启动恢复绝不抢走。
+  退出时全屏 / 非自由窗口也**不覆盖** rect 记忆（临时形态不是用户调好的窗口）。
+- `listCollapsed` 随会话一起落盘；缺失 / 异常一律 `false`（默认展开，字节与日期两列照常显示）。
+
+### 平台边界（需实机确认）
+
+- 本机 SDK `.d.ts` 已不在可见路径，无法像前几轮那样逐条核对声明；上述 API 由华为官方
+  文档 / FAQ 核对存在。若 DevEco 报 `resize` / `moveWindowTo` 只提供 callback 重载
+  （`resize(w, h, callback)`），把两处 `await win.xxx(...)` 改成
+  `await new Promise<void>((resolve) => win.xxx(..., () => resolve()))` 即可，逻辑不变。
+- `windowRect` 只在窗口可见后准确；启动 900ms 内若窗口形态还在动画，恢复可能被系统覆盖，
+  此时以系统结果为准，不会反复干预。
+- 只移动窗口位置（不改大小）不会触发 `onAreaChange`，位置主要靠退出时同步保存。
+
+### 保持既有行为不变
+
+- `snap_N` 格式、快照恢复链、`restoreIndex`、列宽自适应、hover 浮层、全屏 / ESC / 双击、
+  resize 重解全部不动；新增的都是**可选参数 + 独立小 key**。
+- 版本仍 `1.0.7`；按约定未编译 HAP / 未放桌面 / 未升版本 / 未 push。
+
 ## 第五轮：拖窗口 resize 时预览图实时适配（2026-11-12）
 
 用户实机反馈：**「现在 resize windows 还是不会自动调整预览图大小」**。

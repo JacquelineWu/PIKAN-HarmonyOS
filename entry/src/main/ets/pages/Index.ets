@@ -70,6 +70,9 @@ import { PERSIST_SKIP, persistAction, persistPolicyUris,
 import { ExifTransform, Size2, exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
   displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
   colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
+import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
+  packWindowRect, parseWindowRect, windowRectUsable,
+  shouldSaveWindowRect, collapsedOf } from '../common/SessionState';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -767,6 +770,25 @@ const SNAP_KEY_COUNT: string = 'snapCount';
 const SNAP_KEY_PREFIX: string = 'snap_';   // snap_0 / snap_1 / …
 /** 旧格式最多会留下多少块（3000 / 200 = 15）—— 用于首写时把历史残留清理掉 */
 const OLD_SNAP_CHUNKS: number = 15;
+
+/** 会话状态持久化（2026-11-12 第六轮）：档案元数据 / 窗口大小位置 / 左栏收起态。
+ *  全部是**小 key**，与位置记忆共用同一份 preferences，绝不新增大 value、
+ *  绝不把恢复动作塞回启动关键路径（历史 appfreeze 的根因）。 */
+const META_KEY_PREFIX: string = 'snapMeta_';    // 与 snap_N 一一对应的「体积,日期」块
+const WIN_KEY_RECT: string = 'winRect';          // 'left,top,width,height'（px）
+const WIN_KEY_COLLAPSED: string = 'listCollapsed'; // 1 = 收起；0 / 缺失 = 展开
+const WIN_MIN_W: number = 320;
+const WIN_MIN_H: number = 240;
+const WIN_MAX_W: number = 16384;
+const WIN_MAX_H: number = 16384;
+/** 拖窗口时窗口 rect 的防抖写盘间隔：不必每帧写 preferences。 */
+const WIN_RECT_SAVE_MS: number = 600;
+/** 启动恢复窗口 rect 的延迟：与 RESUME_DELAY_MS 同源，避开首帧 watchdog。
+ *  官方 FAQ 明确 aboutToAppear 阶段拿到的 windowRect 可能不准，必须等窗口可见之后再取/设。 */
+const WIN_RECT_RESTORE_MS: number = 900;
+/** 窗口实例由 EntryAbility 异步放进 AppStorage：短延时重试次数 / 间隔。 */
+const WIN_RECT_RETRY_MAX: number = 2;
+const WIN_RECT_RETRY_MS: number = 120;
 
 /** 图片来源名（用于判断能否自动恢复：「图库全部」可以静默重扫，选择器类必须用户操作） */
 const SRC_ALL: string = '图库全部';
@@ -1538,6 +1560,12 @@ struct Index {
   /** 系统选择器是否正开着。连点会叠出两个选择器，后开的那个常常就是点不动的那个 */
   private pickerBusy: boolean = false;
   private snapChunks: number = 0;                       // 已写入快照的块数（换源后块数变少时清旧块）
+
+  // ---- 会话界面状态（2026-11-12）：窗口大小 / 位置 与 左栏收起态 ----
+  /** 启动时从 preferences 读回的窗口 rect 文本；空串 = 没有记忆 / 首次安装。 */
+  private savedWindowRect: string = '';
+  private winRectTimer: number = -1;         // 拖窗口 rect 的防抖写盘句柄
+  private winRectApplied: boolean = false;  // 本次启动窗口 rect 只恢复一次
   /** 空态区的一行提示（「上次看到 …」）。必须是 @State：它是异步读回来的，要靠它刷新 UI。
    *  而 lastPos 本身刻意不是 @State —— 切图时每帧都改它会导致整个界面反复重建。 */
   @State resumeHint: string = '';
@@ -1614,6 +1642,9 @@ struct Index {
    *     putSync / flushSync 写的是几个小 key（毫秒级），不写大快照，不会卡住切后台。 */
   onPageHide(): void {
     this.flushPosSync();
+    // 2026-11-12：窗口大小位置 + 左栏收起态也要同步落盘（进程被杀也不丢）。
+    this.clearWinRectTimer();
+    this.saveWindowRectSync();
   }
 
   aboutToDisappear(): void {
@@ -1649,6 +1680,8 @@ struct Index {
       this.persistTimer = -1;
     }
     this.flushPosSync(); // 退出前把最后一次位置**同步**落盘（进程被杀也不丢）
+    this.clearWinRectTimer();
+    this.saveWindowRectSync();
     if (this.fullscreen) {
       // 页面销毁时若还在全屏，把标题栏 / dock / 系统状态栏 / 导航栏都还回去
       this.applyWindowFullScreen(false, 0);
@@ -1706,6 +1739,14 @@ struct Index {
       // 必须在 scheduleShowLast() / 可能的提前 return 之前读到：恢复前要先激活它。
       this.savedDirUri = typeof rawDir === 'string' ? rawDir : '';
       this.okUri = ok;
+      // 2026-11-12 第六轮：会话界面状态（窗口大小位置 / 左栏收起态）。
+      // 都是小 key，和上面 4 个一起在首帧之后异步读，绝不碰大快照、绝不重扫。
+      const rawRect = await p.get(WIN_KEY_RECT, '');
+      const rawCollapsed = await p.get(WIN_KEY_COLLAPSED, 0);
+      this.savedWindowRect = typeof rawRect === 'string' ? rawRect : '';
+      this.listCollapsed = collapsedOf(typeof rawCollapsed === 'number' ? rawCollapsed : 0);
+      // 排程放在所有提前 return 之前：即使没有完整 LastPos，窗口也要恢复。
+      this.scheduleRestoreWindowRect();
       // 预热「上次成功显示的那张」：后台解 1 张，与下面读位置/恢复完全解耦，
       // 就算它失败也只是少一次缓存命中，不影响任何别的路径。
       if (ok.length > 0) {
@@ -1976,6 +2017,138 @@ struct Index {
     }
   }
 
+  // ------------------------------------------------------------------
+  // 会话界面状态：窗口大小 / 位置 与 左栏收起态（2026-11-12 第六轮）
+  // ------------------------------------------------------------------
+
+  /** 排一次「首帧之后恢复窗口大小与位置」。
+   *  ⚠️ 绝不在这里动窗口 API：启动关键路径上取到的 windowRect 可能不准
+   *     （官方 FAQ：aboutToAppear 阶段窗口尚未可见），统一推迟到窗口稳定后。 */
+  private scheduleRestoreWindowRect(): void {
+    if (this.savedWindowRect.length === 0 || this.winRectApplied) {
+      return;
+    }
+    setTimeout(() => {
+      this.applySavedWindowRect(0);
+    }, WIN_RECT_RESTORE_MS);
+  }
+
+  /** 把上次退出时的窗口 rect 应用到主窗口。
+   *  · 只在自由窗口（FLOATING）态生效：最大化 / 全屏是既有交互，绝不被启动恢复抢走；
+   *  · 每步独立 try/catch：某一步在该机型不支持时只记日志，不影响图片恢复链；
+   *  · 窗口实例由 EntryAbility 异步放进 AppStorage，没就绪就短延时重试。 */
+  private async applySavedWindowRect(retry: number): Promise<void> {
+    if (this.winRectApplied) {
+      return;
+    }
+    const rect: WindowRect | undefined = parseWindowRect(this.savedWindowRect);
+    if (rect === undefined ||
+      !windowRectUsable(rect, WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
+      hilog.info(DOMAIN, TAG, 'winRect: no usable saved rect, keep system default');
+      return;
+    }
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    if (win === undefined) {
+      if (retry < WIN_RECT_RETRY_MAX) {
+        setTimeout(() => {
+          this.applySavedWindowRect(retry + 1);
+        }, WIN_RECT_RETRY_MS);
+      }
+      return;
+    }
+    let floating: boolean = false;
+    try {
+      floating = win.getWindowStatus() === window.WindowStatusType.FLOATING;
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'winRect: getWindowStatus failed');
+      return;
+    }
+    if (!floating) {
+      // 启动就是最大化 / 全屏：保持现状，不改动用户的窗口形态。
+      this.winRectApplied = true;
+      return;
+    }
+    this.winRectApplied = true; // 只恢复一次，之后用户怎么拖 / resize 都不再干预
+    try {
+      await win.resize(rect.width, rect.height);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'winRect: resize failed: %{public}s', JSON.stringify(e));
+    }
+    try {
+      await win.moveWindowTo(rect.left, rect.top);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'winRect: moveWindowTo failed: %{public}s', JSON.stringify(e));
+    }
+    hilog.info(DOMAIN, TAG, 'winRect: restored %{public}d,%{public}d %{public}dx%{public}d',
+      rect.left, rect.top, rect.width, rect.height);
+  }
+
+  /** 抓当前窗口 rect（px）并**同步**落盘 —— 退出前必达，进程被杀也不丢。
+   *  左栏收起态一并写下去，保证「重启前后界面状态一致」。
+   *  全屏 / 非自由窗口态不更新 rect 记忆（那是临时形态，不是用户调好的窗口）。 */
+  private saveWindowRectSync(): void {
+    const store: preferences.Preferences | undefined = this.prefs;
+    if (store === undefined) {
+      return;
+    }
+    let wrote: boolean = false;
+    try {
+      store.putSync(WIN_KEY_COLLAPSED, this.listCollapsed ? 1 : 0);
+      wrote = true;
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'winRect: save collapsed failed');
+    }
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    let floating: boolean = false;
+    if (win !== undefined) {
+      try {
+        floating = win.getWindowStatus() === window.WindowStatusType.FLOATING;
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'winRect: getWindowStatus failed');
+      }
+    }
+    if (win !== undefined && shouldSaveWindowRect(this.fullscreen, floating)) {
+      try {
+        const props = win.getWindowProperties();
+        const r = props.windowRect;
+        const packed: string = packWindowRect({
+          left: r.left, top: r.top, width: r.width, height: r.height
+        });
+        if (windowRectUsable(parseWindowRect(packed), WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
+          store.putSync(WIN_KEY_RECT, packed);
+          wrote = true;
+        }
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'winRect: getWindowProperties failed: %{public}s', JSON.stringify(e));
+      }
+    }
+    if (wrote) {
+      try {
+        store.flushSync();
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'winRect: flushSync failed');
+      }
+    }
+  }
+
+  /** 拖窗口 / 切换左栏收起态时的防抖写盘：不必每帧都写 preferences。 */
+  private markWindowRect(): void {
+    if (this.winRectTimer !== -1) {
+      return;
+    }
+    this.winRectTimer = setTimeout(() => {
+      this.winRectTimer = -1;
+      this.saveWindowRectSync();
+    }, WIN_RECT_SAVE_MS);
+  }
+
+  private clearWinRectTimer(): void {
+    if (this.winRectTimer !== -1) {
+      clearTimeout(this.winRectTimer);
+      this.winRectTimer = -1;
+    }
+  }
+
   /** 排一次「首帧后显示上次相片」。只排一个定时器，重复调用无副作用。
    *  ⚠️ 绝不在这里读 preferences / 读快照 / 建列表：这里还在启动调用栈上。 */
   private scheduleShowLast(): void {
@@ -2057,7 +2230,10 @@ struct Index {
       this.pendingRestoreReadonly = !readable;
       this.pendingRestoreCount = 1;
       this.pendingRestoreSrc = src;
-      this.setItems([single], src);
+      const metaStore: preferences.Preferences | undefined = await this.posStore();
+      const oneMeta: ArchiveMeta = metaStore !== undefined
+        ? await this.readMetaForUri(metaStore, single) : { size: -1, mtime: 0 };
+      this.setItems([single], src, [oneMeta]);
       // 回填目录层级：单张兜底同样要让「往上层」能用，不能只给名单就锁死层级。
       this.restoreBrowseContext();
       // ⚠️ setItems → applyItems 末尾会 markPos() + snapDirty=true，500ms 后 flushPos
@@ -2258,14 +2434,20 @@ struct Index {
     for (let c: number = 0; c < chunks; c++) {
       const end: number = Math.min((c + 1) * SNAP_CHUNK, cap);
       const part: Array<string> = [];
+      // 2026-11-12：与 uri 行一一对应的「体积,修改时间」，重开后日期列不丢。
+      // 单独一个 meta 块，不动既有 snap_N 的格式（老存档照样读得出来）。
+      const metaPart: Array<ArchiveMeta> = [];
       for (let i: number = c * SNAP_CHUNK; i < end; i++) {
         part.push(this.items[i].uri);
+        metaPart.push({ size: this.items[i].size, mtime: this.items[i].mtime ?? 0 });
       }
       await store.put(SNAP_KEY_PREFIX + c, part.join('\n'));
+      await store.put(META_KEY_PREFIX + c, encodeMeta(metaPart));
     }
     // 这次比上次块数少 → 清掉多出来的旧块，否则下次恢复会读到上一批的尾巴
     for (let c: number = chunks; c < this.snapChunks; c++) {
       await store.delete(SNAP_KEY_PREFIX + c);
+      await store.delete(META_KEY_PREFIX + c);
     }
     if (this.snapChunks === 0) {
       // 首次写：老版本 SNAP_MAX=3000 / SNAP_CHUNK=200 最多落过 15 块，文件里可能还留着
@@ -2273,6 +2455,7 @@ struct Index {
       for (let c: number = chunks; c < OLD_SNAP_CHUNKS; c++) {
         try {
           await store.delete(SNAP_KEY_PREFIX + c);
+          await store.delete(META_KEY_PREFIX + c);
         } catch (e) {
           // 删不掉无所谓，反正读的时候只按 SNAP_KEY_COUNT 取前几块
         }
@@ -2308,6 +2491,40 @@ struct Index {
     return uris;
   }
 
+  /** 读出与 uri 快照块一一对应的「体积 / 修改时间」。
+   *  旧存档没有这个 key → 返回空数组，setItems 会退回未知值，恢复链照常工作。
+   *  ⚠️ 只读名单态下也允许读：这是 preferences 的小 key，不是逐 URI 的磁盘 IO，
+   *     不会触发 ro1 的「几百次同步跨进程调用」问题。 */
+  private async readSnapMeta(store: preferences.Preferences,
+    uriCount: number): Promise<Array<ArchiveMeta>> {
+    const chunks: number = Math.ceil(Math.min(uriCount, SNAP_MAX) / SNAP_CHUNK);
+    const out: Array<ArchiveMeta> = [];
+    for (let c: number = 0; c < chunks; c++) {
+      const raw = await store.get(META_KEY_PREFIX + c, '');
+      const part: Array<ArchiveMeta> = decodeMeta(typeof raw === 'string' ? raw : '');
+      for (let i: number = 0; i < part.length; i++) {
+        out.push(part[i]);
+      }
+    }
+    return out;
+  }
+
+  /** 单张兜底也能拿到日期：只读第 0 块（最轻），按 uri 找对应元数据。 */
+  private async readMetaForUri(store: preferences.Preferences,
+    uri: string): Promise<ArchiveMeta> {
+    try {
+      const rawUris = await store.get(SNAP_KEY_PREFIX + 0, '');
+      const rawMeta = await store.get(META_KEY_PREFIX + 0, '');
+      const uris: Array<string> = (typeof rawUris === 'string' && rawUris.length > 0)
+        ? rawUris.split('\n') : [];
+      const metas: Array<ArchiveMeta> = decodeMeta(typeof rawMeta === 'string' ? rawMeta : '');
+      return metaForUri(uris, metas, uri);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'snapshot: read meta for single failed');
+      return { size: -1, mtime: 0 };
+    }
+  }
+
   /** 用上次会话的 uri 快照重建列表（顺序与上次一致，随后 restoreIndex 会精确落到上次那张）。
    *  返回 false 表示没有可用快照。不要求当前列表为空 —— 「回到上次」也复用它。 */
   private async restoreFromSnapshot(): Promise<boolean> {
@@ -2317,7 +2534,9 @@ struct Index {
         return false;
       }
       const uris: Array<string> = await this.readSnapUris(store);
-      hilog.info(DOMAIN, TAG, 'snapshot: %{public}d uris', uris.length);
+      // 2026-11-12：连同体积 / 日期一起还原（只读几个小 key，不新增 IO 闸门外的磁盘访问）。
+      const metas: Array<ArchiveMeta> = await this.readSnapMeta(store, uris.length);
+      hilog.info(DOMAIN, TAG, 'snapshot: %{public}d uris / %{public}d meta', uris.length, metas.length);
       if (uris.length === 0) {
         return false;
       }
@@ -2331,7 +2550,7 @@ struct Index {
       this.pendingRestoreReadonly = !readable;
       this.pendingRestoreCount = uris.length;
       this.pendingRestoreSrc = src;
-      this.setItems(uris, src);       // 内部 applyItems → applyPendingRestore → restoreIndex
+      this.setItems(uris, src, metas); // 内部 applyItems → applyPendingRestore → restoreIndex
       // setItems 清空了 browseBase / browseDir / pickRootUri —— 这里把持久授权的
       // 原始目录 URI 还原回来，否则重开后「往上层」永远停在「没有上层目录」。
       this.restoreBrowseContext();
@@ -2548,8 +2767,12 @@ struct Index {
 
   /** 载入一组 URI，构建档案列表并默认选中第一张。
    *  体积刻意留成 -1 交给后台 fillSizes() 补 —— 见那里的注释。
-   *  对齐 Win64：过滤 . 开头的隐藏文件，并按自然序排序（IMG_2 排在 IMG_10 前）。 */
-  private setItems(uris: Array<string>, src: string): void {
+   *  对齐 Win64：过滤 . 开头的隐藏文件，并按自然序排序（IMG_2 排在 IMG_10 前）。
+   *
+   *  2026-11-12：可选 meta 是「上次会话快照里与 uri 一一对应的体积 / 修改时间」。
+   *  快照恢复 / 单张兜底把它传进来，左栏的字节与日期列才能和退出前完全一致；
+   *  不传则维持原来的行为（体积后台补、日期按既有口径显示），交互不变。 */
+  private setItems(uris: Array<string>, src: string, meta?: Array<ArchiveMeta>): void {
     hilog.info(DOMAIN, TAG, 'setItems: %{public}d uris from %{public}s', uris.length, src);
     // 从目录浏览切回文件多选 / 快照恢复：必须清掉目录态。
     // 否则 startDirPoll 每 1.5s 还在盯旧目录，一旦 mtime 变化就会把用户刚选的图
@@ -2577,8 +2800,15 @@ struct Index {
       if (HIDE_DOT_FILES && raw.length > 0 && raw.charAt(0) === '.') {
         continue;
       }
+      // 2026-11-12：快照恢复时把上次的体积 / 修改时间一起还原，
+      // 否则 mtime 为 0 → 左栏日期列只有 '--'（用户反馈「重开后日期丢失」）。
+      // 只读名单态下 fillSizes() 被 IO 闸门挡住，日期只能靠这里持久化恢复。
+      const m: ArchiveMeta | undefined =
+        (meta !== undefined && i < meta.length) ? meta[i] : undefined;
       const item: ImageItem = {
-        uri: u, name: this.nameOf(u, i), size: -1,
+        uri: u, name: this.nameOf(u, i),
+        size: m !== undefined ? m.size : -1,
+        mtime: m !== undefined ? m.mtime : 0,
         kind: ROW_IMAGE, itemIndex: i
       };
       list.push(item);
@@ -4782,6 +5012,7 @@ struct Index {
         break;
       case 'collapse':
         this.listCollapsed = !this.listCollapsed;
+        this.markWindowRect(); // 记住左栏收起态，重启前后界面状态一致
         break;
       // 11-10 起「回到上次」按钮取消，'resume' 分支一并移除；
       // resumeLast() / loadAllGallery() 本体保留（启动自动恢复与内部降级仍复用）。
@@ -5271,6 +5502,7 @@ struct Index {
     // Ctrl+B：收起 / 展开左栏（Win64 c38318f）。必须放在通用分支之前，避免 B 被吞掉。
     if (this.ctrlDown && code === KeyCode.KEYCODE_B) {
       this.listCollapsed = !this.listCollapsed;
+      this.markWindowRect();
       this.status = this.listCollapsed ? '已收起左栏（Ctrl+B 展开）' : '已展开左栏';
       return;
     }
@@ -5648,6 +5880,7 @@ struct Index {
               .padding(0)
               .onClick(() => {
                 this.listCollapsed = !this.listCollapsed;
+                this.markWindowRect();
                 this.status = this.listCollapsed ? '已收起左栏（Ctrl+B / » 展开）' : '已展开左栏';
               })
           }
@@ -6033,6 +6266,9 @@ struct Index {
       const changed: boolean = (rw !== this.lastRootW) || (rh !== this.lastRootH);
       this.lastRootW = rw;
       this.lastRootH = rh;
+      if (changed) {
+        this.markWindowRect(); // 拖窗口时也记住当前尺寸（防抖），强杀进程不丢
+      }
       // 两个回调谁先到不确定：根先到时直接用当前画布反算一次基准，别等下一次预览回调。
       if (this.chromeW < 0 && this.canvasW > 0 && this.canvasH > 0 &&
         rw >= this.canvasW && rh >= this.canvasH) {

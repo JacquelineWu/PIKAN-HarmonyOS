@@ -15,7 +15,8 @@
  * 以及同日第二轮 5 项实机修正（全屏放大 / ESC 还原 / 右页锯齿 / hover 无档案名 / 梅花间竹列表），
  * 以及第三轮「左边显示比右边差 → 左右页统一最高画质」，
  * 以及第四轮「ESC 对齐双击 / resize 实时适配 / 全量缓存并发预解码加速滚轮」，
- * 以及第五轮「resize 实机仍不生效 → @Builder 参数 / 累积阈值 / 节流 / 根容器兜底」。
+ * 以及第五轮「resize 实机仍不生效 → @Builder 参数 / 累积阈值 / 节流 / 根容器兜底」，
+ * 以及第六轮「重启后档案日期不丢失 / 窗口大小与位置恢复 / 界面状态一致」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -34,6 +35,9 @@ import { PERSIST_SKIP, PERSIST_ACTIVATE, persistAction, persistPolicyUris,
 import { exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf, displayEdgeOf,
   shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
   colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../entry/src/main/ets/common/ViewPlan.ts';
+import { metaLineOf, parseMetaLine, encodeMeta, decodeMeta, metaForUri,
+  packWindowRect, parseWindowRect, windowRectUsable,
+  shouldSaveWindowRect, collapsedOf } from '../entry/src/main/ets/common/SessionState.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -995,8 +999,8 @@ check('恢复期零 IO：方法体无 listFile / statSync / openFolder / startDi
   /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|startDirPoll|DocumentViewPicker|PhotoViewPicker|ensureGalleryPermission|loadAllGallery|queryAllPhotos/.test(UPC_CODE), false);
 check('两条恢复路径（快照 / 单张兜底）都在 setItems 之后调用',
   (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 2 &&
-  /this\.setItems\(uris, src\);[\s\S]{0,320}this\.restoreBrowseContext\(\);/.test(INDEX) &&
-  /this\.setItems\(\[single\], src\);[\s\S]{0,240}this\.restoreBrowseContext\(\);/.test(INDEX), true);
+  /this\.setItems\(uris, src, metas\);[\s\S]{0,320}this\.restoreBrowseContext\(\);/.test(INDEX) &&
+  /this\.setItems\(\[single\], src, \[oneMeta\]\);[\s\S]{0,240}this\.restoreBrowseContext\(\);/.test(INDEX), true);
 check('状态栏两处都追加「可继续往上层」提示',
   (INDEX.match(/restoreUpHint\(baseName\(this\.browseBase\), UP_CTX_TAG\)/g) || []).length, 2);
 check('READONLY 早退只在「没有目录层级」时生效（层级已重建则继续上移）',
@@ -1584,6 +1588,117 @@ check('⑤ 回归护栏：最高画质三处齐配 / fitToWindow / 全屏快照 
   /this\.hasFullSnapshot = true;/.test(INDEX) &&
   /if \(PRELOAD_ALL\) \{/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+console.log('--- SessionState 纯函数：档案元数据（体积 / 日期）---');
+check('metaLineOf 正常值', metaLineOf(2048, 1730000000000), '2048,1730000000000');
+check('metaLineOf 未知值回退 -1,0', metaLineOf(-1, 0), '-1,0');
+check('metaLineOf 过滤 NaN / Infinity', metaLineOf(NaN, Infinity), '-1,0');
+check('metaLineOf 取整', metaLineOf(12.9, 34.8), '12,34');
+const PM = parseMetaLine('4096,1730000000123');
+check('parseMetaLine 体积', PM.size, 4096);
+check('parseMetaLine 日期', PM.mtime, 1730000000123);
+check('parseMetaLine 缺列不抛异常',
+  JSON.stringify(parseMetaLine('4096')), JSON.stringify({ size: 4096, mtime: 0 }));
+check('parseMetaLine 空串全未知',
+  JSON.stringify(parseMetaLine('')), JSON.stringify({ size: -1, mtime: 0 }));
+check('parseMetaLine 垃圾串全未知',
+  JSON.stringify(parseMetaLine('x,y')), JSON.stringify({ size: -1, mtime: 0 }));
+const ENC = encodeMeta([{ size: 100, mtime: 111 }, { size: -1, mtime: 0 }, { size: 200, mtime: 222 }]);
+check('encodeMeta 三行', ENC, '100,111\n-1,0\n200,222');
+check('decodeMeta 往返', JSON.stringify(decodeMeta(ENC)),
+  JSON.stringify([{ size: 100, mtime: 111 }, { size: -1, mtime: 0 }, { size: 200, mtime: 222 }]));
+check('decodeMeta 空串 → 空数组（旧存档无 meta key）', decodeMeta('').length, 0);
+check('decodeMeta 跳过空行', decodeMeta('1,2\n\n3,4\n').length, 2);
+check('metaForUri 按 uri 命中（不靠下标）',
+  JSON.stringify(metaForUri(['a', 'b'], [{ size: 1, mtime: 10 }, { size: 2, mtime: 20 }], 'b')),
+  JSON.stringify({ size: 2, mtime: 20 }));
+check('metaForUri 找不到回退未知',
+  JSON.stringify(metaForUri(['a'], [], 'z')), JSON.stringify({ size: -1, mtime: 0 }));
+
+console.log('--- SessionState 纯函数：窗口大小 / 位置 ---');
+const WR = { left: 120, top: 80, width: 1280, height: 800 };
+check('packWindowRect 四段', packWindowRect(WR), '120,80,1280,800');
+check('parseWindowRect 往返', JSON.stringify(parseWindowRect(packWindowRect(WR))), JSON.stringify(WR));
+check('parseWindowRect 拒绝列数不对', parseWindowRect('1,2,3'), undefined);
+check('parseWindowRect 拒绝空串', parseWindowRect(''), undefined);
+check('parseWindowRect 拒绝非数字', parseWindowRect('a,b,c,d'), undefined);
+check('parseWindowRect 拒绝 NaN', parseWindowRect('NaN,0,100,100'), undefined);
+check('windowRectUsable 正常窗口', windowRectUsable(WR, 320, 240, 16384, 16384), true);
+check('windowRectUsable 拒绝 undefined', windowRectUsable(undefined, 320, 240, 16384, 16384), false);
+check('windowRectUsable 拒绝过小',
+  windowRectUsable({ left: 0, top: 0, width: 100, height: 100 }, 320, 240, 16384, 16384), false);
+check('windowRectUsable 拒绝超大（多半是全屏残留）',
+  windowRectUsable({ left: 0, top: 0, width: 99999, height: 800 }, 320, 240, 16384, 16384), false);
+check('windowRectUsable 拒绝离屏坐标',
+  windowRectUsable({ left: 999999, top: 0, width: 1280, height: 800 }, 320, 240, 16384, 16384), false);
+check('windowRectUsable 允许负坐标（多屏左屏）',
+  windowRectUsable({ left: -1920, top: 0, width: 1280, height: 800 }, 320, 240, 16384, 16384), true);
+check('shouldSaveWindowRect 非全屏 + 自由窗口才存', shouldSaveWindowRect(false, true), true);
+check('shouldSaveWindowRect 全屏不覆盖记忆', shouldSaveWindowRect(true, true), false);
+check('shouldSaveWindowRect 最大化 / 沉浸态不覆盖', shouldSaveWindowRect(false, false), false);
+check('collapsedOf(1) → 收起', collapsedOf(1), true);
+check('collapsedOf(0) / 缺失 → 展开（日期列不隐藏）', collapsedOf(0), false);
+check('collapsedOf(NaN) → 展开', collapsedOf(NaN), false);
+
+console.log('--- 源码静态契约：第六轮（档案日期恢复 + 窗口大小位置恢复）---');
+check('① SessionState 已 import，会话状态小 key / 校验常量就位',
+  /from '..\/common\/SessionState'/.test(INDEX) &&
+  /const META_KEY_PREFIX: string = 'snapMeta_';/.test(INDEX) &&
+  /const WIN_KEY_RECT: string = 'winRect';/.test(INDEX) &&
+  /const WIN_KEY_COLLAPSED: string = 'listCollapsed';/.test(INDEX) &&
+  /const WIN_RECT_RESTORE_MS: number = 900;/.test(INDEX) &&
+  /const WIN_RECT_SAVE_MS: number = 600;/.test(INDEX), true);
+check('① setItems 可选 meta 并注入 size / mtime（日期不再为 0）',
+  /private setItems\(uris: Array<string>, src: string, meta\?: Array<ArchiveMeta>\): void \{/.test(INDEX) &&
+  /const m: ArchiveMeta \| undefined =/.test(INDEX) &&
+  /size: m !== undefined \? m\.size : -1,/.test(INDEX) &&
+  /mtime: m !== undefined \? m\.mtime : 0,/.test(INDEX), true);
+check('① flushSnap 同时写 meta 块、清理旧块时一并删',
+  /await store\.put\(META_KEY_PREFIX \+ c, encodeMeta\(metaPart\)\);/.test(INDEX) &&
+  /await store\.delete\(META_KEY_PREFIX \+ c\);/.test(INDEX) &&
+  /metaPart\.push\(\{ size: this\.items\[i\]\.size, mtime: this\.items\[i\]\.mtime \?\? 0 \}\);/.test(INDEX), true);
+check('① 快照恢复读 meta 并注入，单张兜底按 uri 找日期',
+  /const metas: Array<ArchiveMeta> = await this\.readSnapMeta\(store, uris\.length\);/.test(INDEX) &&
+  /this\.setItems\(uris, src, metas\);/.test(INDEX) &&
+  /private async readMetaForUri\(/.test(INDEX) &&
+  /this\.setItems\(\[single\], src, \[oneMeta\]\);/.test(INDEX) &&
+  /return metaForUri\(uris, metas, uri\);/.test(INDEX), true);
+check('① 左栏日期列本身没被改掉（回归护栏）',
+  /Text\(this\.mtime > 0 \? fmtDate\(this\.mtime\) : '--'\)/.test(INDEX) &&
+  /mtime: item\.mtime \?\? 0,/.test(INDEX), true);
+check('② readLastPos 读回窗口 rect 与收起态，且在提前 return 之前排程',
+  /const rawRect = await p\.get\(WIN_KEY_RECT, ''\);/.test(INDEX) &&
+  /const rawCollapsed = await p\.get\(WIN_KEY_COLLAPSED, 0\);/.test(INDEX) &&
+  /this\.savedWindowRect = typeof rawRect === 'string' \? rawRect : '';/.test(INDEX) &&
+  /this\.listCollapsed = collapsedOf\(/.test(INDEX) &&
+  /this\.scheduleRestoreWindowRect\(\);/.test(INDEX), true);
+check('② 恢复推迟到窗口稳定后，且只跑一次',
+  /private scheduleRestoreWindowRect\(\): void \{[\s\S]{0,220}WIN_RECT_RESTORE_MS\);/.test(INDEX) &&
+  /private winRectApplied: boolean = false;/.test(INDEX), true);
+check('② applySavedWindowRect 校验 rect + 只在 FLOATING 恢复 + resize/moveWindowTo',
+  /private async applySavedWindowRect\(retry: number\): Promise<void> \{/.test(INDEX) &&
+  /windowRectUsable\(rect, WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H\)/.test(INDEX) &&
+  /win\.getWindowStatus\(\) === window\.WindowStatusType\.FLOATING/.test(INDEX) &&
+  /await win\.resize\(rect\.width, rect\.height\);/.test(INDEX) &&
+  /await win\.moveWindowTo\(rect\.left, rect\.top\);/.test(INDEX) &&
+  /WIN_RECT_RETRY_MAX/.test(INDEX), true);
+check('② 退出同步落盘：windowRect 来自 getWindowProperties 且经校验',
+  /const props = win\.getWindowProperties\(\);/.test(INDEX) &&
+  /const r = props\.windowRect;/.test(INDEX) &&
+  /store\.putSync\(WIN_KEY_RECT, packed\);/.test(INDEX) &&
+  /shouldSaveWindowRect\(this\.fullscreen, floating\)/.test(INDEX) &&
+  /store\.putSync\(WIN_KEY_COLLAPSED, this\.listCollapsed \? 1 : 0\);/.test(INDEX) &&
+  /store\.flushSync\(\);/.test(INDEX), true);
+check('② onPageHide / aboutToDisappear 都同步保存窗口状态',
+  /onPageHide\(\): void \{[\s\S]{0,220}this\.clearWinRectTimer\(\);\s*this\.saveWindowRectSync\(\);/.test(INDEX) &&
+  (INDEX.match(/this\.saveWindowRectSync\(\);/g) || []).length >= 3, true);
+check('② 三处收起态切换点 + 根容器 resize 都触发防抖写盘',
+  (INDEX.match(/this\.markWindowRect\(\);/g) || []).length === 4, true);
+check('② 回归护栏：既有档案列表 / 窗口交互常量未动',
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
+  /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX) &&
+  /win\.maximize\(window\.MaximizePresentation\.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER\)/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
