@@ -745,7 +745,7 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 | 环节 | 做法 |
 |---|---|
 | 权限 | `module.json5` 声明 `ohos.permission.FILE_ACCESS_PERSIST`。SDK 26 `PermissionDefinitions.json` 里它是 `system_grant / normal / provisionEnable` —— **安装时自动授予、不弹权限框**，也不会像 `READ_IMAGEVIDEO`（`user_grant / system_basic`）那样让 debug 签名安装失败 |
-| 选目录时 | `chooseFolder()` / `chooseFolderAt()` 拿到 `picker.select()` 返回的**原始目录 URI** 后，fire-and-forget 调 `fileShare.persistPermission([{uri, READ_MODE}])`，并把该 URI 同步写进 `POS_KEY_DIR`（`lastDirUri`） |
+| 选目录时 | `chooseFolder()` 拿到 `picker.select()` 返回的**原始目录 URI** 后，fire-and-forget 调 `fileShare.persistPermission([{uri, READ_MODE}])`，并把该 URI 同步写进 `POS_KEY_DIR`（`lastDirUri`）。「往上层」不再弹选择器，也就不存在「补授权后持久化」这一环 |
 | 重开时 | `beginRestore()` 在首帧后 900ms 的定时器里先（有超时兜底地）`activatePermission()`，再进入原恢复链 |
 | 裁决 | **探测仍由 `probeRestoreUris()` 说了算**：activate 成功 → 3 张探测通过 → `RESTORE_FULL` 直接出图；activate 失败 / 平台拒绝 → 探测失败 → `RESTORE_READONLY`，防冻结兜底原样保留 |
 
@@ -766,6 +766,38 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 >
 > ⚠️ 若平台对该目录 URI 返回 `PERSISTENCE_FORBIDDEN`（某些 picker URI 不允许持久化），
 > `persistPermission` 会失败并记日志，重开时探测失败 → 依旧落只读名单态，**不会卡死、不会崩**。
+
+### 实机反馈：点「往上层」不该弹系统选择目录 dialog（2026-11-11 第四次修正）
+
+用户原话：**「现在按回上层回弹出选择目录 dialog，不是我原意，原意是在 app 内可以显示上层档案目录或档案清单」**。
+
+| 环节 | 之前 | 现在 |
+|---|---|---|
+| 父目录授权还在 | `openFolder(parent)` 成功 → APP 内列父目录清单 | 不变 |
+| 父目录授权失效 | 所有同层候选 `listFile` 失败 → `chooseFolderAt()` 拉起系统 `FOLDER` picker 补授权 | **整个 `chooseFolderAt()` 删除**，改 `showUpListInApp()` 在 APP 内左栏出清单，诊断串 `no-picker` |
+
+实现要点（全部纯字符串、**零 IO**，因此启动恢复后也安全，与历史 appfreeze 护栏不冲突）：
+
+- `pathChainOf(target)`（`DirName.ts`）：从卷根到目标父级的**每一级**目录路径，逐条生成可点的
+  `ROW_FOLDER` 行；与 `upLevelOf()` 同一口径，相邻两级严格差一层，不会越级。
+- `lastUpNames`：会话内进入子目录前记下那一层的真实条目名；`sameDirPath()` 命中时把完整
+  「档案清单」也列出来（档案行走 `ROW_OTHER`，只列名字、不解码、不进翻页序列）。
+  重启后为空 → 至少列出「当前目录」这个已知子目录 + 卷根到父级的层级链。
+- `showUpListInApp()` **刻意不走 `applyItems()`**：那会重设恢复模式 / 提示卡并触发
+  `showPreviewOf` / `fillSizes` / `schedulePreload`。这里只提交一份纯清单，
+  `restoreMode`、八个 `bulkIoAllowed` 闸门、只读提示卡全部原样保留。
+- 停掉 `dirPollTimer` / `rescanTimer`，否则自动重扫会把刚显示的清单覆盖掉；
+  回填 `browseBase` / `titlePath` / `canGoUp`，「往上层」可继续逐级上移。
+- `inAppUpList` 标记：清单态下点目录行走 `openFolder(uri, true, false)`，
+  连「目录内多选」兜底选择器也一并禁掉 —— **按「往上层」及其后任何交互都不弹系统 dialog**。
+- UNKNOWN 态（层级判不出的文档 URI）走宽松父级，同样出 APP 内清单，
+  不再给「请用选择文件夹重新进入」的死提示。
+- 诊断标记 **`ul1`**（`UP_LIST_TAG`，不是版本号）：状态栏 / 提示条带
+  「APP 内上层「X」清单（N 项）· 点目录名进入 · 不弹系统选择器 · ul1」，
+  右下角诊断串 `up LIST | ul1 | … | no-picker`。
+
+> 「选择文件夹」按钮仍会拉起系统 picker —— 那是用户**主动**选目录，与「往上层」无关。
+> 上层清单里的目录行点进去仍走 `openFolder()`（用户主动点击才发生，不是启动期批量 IO）。
 
 ### 需求 1 的另一半：退出必须**同步**落盘
 
@@ -790,7 +822,7 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 
 ### 验证
 
-`node --experimental-strip-types tests/dirname.test.mjs` **238 → 293 → 367 → 419/419 通过**：
+`node --experimental-strip-types tests/dirname.test.mjs` **238 → 293 → 367 → 419 → 493/493 通过**：
 新增 `ResumePlan` 纯函数用例（恢复决策 8 例、单张 uri、延迟安全、退出落盘、快照限幅、
 恢复态按钮）与源码静态契约（`onPageHide` / `putSync+flushSync` / 恢复函数体不含重扫与选择器 /
 单张兜底撤销落盘等）。其中与「禁用按钮」相关的断言已在澄清修正时一并替换。
@@ -803,7 +835,14 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 `FILE_ACCESS_PERSIST`、两个 SDK 调用各一次且只用 `READ_MODE`、超时竞速与只跑一次的收口、
 目录 URI 四处落盘、旧数据迁移提示），并**逐条回归**上一轮的防冻结兜底
 （探测上限 3、两条恢复路径先探授权、≥8 个 `bulkIoAllowed` 闸门、按钮仍无 `.enabled(`、版本未升）。
-状态栏出现 **`rs1`** / **`ro1`** / **`p1`** 即新包（都只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
+最后 74 例覆盖「往上层改为 APP 内清单」：`pathChainOf`（逐级链、卷根 / 文件系统根、
+Windows 盘符、`file://docs` / %XX / ? 参数归一、判不出层级返回空链、与 `upLevelOf` 互逆）、
+`inAppUpListHint`，以及源码静态契约（`chooseFolderAt` 已删、`browseUp` 体内无选择器 /
+`pickerStartOf` / `isUpTargetOf`、两个失败分支都收口 `showUpListInApp`、清单方法零 IO 且不动
+恢复模式、清单行禁文件多选、三条 `inAppUpList` 维护点、诊断串 `no-picker`），
+并逐条回归前几轮的护栏（≥8 个闸门、探测上限 3、按钮仍无 `.enabled(`、版本未升）。
+状态栏出现 **`rs1`** / **`ro1`** / **`p1`** / **`uc1`** / **`ul1`** 即新包
+（都只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
 
 按 11-10 约定：**未编译 HAP、未放桌面、未升版本、未 push**。
 实机请在 DevEco Studio 编译后：
@@ -811,7 +850,9 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 1. 点「选择文件夹」进一个有图的目录、看几张图（这一步建立持久授权）→ 按 Home / 切后台 →
    重开 APP，应自动回到上次那张图，状态栏带 `rs1 · p1 目录授权已持久`，**无需再选文件夹**。
 2. 若是刚升级的首次启动：先看只读名单态提示，按提示重选一次该目录，之后重复第 1 步验证。
-3. 此时「往上层」**仍是亮着可点的**；点「选择文件夹」进入有父级的目录后即可逐级上移。
+3. 此时「往上层」**仍是亮着可点的**；点了**不弹系统选择目录 dialog**，左栏直接切换成
+   上层目录 / 档案清单（状态栏带 `ul1 · 不弹系统选择器`），点清单里的目录名继续进入；
+   父目录授权还在时则照常列出真实清单。诊断串出现 `up LIST | ul1 | … | no-picker` 即新包。
 
 ## 往上层：改为 Windows 文件管理器的目录层级语义（2026-11-10）
 

@@ -51,16 +51,17 @@ import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
 import util from '@ohos.util';
-import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, pickerStartOf,
-  volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, isUpTargetOf,
+import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
+  volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
+  upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
   textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../common/PreloadBudget';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed, restoreProbeUris,
-  readonlyHint, readonlyTapHint, readonlyUpHint } from '../common/ResumePlan';
+  readonlyHint, readonlyTapHint, readonlyUpHint, restoreUpEnabled, restoreUpHint } from '../common/ResumePlan';
 import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
@@ -87,6 +88,14 @@ const RESTORE_TAG: string = 'ro1';
 const RESTORE_PROBE_LIMIT: number = 3;
 /** 「目录 URI 持久授权」的诊断标记（也不是版本号）。实机诊断串出现 p1 即带此功能。 */
 const PERSIST_TAG: string = 'p1';
+/** 「恢复后重建往上层目录层级」的诊断标记（也不是版本号）。
+ *  2026-11-11 第三次实机反馈：p1 后重开能出图了，但「往上层」仍按不动 ——
+ *  因为恢复链只把原始目录 URI 拿去 activate，没回填 browseBase。出现 uc1 即带此修复。 */
+const UP_CTX_TAG: string = 'uc1';
+/** 「往上层改为 APP 内清单」的诊断标记（也不是版本号）。
+ *  2026-11-11 第四次实机反馈：点「往上层」会弹出系统选择目录 dialog，不是原意；
+ *  原意是在 APP 内显示上层档案目录 / 档案清单。出现 ul1 即带此修复。 */
+const UP_LIST_TAG: string = 'ul1';
 /** 启动激活持久授权最多等多久（ms）。activatePermission 是跨进程调用，
  *  必须有超时兜底，否则系统服务挂住时恢复链永远不往下走、界面停在空态。 */
 const PERSIST_ACTIVATE_MS: number = 1500;
@@ -1195,6 +1204,14 @@ struct Index {
   /** 最近一次「选择文件夹」拿到的原始 uri，仅用作 FOLDER picker 的已授权起点。
    *  ⚠️ 不再作为「往上层」的父级推算锚点：它可能指向好几层之前，混进来就会越级 / 绕圈。 */
   private pickRootUri: string = '';
+  /** 会话内「进入子目录前那一份目录清单」的条目名（纯字符串，零 IO）。
+   *  用户随后点「往上层」回到这一层、而上级授权已失效列不出真实内容时，
+   *  showUpListInApp 就能在 APP 内还原档案清单，而不是弹系统选择目录 dialog。
+   *  重启后为空 → 退化为 pathChainOf() 的目录层级清单。 */
+  private lastUpPath: string = '';
+  private lastUpNames: Array<string> = [];
+  /** 左栏当前是不是「APP 内自建清单态」。为真时点目录行绝不弹「目录内多选」兜底选择器。 */
+  private inAppUpList: boolean = false;
   private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
   private dirPollTimer: number = -1;        // 目录轮询句柄
   private rescanTimer: number = -1;         // 变动后去抖重扫句柄
@@ -1578,6 +1595,48 @@ struct Index {
     this.pendingRestoreSrc = '';
   }
 
+  /** 恢复链收口：把持久授权的 picker 原始目录 URI 还原成「往上层」的层级真值。
+   *
+   *  为什么必须有这一步：`setItems()` 无条件清空 `browseBase` / `browseDir` /
+   *  `pickRootUri`，于是恢复出来一定是「图片列表态」，`browseUp()` 读到空 current
+   *  → `UP_NAV_NONE` → 只给一句「当前是图片列表，没有上层目录」就 return。
+   *  上一轮 p1 虽然把原始目录 URI 存进 preferences 并在启动时激活了授权，
+   *  却只把它交给 `activatePermission`，从没回填给这三个锚点 —— 这正是
+   *  2026-11-11「重开已能直接出图，往上层却还是按不动」的最后一环。
+   *
+   *  ⚠️ 纯字符串赋值：绝不 `listFile` / `statSync` / `openFolder` /
+   *     `startDirPoll` / 弹权限框 / 弹选择器。恢复期新增任何 IO 都会把历史
+   *     appfreeze 请回来。真正列父目录只发生在**用户主动点击「往上层」之后**
+   *     （browseUp → openFolder）；父目录列不出来时由 showUpListInApp 在 APP 内
+   *     出一份上层清单，绝不弹系统选择目录 dialog。
+   *  ⚠️ 必须在 `setItems()` **之后**调用：setItems 会清空目录态并刷新
+   *     titlePath / canGoUp，早于它会被覆盖掉。
+   *  ⚠️ 只读名单态照样回填（层级是纯信息，零 IO）：browseUp 的 READONLY 早退
+   *     分支保持不变，防冻结闸门一行不动，只是标题栏 / 诊断串更准确。 */
+  private restoreBrowseContext(): void {
+    if (!restoreUpEnabled(this.restoreMode, this.savedDirUri)) {
+      return;
+    }
+    const base: string = upContextBaseOf(this.savedDirUri);
+    if (base.length === 0) {
+      return;
+    }
+    const raw: string = upContextRawOf(this.savedDirUri);
+    // 三个锚点同层同源：base 是真实路径（层级运算 / statSync 认得），
+    // raw 是 picker 原始 URI（逐 URI 授权只认带 scheme 这个形态）。
+    this.browseBase = base;
+    this.browseDir = raw.length > 0 ? raw : base;
+    this.pickRootUri = this.browseDir;
+    this.titlePath = base;
+    this.canGoUp = canGoUpFrom(base);
+    this.diagLine = 'up CTX | ' + UP_CTX_TAG + ' | ' +
+      (this.restoreMode === RESTORE_READONLY ? 'ro' : 'full') +
+      ' | L' + dirLevelOf(base) + ' | ' + ellipsizeMiddle(base, 30) +
+      ' | v' + APP_VERSION;
+    hilog.info(DOMAIN, TAG, 'restore: up context rebuilt L%{public}d base=%{public}s',
+      dirLevelOf(base), base);
+  }
+
   // ------------------------------------------------------------------------
   // 目录 URI 持久授权（2026-11-11）：让重开直接出图，不必每次重新选文件夹
   // ------------------------------------------------------------------------
@@ -1766,7 +1825,9 @@ struct Index {
           ? this.restoreHintText
           : '已恢复上次会话 · ' + this.items.length + ' 张 · 第 ' +
             (this.cur + 1) + ' 张 · ' + RESUME_TAG +
-            (this.persistActivated ? ' · ' + PERSIST_TAG + ' 目录授权已持久' : '');
+            (this.persistActivated ? ' · ' + PERSIST_TAG + ' 目录授权已持久' : '') +
+            (this.browseBase.length > 0
+              ? ' · ' + restoreUpHint(baseName(this.browseBase), UP_CTX_TAG) : '');
         hilog.info(DOMAIN, TAG, 'resume: snapshot restored %{public}d items at %{public}d ro=%{public}d',
           this.items.length, this.cur, this.restoreHintText.length > 0 ? 1 : 0);
         return;
@@ -1784,6 +1845,8 @@ struct Index {
       this.pendingRestoreCount = 1;
       this.pendingRestoreSrc = src;
       this.setItems([single], src);
+      // 回填目录层级：单张兜底同样要让「往上层」能用，不能只给名单就锁死层级。
+      this.restoreBrowseContext();
       // ⚠️ setItems → applyItems 末尾会 markPos() + snapDirty=true，500ms 后 flushPos
       //    会把「只有 1 张」的列表写进快照，覆盖掉上次会话的整批 uri；位置记忆也会被
       //    改成 count=1 / idx=0。单张只是个临时兜底画面，**绝不能污染持久化数据**。
@@ -1801,7 +1864,9 @@ struct Index {
         ? this.restoreHintText
         : '已显示上次看到的「' +
           (saved !== undefined && saved.name.length > 0 ? saved.name : baseName(single)) +
-          '」· ' + RESUME_TAG + '（用「选择文件夹」可重新打开整批图片）';
+          '」· ' + RESUME_TAG + '（用「选择文件夹」可重新打开整批图片）' +
+          (this.browseBase.length > 0
+            ? ' · ' + restoreUpHint(baseName(this.browseBase), UP_CTX_TAG) : '');
       hilog.info(DOMAIN, TAG, 'resume: single shown, snapshot preserved, ro=%{public}d',
         this.restoreHintText.length > 0 ? 1 : 0);
     }
@@ -2054,6 +2119,9 @@ struct Index {
       this.pendingRestoreCount = uris.length;
       this.pendingRestoreSrc = src;
       this.setItems(uris, src);       // 内部 applyItems → applyPendingRestore → restoreIndex
+      // setItems 清空了 browseBase / browseDir / pickRootUri —— 这里把持久授权的
+      // 原始目录 URI 还原回来，否则重开后「往上层」永远停在「没有上层目录」。
+      this.restoreBrowseContext();
       this.snapDirty = false;         // 列表本来就是从快照来的，没必要再写回去
       this.status = this.status + '（来自上次会话）';
       return true;
@@ -2253,6 +2321,7 @@ struct Index {
     // 重新覆盖掉；标题栏也会继续挂着上一个目录的路径。
     this.browseDir = '';
     this.browseBase = '';
+    this.inAppUpList = false;   // 回到图片列表态：APP 内清单标记作废
     // 没有浏览历史栈可清：往上层只认 browseBase；它在上面置空后，
     // applyItems() 会把 canGoUp 刷成 false（仅用于提示文案，按钮仍然亮着可点）。
     this.diagLine = ''; // 回到图库 / 多选态，别再挂旧目录的诊断串
@@ -2695,7 +2764,9 @@ struct Index {
       return;
     }
     if (kind === ROW_FOLDER) {
-      this.openFolder(r.uri, true);
+      // APP 内清单态：第三参 false 禁掉「目录内多选」兜底选择器 ——
+      // 用户点清单里的目录名只应在 APP 内继续列目录，绝不弹任何系统 dialog。
+      this.openFolder(r.uri, true, !this.inAppUpList);
       return;
     }
     if (kind === ROW_OTHER) {
@@ -3958,6 +4029,21 @@ struct Index {
       }
       // 不再压任何「来路」栈：旧实现往上层时 pop 的是浏览历史，不是当前路径的父级，
       // 连续点击会沿历史绕圈 / 越级。现在只把 base 记为唯一当前路径真值。
+      // 进入新目录前，把「当前这份目录清单」按真实路径记下来（只存条目名，纯字符串）。
+      // 用户随后点「往上层」回到这一层、而上级授权已失效列不出真实内容时，
+      // showUpListInApp 就能在 APP 内还原档案清单，不必弹系统选择目录 dialog。
+      if (this.browseBase.length > 0 && this.rows.length > 0) {
+        const cacheNames: Array<string> = [];
+        for (let i = 0; i < this.rows.length; i++) {
+          const rn: ImageItem = this.rows[i];
+          if ((rn.kind ?? ROW_IMAGE) !== ROW_UP) {
+            cacheNames.push(rn.name);
+          }
+        }
+        this.lastUpPath = stripTrailingSlash(this.browseBase);
+        this.lastUpNames = cacheNames;
+      }
+      this.inAppUpList = false;   // 这次是真列出来的目录态，不是 APP 内自建清单
       this.browseDir = dirUri;
       this.browseBase = base;
       this.dirMtime = this.tryMtime(base);
@@ -4201,9 +4287,12 @@ struct Index {
       this.status = '往上层：上一批目录还在列，稍候再点';
       return;
     }
-    // 只读名单态：恢复出来是图片列表态，本来就没有目录层级。
+    // 只读名单态 + **没有**目录层级（老快照没存过 picker 原始目录 URI）：
     // 绝不禁用按钮 —— 点了必须给明确指引，不能像没反应一样（2026-11-11 实机反馈）。
-    if (this.restoreMode === RESTORE_READONLY) {
+    // 2026-11-11 第三次反馈：若 restoreBrowseContext 已从持久授权目录 URI 重建层级，
+    // 就不要再早退 —— 继续走正常层级链，父目录列不出来时由 showUpListInApp
+    // 在 APP 内出清单（用户主动点击才发生，不是启动期批量 IO，不违反防冻结底线）。
+    if (this.restoreMode === RESTORE_READONLY && this.browseBase.length === 0) {
       this.status = readonlyUpHint();
       this.diagLine = 'up READONLY | ' + RESTORE_TAG + ' | 无目录层级 | v' + APP_VERSION;
       return;
@@ -4279,116 +4368,102 @@ struct Index {
     }
     hilog.warn(DOMAIN, TAG, 'browseUp all same-level cands failed, current=%{public}s', current);
     if (loose) {
-      // UNKNOWN 态不能走补授权选择器：isUpTargetOf 依赖 upLevelOf，此时恒为 false，
-      // 会把用户选中的任何目录都判成「不是直接父级」，等于死锁。给明确指引即可。
-      this.status = '往上层：无法从「' + baseName(current) +
-        '」上移（目录标识层级不可解析）· 请用「选择文件夹」重新进入该目录后再试';
-      this.diagLine = 'up FAIL | ' + UP_NAV_TAG + ' | loose | ' + parents.length +
-        ' cands denied | target=' + targetName + ' | v' + APP_VERSION;
+      // UNKNOWN 态（目录标识层级不可解析）：同样**不弹系统选择器**。
+      // 用宽松父级在 APP 内出一份清单（pathChainOf 可能为空，但至少列出当前目录 +
+      // 说明行），保证按钮点了有可见反馈，而不是给一句让用户自己重选的死提示。
+      this.showUpListInApp(target, targetName, current, parents, state, level);
       return;
     }
-    this.status = '往上层失败：上级「' + targetName + '」无读取授权 · 已打开目录选择器，请进到「' +
-      targetName + '」确认一次（只进一层）';
-    this.diagLine = 'up FAIL | ' + UP_NAV_TAG + ' | ' + parents.length +
-      ' cands denied | target=' + targetName + ' | need picker auth | v' + APP_VERSION;
-    // 逐 URI 授权模型下，父目录没授权时唯一可靠的补权方式：让用户确认一次，
-    // 且只接受恰好一层的父目录（isUpTargetOf 校验），避免补授权时越级。
-    this.chooseFolderAt(targetName, target, current);
+    // 2026-11-11 第四次实机反馈：上级目录没授权时**绝不弹系统选择目录 dialog**。
+    // 用户原意是「在 APP 内显示上层档案目录或档案清单」—— 改成 APP 内自建清单视图：
+    // 已知层级 + 会话内记下的真实条目名，全是纯字符串，零 IO、零选择器。
+    this.showUpListInApp(target, targetName, current, parents, state, level);
   }
 
-  /** 往上层时祖先目录没有 URI 授权：拉起 FOLDER picker 补授权。
+  /** 上级目录没有 URI 授权、openFolder 列不出来时：**绝不弹系统选择目录 dialog**，
+   *  直接在 APP 内左栏显示上层的「档案目录 / 档案清单」（2026-11-11 第四次实机反馈）。
    *
-   *  ⚠️ 关键修正（2026-11-10 第二次）：`defaultFilePathUri` 必须是**已授权且带 scheme** 的 URI。
-   *  旧版把 parents[0] 传进来，而它常是纯文件系统路径 `/storage/.../人像`，或是压根没授权
-   *  的父 URI —— DocumentViewPicker 会直接 reject / 忽略定位，兜底选择器等于没弹，
-   *  用户看到的就是「往上层仍然失败」。
-   *  现在改用**当前目录**的 picker 原始 uri 作起点（一定已授权）：picker 打开就停在当前层，
-   *  用户点一次「上层」进到目标目录再确认，即可拿到授权并真正进入。
-   *  2026-11-10 层级语义补充：target / current 由 upLevelOf() 算出，handle 用
-   *  isUpTargetOf() 校验选中的目录**恰好是那一层父级** —— 用户在选择器里多点几层
-   *  （越级）或原地确认，都不会被接受，从补授权这一环也保证不越级 / 不绕圈。 */
-  private chooseFolderAt(targetName: string, target: string, current: string): void {
-    try {
-      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
-      if (!ctx) {
-        this.status = '无法获取应用上下文';
-        return;
-      }
-      const start: string = pickerStartOf(this.browseDir, this.pickRootUri);
-      const dv = new picker.DocumentViewPicker(ctx);
-      const opt = new picker.DocumentSelectOptions();
-      opt.selectMode = picker.DocumentSelectMode.FOLDER;
-      opt.maxSelectNumber = 1;
-      if (start.length > 0) {
-        opt.defaultFilePathUri = start;  // 已授权，picker 一定能打开并停在当前目录
-      }
-      this.status = '请在选择器里点「上层」进入「' + targetName + '」并确认 · 用于补该目录读取授权';
-      hilog.info(DOMAIN, TAG, 'chooseFolderAt start=%{public}s target=%{public}s', start, targetName);
-      const handle = (uris: Array<string>): void => {
-        if (!uris || uris.length === 0) {
-          this.status = '已取消（仍停在原目录）· 「往上层」需要一次目录授权';
-          return;
-        }
-        // 只接受「当前路径的直接父级」：原地确认（还是当前目录）与多点几层
-        // （祖父 / 旁支）都拒绝，避免补授权把「往上层」变成越级或绕圈。
-        const pickedName: string = baseName(uris[0]);
-        const curName: string = baseName(current.length > 0 ? current : this.browseDir);
-        const stillHere: boolean = pickedName.length > 0 && pickedName === curName;
-        // 判定完全交给纯函数，不再额外按「同名 + 同层级」放宽：
-        // 旧 fallback 会把同名同层的旁支目录也放进来，等于给越级 / 绕圈留了口子。
-        // isUpTargetOf() 在能还原真实路径时要求与 upLevelOf(current) 指向同一目录；
-        // 只有完全还原不出路径的文档 URI 碎片才退回「目录名 + 排除当前目录」比对。
-        const exactLevel: boolean = isUpTargetOf(uris[0], current);
-        if (stillHere || !exactLevel) {
-          this.status = stillHere
-            ? '选中的还是「' + pickedName + '」· 请在选择器里点「上层」进到「' +
-              targetName + '」再确认'
-            : '选中的「' + pickedName + '」不是直接上层「' + targetName +
-              '」· 请只点一次「上层」再确认（不接受越级）';
-          hilog.warn(DOMAIN, TAG, 'chooseFolderAt rejected non-parent pick: %{public}s', uris[0]);
-          return;
-        }
-        // 往上层补授权同样是 picker 返回的原始 URI：之后看的图都在这个父目录下，
-        // 把它设为新的持久授权根，退出后恢复的正是这一层。
-        this.persistFolderUri(uris[0]);
-        this.pickRootUri = uris[0];
-        this.openFolder(uris[0], false, false).then((ok: boolean) => {
-          if (!ok) {
-            this.status = '已选择「' + pickedName + '」但列目录失败 · 可再点「选择文件夹」重试';
-          } else {
-            // openFolder → applyItems 已统一刷新路径 / 目录展示 / 按钮状态
-            this.pickRootUri = '';
-            this.status = '往上层 → ' + baseName(this.browseBase) +
-              '（L' + dirLevelOf(this.browseBase) + '）· ' +
-              (this.canGoUp ? '还能继续往上层' : '已到卷 / 硬盘的逻辑最上层');
-          }
-        });
-      };
-      dv.select(opt)
-        .then((uris: Array<string>) => { handle(uris); })
-        .catch((e: Object) => {
-          hilog.warn(DOMAIN, TAG, 'chooseFolderAt with start rejected: %{public}s', JSON.stringify(e));
-          if (start.length > 0) {
-            // FOLDER 模式下 defaultFilePathUri 未必被接受：去掉起点再试一次，
-            // 至少保证选择器能弹出来，用户手动导航到目标目录即可。
-            const retry = new picker.DocumentSelectOptions();
-            retry.selectMode = picker.DocumentSelectMode.FOLDER;
-            retry.maxSelectNumber = 1;
-            this.status = '起点定位不被支持 · 已重开选择器，请手动进到「' + targetName + '」确认';
-            dv.select(retry)
-              .then((uris: Array<string>) => { handle(uris); })
-              .catch((e2: Object) => {
-                this.status = '往上层授权失败：' + JSON.stringify(e2) + ' · 可点「选择文件夹」手动选上级目录';
-                hilog.error(DOMAIN, TAG, 'chooseFolderAt retry rejected: %{public}s', JSON.stringify(e2));
-              });
-          } else {
-            this.status = '往上层授权失败：' + JSON.stringify(e) + ' · 可点「选择文件夹」手动选上级目录';
-            hilog.error(DOMAIN, TAG, 'chooseFolderAt rejected: %{public}s', JSON.stringify(e));
-          }
-        });
-    } catch (e) {
-      this.status = '往上层授权不可用：' + JSON.stringify(e);
+   *  数据源全是纯字符串，零 IO：
+   *   · pathChainOf(target)：从卷根到目标父级的每一级目录，逐条可点进入；
+   *   · lastUpNames：会话内进入子目录前记下的那一层真实条目名（含档案名），
+   *     命中时列出完整「档案清单」；重启后为空则至少列出当前目录这个已知子目录。
+   *  rows 里的目录行点进去照常走 openFolder（用户主动点击才发生，不是启动期批量 IO）。
+   *  ⚠️ 刻意**不调用 applyItems**：它会 applyPendingRestore 重设恢复模式 / 提示卡，
+   *     还会触发 showPreviewOf / fillSizes / schedulePreload。这里只提交一份纯清单，
+   *     恢复模式、防冻结闸门、只读提示卡一律原样保留。 */
+  private showUpListInApp(target: string, targetName: string, current: string,
+    parents: string[], state: number, level: number): void {
+    const rows: ImageItem[] = [];
+    rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+    // ① 路径层级：卷根 → … → 目标父级，每一级都是可点的目录行。
+    const chain: string[] = pathChainOf(target);
+    for (let i = 0; i < chain.length; i++) {
+      const p: string = chain[i];
+      rows.push({ uri: p, name: baseName(p), size: -1, mtime: 0,
+        kind: ROW_FOLDER, itemIndex: -1 });
     }
+    // ② 会话内缓存命中：把上一层真实的档案清单也列出来（这才是完整清单）。
+    const cached: boolean = this.lastUpNames.length > 0 &&
+      sameDirPath(this.lastUpPath, target);
+    if (cached) {
+      for (let i = 0; i < this.lastUpNames.length; i++) {
+        const nm: string = this.lastUpNames[i];
+        if (nm.length === 0) {
+          continue;
+        }
+        // 档案只列名字、不进翻页序列（授权失效时不解码）；文件夹可点进入。
+        const isFile: boolean = isImageName(nm) || nm.indexOf('.') > 0;
+        rows.push({ uri: stripTrailingSlash(target) + '/' + nm, name: nm,
+          size: -1, mtime: 0, kind: isFile ? ROW_OTHER : ROW_FOLDER, itemIndex: -1 });
+      }
+    } else if (current.length > 0) {
+      // 至少把「当前目录」作为目标父级的已知子目录列出来，点一下就能回去。
+      rows.push({ uri: current, name: baseName(current), size: -1, mtime: 0,
+        kind: ROW_FOLDER, itemIndex: -1 });
+    }
+    // ③ 一行说明：明确告诉用户清单在 APP 内、不会弹系统选择器。
+    rows.push({ uri: '', name: '— 上层清单（APP 内）· 点目录名进入 · ' + UP_LIST_TAG + ' —',
+      size: -1, mtime: 0, kind: ROW_OTHER, itemIndex: -1 });
+    // 提交纯清单态：不动 restoreMode / restoreHintText，不触发任何 uri IO。
+    this.items = [];
+    this.rows = rows;
+    this.source = targetName;
+    this.itemCount = 0;
+    this.rowCount = rows.length;
+    const rowNames: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      rowNames.push(rows[i].name);
+    }
+    this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
+    this.dataSource.reload(this.rows);
+    this.browseBase = target;
+    this.browseDir = parents.length > 0 ? parents[0] : target;
+    this.pickRootUri = '';
+    this.titlePath = target;
+    this.canGoUp = canGoUpFrom(target);
+    this.dirHint = inAppUpListHint(targetName, rows.length - 2, UP_LIST_TAG);
+    this.cur = -1;
+    this.resetView();
+    this.inAppUpList = true;
+    // 旧目录的轮询 / 去抖重扫必须停掉：否则会拿新 browseBase 去 tryMtime，
+    // 触发一次列不出来的 openFolder，把刚显示出来的清单又覆盖掉。
+    if (this.dirPollTimer !== -1) {
+      clearInterval(this.dirPollTimer);
+      this.dirPollTimer = -1;
+    }
+    if (this.rescanTimer !== -1) {
+      clearTimeout(this.rescanTimer);
+      this.rescanTimer = -1;
+    }
+    this.status = inAppUpListHint(targetName, rows.length - 2, UP_LIST_TAG) +
+      (this.restoreMode === RESTORE_READONLY
+        ? ' · 图片授权已失效，点「选择文件夹」重新打开该目录即可看图' : '');
+    this.diagLine = 'up LIST | ' + UP_LIST_TAG + ' | st=' + state +
+      ' | L' + level + '→L' + dirLevelOf(target) +
+      ' | cached=' + (cached ? '1' : '0') + ' | rows=' + rows.length +
+      ' | no-picker | v' + APP_VERSION;
+    hilog.info(DOMAIN, TAG, 'up list in app: %{public}d rows target=%{public}s cached=%{public}s',
+      rows.length, target, cached ? '1' : '0');
   }
 
   /** 切换全屏：只翻状态位，真正的重解码等 onAreaChange 把新画布尺寸报上来再做 */

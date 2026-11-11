@@ -189,3 +189,36 @@ export function readonlyTapHint(name: string): string {
 export function readonlyUpHint(): string {
   return '当前是上次的图片名单，没有目录层级 · 点「选择文件夹」重新进入目录后即可逐级往上层';
 }
+
+// ---------------------------------------------------------------------------
+// 恢复后重建「往上层」的目录层级上下文（2026-11-11 第三次实机反馈）
+// ---------------------------------------------------------------------------
+
+/** 重开恢复后，是否要用「持久授权的 picker 原始目录 URI」重建 browseBase / browseDir。
+ *
+ *  为什么需要单独的开关：`setItems()` 无条件清空目录态（防目录自动重扫把恢复出的
+ *  名单覆盖掉），于是恢复出来是「图片列表态」，browseUp() 拿到空 current 就直接给
+ *  「没有上层目录」返回 —— 用户按了永远上不去。上一轮 p1 把原始目录 URI 存了下来
+ *  并在启动时激活授权，但只拿它去 activatePermission，从没回填给层级真值。
+ *  这就是 2026-11-11「重开直接出图已修好，往上层却还是不能用」的最后一环。
+ *
+ *  · **两种恢复模式都回填**：目录层级是纯字符串信息，与那批图片 uri 的授权是否有效
+ *    无关。只读名单态的 IO 闸门只管「批量预载 / 补体积 / 解码」，不该把用户主动点
+ *    「往上层」也一起锁死 —— 那正是这次反馈的死路。显式列出两种合法 mode，
+ *    脏数据（非法 mode 值）一律不回填。
+ *  · 必须有持久授权目录 URI：升级前保存的老快照没有这个 key，无从还原，维持旧提示。
+ *  · 纯字符串运算：绝不 listFile / statSync / 弹选择器 / 启动目录轮询，
+ *    不新增任何启动关键路径的 IO（历史 appfreeze 底线）。真正列目录只发生在
+ *    用户点击「往上层」之后，且父目录列不出来时只会有几次失败的 listFile，量级极小。
+ *  · 目录 URI 能否解析出层级，由 DirName.upContextBaseOf() 再校验一次。 */
+export function restoreUpEnabled(mode: number, dirUri: string): boolean {
+  if (dirUri.length === 0) {
+    return false;
+  }
+  return mode === RESTORE_FULL || mode === RESTORE_READONLY;
+}
+
+/** 层级重建成功的状态栏提示（简短，状态栏是单行 Ellipsis 会被截尾）。 */
+export function restoreUpHint(dirName: string, tag: string): string {
+  return '已恢复上次目录「' + dirName + '」· 可继续往上层 · ' + tag;
+}

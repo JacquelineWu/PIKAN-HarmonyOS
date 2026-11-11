@@ -444,6 +444,51 @@ export function upParentCandidates(currentPath: string, rawUri: string,
   return out;
 }
 
+// --------------------------------------------------------------------
+// 启动恢复后「往上层」的层级重建（2026-11-11 第三次实机反馈）
+//
+// 恢复链 restoreFromSnapshot / 单张兜底都走 setItems()，它无条件清空
+// browseBase / browseDir → 重开后是「图片列表态」，browseUp() 拿到空 current
+// 直接给「没有上层目录」就返回，用户按了永远上不去。
+//
+// 但上一轮 p1 已把「picker 返回的**原始目录 URI**」存进 preferences 并在启动时
+// 激活了持久授权。它是纯字符串，完全可以还原出目录层级，零 IO、零重扫、零选择器。
+// 关键约束：绝不能拿快照里的**子文件 uri** 去推当前目录（那些是拼出来的路径，
+// 重启后授权已失效，且层级可能与用户实际所处层不一致）；只认 picker 原始目录 URI。
+// --------------------------------------------------------------------
+
+/** 从持久授权的原始目录 URI 还原「当前目录的真实路径」，供 browseBase 使用。
+ *
+ *  · 用 hierPathOf 归一化：去 ? 参数 / 尾斜杠、还原 file://docs、百分号解码、统一分隔符；
+ *  · 必须是能定出层级的路径（volumeRootOf 非空 / 至少能剥一层），
+ *    否则返回 '' —— 解析不出的文档 URI 碎片不许冒充当前目录，避免越级；
+ *  · 纯字符串运算：绝不 listFile / statSync / 弹选择器（启动防冻结底线）。 */
+export function upContextBaseOf(dirUri: string): string {
+  const s: string = hierPathOf(dirUri);
+  if (s.length === 0) {
+    return '';
+  }
+  // UP_NAV_NONE = 解析不出层级；UNKNOWN 态虽定不出卷根但 upLooseParentOf 仍可上移，
+  // 与 browseUp() 的判定保持完全一致，绝不在这里另立一套标准。
+  if (upNavStateOf(s) === UP_NAV_NONE) {
+    return '';
+  }
+  return s;
+}
+
+/** 从持久授权的原始目录 URI 还原「当前目录的 picker 原始写法」，供 browseDir / pickRootUri。
+ *
+ *  · 带 scheme 的原始 URI 是 picker 逐 URI 授权唯一认得的形态：
+ *    upParentCandidates 靠它生成父层候选，pickerStartOf 靠它定位已授权起点；
+ *  · 只去 ? 参数与尾斜杠，不解码、不还原成纯路径（那会丢掉授权信息）。 */
+export function upContextRawOf(dirUri: string): string {
+  const s: string = stripTrailingSlash(dirUri);
+  if (s.indexOf('://') < 0) {
+    return '';
+  }
+  return s;
+}
+
 /** 目录条目名集合是否一致（顺序无关）。
  *  自动重扫时用它判断 mtime 抖动是否只是「hover 解码读文件 / 网盘写缓存」造成的假变化：
  *  没变就别重建列表，否则 applyItems 会把用户视图拉回上次位置。 */
@@ -457,4 +502,54 @@ export function sameEntryNames(want: string[], current: string[]): boolean {
     }
   }
   return true;
+}
+
+// --------------------------------------------------------------------
+// 「往上层」在 APP 内自建清单（2026-11-11 第四次实机反馈）
+//
+// 用户明确：按「回上层」弹出系统选择目录 dialog 不是原意，原意是**在 APP 内**
+// 显示上层的档案目录或档案清单。上级目录的逐 URI 授权失效时列不出真实内容，
+// 但不能因此把界面交给系统选择器 —— 至少要把已知的目录层级 / 条目名画在左栏里。
+// 下面两个函数全是纯字符串运算，绝不 listFile / statSync / 弹选择器。
+// --------------------------------------------------------------------
+
+/** 从卷根到 path 的**每一级**完整路径（含 path 自身），供左栏生成可点的目录清单行。
+ *
+ *  · 用 hierPathOf 归一化后按 volumeRootOf 定卷根，再逐段累加 —— 与 upLevelOf
+ *    严格同一口径，保证清单层级与「往上层」的逐级上移判定一致，不会越级；
+ *  · 返回的每一项都是可直接交给 openFolder 的真实路径；
+ *  · 解析不出层级（文档 URI 碎片）时返回 []，调用方退化为「只列已知子目录」。
+ *  · 纯字符串，零 IO：这是启动恢复后也能安全调用的关键（历史 appfreeze 底线）。 */
+export function pathChainOf(path: string): string[] {
+  const out: string[] = [];
+  const s: string = hierPathOf(path);
+  if (s.length === 0) {
+    return out;
+  }
+  const root: string = volumeRootOf(s);
+  if (root.length === 0) {
+    return out;
+  }
+  out.push(root);
+  if (s === root || s === '/') {
+    return out;
+  }
+  let cur: string = root === '/' ? '' : root;
+  const rest: string = s.substring(root.length);
+  const parts: string[] = rest.split('/');
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].length === 0) {
+      continue;
+    }
+    cur = cur + '/' + parts[i];
+    out.push(cur);
+  }
+  return out;
+}
+
+/** APP 内上层清单的提示文案。**明确写「不会弹出系统选择器」**，
+ *  避免用户以为按钮又没反应（按钮与列表恒可点，点了必须有可见反馈）。 */
+export function inAppUpListHint(dirName: string, count: number, tag: string): string {
+  return 'APP 内上层「' + dirName + '」清单（' + count +
+    ' 项）· 点目录名进入 · 不弹系统选择器 · ' + tag;
 }

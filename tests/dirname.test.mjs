@@ -13,13 +13,14 @@
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf, upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../entry/src/main/ets/common/PreloadBudget.ts';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, FLUSH_SYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   upButtonEnabled, RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed,
-  restoreProbeUris, readonlyHint, readonlyTapHint, readonlyUpHint } from '../entry/src/main/ets/common/ResumePlan.ts';
+  restoreProbeUris, readonlyHint, readonlyTapHint, readonlyUpHint,
+  restoreUpEnabled, restoreUpHint } from '../entry/src/main/ets/common/ResumePlan.ts';
 import { PERSIST_SKIP, PERSIST_ACTIVATE, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../entry/src/main/ets/common/PersistPlan.ts';
 
@@ -398,7 +399,7 @@ check('openFolder 参数改名 resetView（无压栈语义）', /resetView: bool
 check('applyItems 同源刷新 canGoUp（纯信息状态，不驱动按钮）',
   /this\.canGoUp = canGoUpFrom\(this\.browseBase\);/.test(INDEX) &&
   /upEnabledAfterResume/.test(INDEX) === false, true);
-const UP_FN = INDEX.slice(INDEX.indexOf('private async browseUp('), INDEX.indexOf('private chooseFolderAt('));
+const UP_FN = INDEX.slice(INDEX.indexOf('private async browseUp('), INDEX.indexOf('private showUpListInApp('));
 check('browseUp 用 upLevelOf 求直接父级', /let target: string = upLevelOf\(current\)/.test(UP_FN), true);
 check('browseUp 用 upNavStateOf 区分到顶 / 层级判不出',
   /const state: number = upNavStateOf\(current\)/.test(UP_FN), true);
@@ -409,18 +410,22 @@ check('browseUp 三种不动分开提示',
   /state === UP_NAV_TOP/.test(UP_FN), true);
 const LOOSE_FAIL = UP_FN.slice(
   UP_FN.indexOf('if (loose) {', UP_FN.indexOf('hilog.warn')),
-  UP_FN.indexOf("this.status = '往上层失败："));
-check('browseUp UNKNOWN 失败不进 chooseFolderAt 死锁',
-  /if \(loose\) \{/.test(LOOSE_FAIL) && /return;/.test(LOOSE_FAIL) &&
-  /chooseFolderAt/.test(LOOSE_FAIL) === false, true);
+  UP_FN.indexOf('this.showUpListInApp('));
+check('browseUp UNKNOWN 失败不弹系统选择器、改 APP 内清单',
+  /if \(loose\) \{/.test(LOOSE_FAIL) &&
+  /DocumentViewPicker|dv\.select|chooseFolderAt|isUpTargetOf/.test(LOOSE_FAIL) === false &&
+  /this\.showUpListInApp\(/.test(UP_FN), true);
 check('browseUp 不再 pop 浏览历史', /\.pop\(/.test(UP_FN), false);
 check('browseUp 候选只用同层 upParentCandidates', /upParentCandidates\(current,/.test(UP_FN), true);
 check('成功后清掉 pickRootUri 旧锚点', /this\.pickRootUri = '';/.test(UP_FN), true);
 check('目录浏览态恒列 .. 行（不因路径判定消失）',
   /rows\.push\(\{ uri: '', name: '\.\.', size: -1, mtime: 0, kind: ROW_UP/.test(INDEX) &&
   /if \(canGoUpFrom\(base\)\) \{/.test(INDEX) === false, true);
-check('补授权只认 isUpTargetOf', /const exactLevel: boolean = isUpTargetOf\(uris\[0\], current\);/.test(INDEX), true);
-check('补授权不再按「同名 + 层级」放宽', /pickedName === targetName && dirLevelOf/.test(INDEX), false);
+check('往上层彻底不再补授权（Index 不再引用 pickerStartOf / isUpTargetOf）',
+  /pickerStartOf\(/.test(INDEX) === false && /isUpTargetOf\(/.test(INDEX) === false, true);
+check('往上层不再有「越级放宽」分支，且不再持久化 picker 选中 URI',
+  /pickedName === targetName && dirLevelOf/.test(INDEX) === false &&
+  /persistFolderUri\(uris\[0\]\)/.test(UP_FN) === false, true);
 check('按钮 / 退格 / .. 行三条入口都收口 browseUp',
   (INDEX.match(/this\.browseUp\(\)/g) || []).length >= 3, true);
 check('诊断串标记 up4（辨认新包，不升版本号）', /const UP_NAV_TAG: string = 'up4'/.test(INDEX), true);
@@ -726,8 +731,8 @@ for (const [label, fn] of [
 }
 check('select / go 在只读态仍更新位置与高亮，并给可见反馈',
   (INDEX.match(/readonlyTapHint\(this\.items\[/g) || []).length, 2);
-check('browseUp 在只读态给明确指引且按钮不禁用',
-  /if \(this\.restoreMode === RESTORE_READONLY\) \{\s*\n\s*this\.status = readonlyUpHint\(\);/.test(INDEX) &&
+check('browseUp 在只读态且无层级时给明确指引且按钮不禁用',
+  /if \(this\.restoreMode === RESTORE_READONLY && this\.browseBase\.length === 0\) \{\s*\n\s*this\.status = readonlyUpHint\(\);/.test(INDEX) &&
   /\.enabled\(/.test(CODE_LINES) === false, true);
 check('只读态提示卡落在预览区，带「选择文件夹」可点按钮',
   /if \(this\.restoreHintText\.length > 0\) \{/.test(INDEX) &&
@@ -822,8 +827,8 @@ check('一次只带 1 个 policy、超时 1500ms 且不超过 3000ms 硬上限',
   /const PERSIST_ACTIVATE_MS: number = 1500;/.test(INDEX) &&
   /const PERSIST_TIMEOUT_MAX_MS: number = 3000;/.test(INDEX) &&
   persistTimeoutSafe(1500, 3000), true);
-check('选目录与往上层补授权都持久化 picker 原始 URI',
-  (INDEX.match(/this\.persistFolderUri\(uris\[0\]\);/g) || []).length, 2);
+check('只有「选择文件夹」持久化 picker 原始 URI（往上层不再弹选择器）',
+  (INDEX.match(/this\.persistFolderUri\(uris\[0\]\);/g) || []).length, 1);
 check('persistPermission / activatePermission 各一次，且只用 READ_MODE',
   (INDEX.match(/fileShare\.persistPermission\(policies\)/g) || []).length === 1 &&
   (INDEX.match(/fileShare\.activatePermission\(policies\)/g) || []).length === 1 &&
@@ -877,6 +882,222 @@ check('showLastOnStart 仍不含选择器 / 权限 / 全量重扫',
     .test(RESUME_FN), false);
 check('启动关键路径仍无 new Promise / Promise.race（不引入同步等待）',
   /new Promise|Promise\.race/.test(INDEX), false);
+check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+// ===========================================================================
+// 恢复后重建「往上层」目录层级（2026-11-11 第三次实机反馈：重开能出图了，
+// 但「往上层」还是按不动 —— setItems 清空 browseBase，层级上下文整个丢了）
+// ===========================================================================
+const DEEP_DIR = ROOT + '/人像/编号202601 模特 猫';
+const RAW_DEEP = `file://docs${DEEP_DIR}/`;
+const DIRNAME_SRC = readFileSync(new URL('../entry/src/main/ets/common/DirName.ts', import.meta.url), 'utf8');
+
+console.log('--- upContextBaseOf(): 从 picker 原始目录 URI 还原层级真值 ---');
+check('file://docs 文档 URI 还原成真实路径（去尾斜杠）',
+  upContextBaseOf(RAW_DEEP), DEEP_DIR);
+check('纯真实路径原样保留', upContextBaseOf(DEEP_DIR), DEEP_DIR);
+check('带 ? 参数与尾斜杠一并去掉',
+  upContextBaseOf(`file://docs${DEEP_DIR}/?mode=r`), DEEP_DIR);
+check('%XX 编码的中文目录名被安全解码',
+  upContextBaseOf('file://docs' + ROOT + '/%E4%BA%BA%E5%83%8F/'),
+  ROOT + '/人像');
+check('file://docs 碎片不冒充目录（判不出层级）', upContextBaseOf('file://docs'), '');
+check('空串 → 空串', upContextBaseOf(''), '');
+check('卷根仍是有效层级（TOP 由 browseUp 提示「已到最上层」）',
+  upContextBaseOf('/storage/Users/currentUser'), '/storage/Users/currentUser');
+check('还原出的路径能被 upLevelOf 求出直接父级',
+  upLevelOf(upContextBaseOf(RAW_DEEP)), ROOT + '/人像');
+check('还原出的路径 upNavStateOf 为 GO（不再是 NONE 死路）',
+  upNavStateOf(upContextBaseOf(RAW_DEEP)), UP_NAV_GO);
+check('层级真值与 browseUp 判定同源（canGoUpFrom 为真）',
+  canGoUpFrom(upContextBaseOf(RAW_DEEP)), true);
+
+console.log('--- upContextRawOf(): 原始 picker URI 供逐 URI 授权 / 候选生成 ---');
+check('带 scheme 的原始 URI 保留（只去 ? 与尾斜杠）',
+  upContextRawOf(`file://docs${DEEP_DIR}/?mode=r`), `file://docs${DEEP_DIR}`);
+check('纯文件系统路径不给 picker（返回空串）', upContextRawOf(DEEP_DIR), '');
+check('空串 → 空串', upContextRawOf(''), '');
+check('base 与 raw 指向同一目录（sameDirPath 校验）',
+  sameDirPath(upContextBaseOf(RAW_DEEP), upContextRawOf(RAW_DEEP)), true);
+check('raw 能作为已授权的 picker 起点',
+  pickerStartOf(upContextRawOf(RAW_DEEP), ''), `file://docs${DEEP_DIR}`);
+check('raw 参与生成的父候选落在同一父层',
+  upParentCandidates(upContextBaseOf(RAW_DEEP), upContextRawOf(RAW_DEEP)).length > 0 &&
+  upParentCandidates(upContextBaseOf(RAW_DEEP), upContextRawOf(RAW_DEEP))
+    .every(x => sameDirPath(x, ROOT + '/人像')), true);
+
+console.log('--- restoreUpEnabled(): 两种恢复模式都回填，老数据不回填 ---');
+check('完整恢复 + 有目录 URI → 回填',
+  restoreUpEnabled(RESTORE_FULL, RAW_DEEP), true);
+check('只读名单态 + 有目录 URI → 也回填（层级与授权无关）',
+  restoreUpEnabled(RESTORE_READONLY, RAW_DEEP), true);
+check('没有目录 URI（升级前老快照）→ 不回填，维持旧提示',
+  restoreUpEnabled(RESTORE_FULL, ''), false);
+check('只读名单态且没有目录 URI → 不回填',
+  restoreUpEnabled(RESTORE_READONLY, ''), false);
+check('非法 mode（脏数据）→ 不回填', restoreUpEnabled(99, RAW_DEEP), false);
+check('回填提示带目录名 / 往上层 / uc1',
+  restoreUpHint('人像', 'uc1').includes('人像') &&
+  restoreUpHint('人像', 'uc1').includes('往上层') &&
+  restoreUpHint('人像', 'uc1').includes('uc1'), true);
+
+const UPC_FN = INDEX.slice(INDEX.indexOf('private restoreBrowseContext('),
+  INDEX.indexOf('目录 URI 持久授权（2026-11-11）'));
+// 去掉注释行再查 IO：方法体注释里为了说明「禁止」而提到了这些名字
+const UPC_CODE = UPC_FN.split('\n').filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
+console.log('--- 源码静态契约：层级重建纯字符串、零 IO、两条恢复路径都接上 ---');
+check('UP_CTX_TAG=uc1 是诊断标记、不是版本号',
+  /const UP_CTX_TAG: string = 'uc1';/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+check('Index 引入 upContextBaseOf / upContextRawOf / restoreUpEnabled / restoreUpHint',
+  /upContextBaseOf, upContextRawOf,/.test(INDEX) &&
+  /restoreUpEnabled, restoreUpHint/.test(INDEX), true);
+check('restoreBrowseContext 由 restoreUpEnabled 决策',
+  /if \(!restoreUpEnabled\(this\.restoreMode, this\.savedDirUri\)\)/.test(UPC_CODE), true);
+check('三个层级锚点 + titlePath + canGoUp 全部回填',
+  /this\.browseBase = base;/.test(UPC_CODE) &&
+  /this\.browseDir = raw\.length > 0 \? raw : base;/.test(UPC_CODE) &&
+  /this\.pickRootUri = this\.browseDir;/.test(UPC_CODE) &&
+  /this\.titlePath = base;/.test(UPC_CODE) &&
+  /this\.canGoUp = canGoUpFrom\(base\);/.test(UPC_CODE), true);
+check('层级真值与原始 URI 分别由两个纯函数还原',
+  /upContextBaseOf\(this\.savedDirUri\)/.test(UPC_CODE) &&
+  /upContextRawOf\(this\.savedDirUri\)/.test(UPC_CODE), true);
+check('解析不出层级时直接放弃回填',
+  /if \(base\.length === 0\) \{\s*\n\s*return;/.test(UPC_CODE), true);
+check('恢复期零 IO：方法体无 listFile / statSync / openFolder / startDirPoll / 选择器 / 权限',
+  /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|startDirPoll|DocumentViewPicker|PhotoViewPicker|ensureGalleryPermission|loadAllGallery|queryAllPhotos/.test(UPC_CODE), false);
+check('两条恢复路径（快照 / 单张兜底）都在 setItems 之后调用',
+  (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 2 &&
+  /this\.setItems\(uris, src\);[\s\S]{0,320}this\.restoreBrowseContext\(\);/.test(INDEX) &&
+  /this\.setItems\(\[single\], src\);[\s\S]{0,240}this\.restoreBrowseContext\(\);/.test(INDEX), true);
+check('状态栏两处都追加「可继续往上层」提示',
+  (INDEX.match(/restoreUpHint\(baseName\(this\.browseBase\), UP_CTX_TAG\)/g) || []).length, 2);
+check('READONLY 早退只在「没有目录层级」时生效（层级已重建则继续上移）',
+  /if \(this\.restoreMode === RESTORE_READONLY && this\.browseBase\.length === 0\)/.test(INDEX), true);
+check('upContextBaseOf 的层级判定与 browseUp 同源（都用 upNavStateOf）',
+  /upNavStateOf\(s\) === UP_NAV_NONE/.test(DIRNAME_SRC) &&
+  /const state: number = upNavStateOf\(current\)/.test(INDEX), true);
+
+console.log('--- 回归契约：层级重建不能拆掉防冻结 / 按钮 / 版本护栏 ---');
+check('bulkIoAllowed 闸门数量不减（≥8 个 IO 入口）',
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8, true);
+check('探测上限 3 / ro1 标记仍在',
+  /const RESTORE_PROBE_LIMIT: number = 3;/.test(INDEX) &&
+  /const RESTORE_TAG: string = 'ro1';/.test(INDEX), true);
+check('AUTO_RESUME_ON_START 护栏仍 false（启动绝不重扫 / 弹权限框）',
+  /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX), true);
+check('按钮永不禁用（非注释行无 .enabled）', /\.enabled\(/.test(CODE_LINES) === false, true);
+check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+// ===========================================================================
+// 「往上层」改为 APP 内清单（2026-11-11 第四次实机反馈）
+//
+// 用户原话：「现在按回上层回弹出选择目录 dialog，不是我原意，原意是在 app 内
+// 可以显示上层档案目录或档案清单」。上级目录逐 URI 授权失效时列不出真实内容，
+// 也不能把界面交给系统选择器 —— 至少要把已知层级 / 条目名画在 APP 内左栏。
+// ===========================================================================
+const CHAIN_ROOT = '/storage/Users/currentUser';
+const CHAIN_DEEP = ROOT + '/人像';
+
+console.log('--- pathChainOf(): 从卷根到目标父级的每一级目录 ---');
+check('深层目录生成逐级链（含自身）',
+  JSON.stringify(pathChainOf(CHAIN_DEEP)) ===
+  JSON.stringify([CHAIN_ROOT, CHAIN_ROOT + '/Download', ROOT, CHAIN_DEEP]), true);
+check('链首恒为卷根', pathChainOf(DEEP_DIR)[0], CHAIN_ROOT);
+check('链尾恒为目标目录自身', pathChainOf(CHAIN_DEEP).slice(-1)[0], CHAIN_DEEP);
+check('每一级都能由 upLevelOf 严格剥回上一级',
+  (() => {
+    const c = pathChainOf(DEEP_DIR);
+    let ok = c.length > 1;
+    for (let i = 1; i < c.length; i++) {
+      if (upLevelOf(c[i]) !== c[i - 1]) { ok = false; }
+    }
+    return ok;
+  })(), true);
+check('卷根自身只有一项',
+  JSON.stringify(pathChainOf(CHAIN_ROOT)) === JSON.stringify([CHAIN_ROOT]), true);
+check('文件系统根只有一项',
+  JSON.stringify(pathChainOf('/')) === JSON.stringify(['/']), true);
+check('Windows 盘符路径同样逐级',
+  JSON.stringify(pathChainOf('C:/Users/x/人像')) ===
+  JSON.stringify(['C:', 'C:/Users', 'C:/Users/x', 'C:/Users/x/人像']), true);
+check('file://docs 文档 URI 归一后同样逐级（不含 scheme）',
+  JSON.stringify(pathChainOf(`file://docs${CHAIN_DEEP}/`)) ===
+  JSON.stringify([CHAIN_ROOT, CHAIN_ROOT + '/Download', ROOT, CHAIN_DEEP]), true);
+check('带 ? 参数与 %XX 编码一并归一',
+  JSON.stringify(pathChainOf('file://docs' + ROOT + '/%E4%BA%BA%E5%83%8F/?mode=r')) ===
+  JSON.stringify([CHAIN_ROOT, CHAIN_ROOT + '/Download', ROOT, ROOT + '/人像']), true);
+check('判不出层级的 URI 碎片 → 空链（调用方退化为已知子目录）',
+  pathChainOf('file://docs').length, 0);
+check('空串 → 空链', pathChainOf('').length, 0);
+
+console.log('--- inAppUpListHint(): APP 内清单提示 ---');
+const UL_HINT = inAppUpListHint('人像', 3, 'ul1');
+check('带目录名 / 项数 / 诊断标记',
+  UL_HINT.includes('人像') && UL_HINT.includes('3') && UL_HINT.includes('ul1'), true);
+check('明确写了「不弹系统选择器」', UL_HINT.includes('不弹系统选择器'), true);
+check('提示可点进入（不是死提示）', UL_HINT.includes('点目录名进入'), true);
+check('提示不留在 APP 外（含「APP 内」）', UL_HINT.includes('APP 内'), true);
+
+const UPLIST_FN = INDEX.slice(INDEX.indexOf('private showUpListInApp('),
+  INDEX.indexOf('private toggleFull('));
+// 去掉注释行再查 IO：方法体注释里为了说明「禁止」而提到了这些名字
+const UPLIST_CODE = UPLIST_FN.split('\n').filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
+console.log('--- 源码静态契约：往上层不弹系统选择器、改 APP 内清单 ---');
+check('UP_LIST_TAG=ul1 是诊断标记、不是版本号',
+  /const UP_LIST_TAG: string = 'ul1';/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+check('Index 引入 pathChainOf / inAppUpListHint / sameDirPath',
+  /pathChainOf, inAppUpListHint,/.test(INDEX) && /sameDirPath,/.test(INDEX), true);
+check('chooseFolderAt 整个方法已删除（往上层不再弹 FOLDER picker）',
+  /chooseFolderAt/.test(INDEX) === false, true);
+check('browseUp 函数体内没有 DocumentViewPicker / .select / pickerStartOf / isUpTargetOf',
+  /DocumentViewPicker|dv\.select|pickerStartOf\(|isUpTargetOf\(/.test(UP_FN) === false, true);
+check('browseUp 两个失败分支都收口 showUpListInApp（loose + 正常层级）',
+  (UP_FN.match(/this\.showUpListInApp\(/g) || []).length, 2);
+check('showUpListInApp 存在且用 pathChainOf 生成可点层级行',
+  UPLIST_CODE.length > 0 && /pathChainOf\(target\)/.test(UPLIST_CODE) &&
+  /kind: ROW_FOLDER/.test(UPLIST_CODE), true);
+check('showUpListInApp 用 sameDirPath 命中会话缓存、列真实档案清单',
+  /sameDirPath\(this\.lastUpPath, target\)/.test(UPLIST_CODE) &&
+  /this\.lastUpNames/.test(UPLIST_CODE), true);
+check('showUpListInApp 恒列 .. 行与「APP 内」说明行',
+  /name: '\.\.'/.test(UPLIST_CODE) && /上层清单（APP 内）/.test(UPLIST_CODE), true);
+check('showUpListInApp 零 IO：无 listFile / statSync / openFolder / applyItems / 选择器',
+  /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|this\.applyItems|DocumentViewPicker|\.select\(|PhotoViewPicker/.test(UPLIST_CODE) === false, true);
+check('showUpListInApp 不动恢复模式（保留防冻结闸门与只读提示卡）',
+  /this\.restoreMode\s*=\s*RESTORE_/.test(UPLIST_CODE) === false &&
+  /this\.restoreHintText\s*=/.test(UPLIST_CODE) === false &&
+  /this\.applyPendingRestore\(/.test(UPLIST_CODE) === false, true);
+check('showUpListInApp 回填 browseBase / titlePath / canGoUp 并停掉目录轮询',
+  /this\.browseBase = target;/.test(UPLIST_CODE) &&
+  /this\.titlePath = target;/.test(UPLIST_CODE) &&
+  /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE) &&
+  /clearInterval\(this\.dirPollTimer\)/.test(UPLIST_CODE), true);
+check('清单态标记 inAppUpList 只在三处维护',
+  (INDEX.match(/this\.inAppUpList =/g) || []).length, 3);
+check('清单行点击禁掉「目录内多选」兜底选择器',
+  /this\.openFolder\(r\.uri, true, !this\.inAppUpList\);/.test(INDEX), true);
+check('openFolder 进入新目录前缓存上一层条目名（纯字符串）',
+  /this\.lastUpNames = cacheNames;/.test(INDEX) &&
+  /this\.lastUpPath = stripTrailingSlash\(this\.browseBase\);/.test(INDEX), true);
+check('诊断串明确 no-picker，便于实机辨认新包',
+  /no-picker/.test(UPLIST_CODE), true);
+
+console.log('--- 回归契约：APP 内清单不能拆掉防冻结 / 按钮 / 版本护栏 ---');
+check('bulkIoAllowed 闸门数量不减（≥8 个 IO 入口）',
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8, true);
+check('探测上限 3 / ro1 / p1 / uc1 标记仍在',
+  /const RESTORE_PROBE_LIMIT: number = 3;/.test(INDEX) &&
+  /const RESTORE_TAG: string = 'ro1';/.test(INDEX) &&
+  /const PERSIST_TAG: string = 'p1';/.test(INDEX) &&
+  /const UP_CTX_TAG: string = 'uc1';/.test(INDEX), true);
+check('AUTO_RESUME_ON_START 护栏仍 false（启动绝不重扫 / 弹权限框）',
+  /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX), true);
+check('按钮 / 退格 / .. 行三条入口仍全部收口 browseUp',
+  (INDEX.match(/this\.browseUp\(\)/g) || []).length >= 3, true);
+check('按钮永不禁用（非注释行无 .enabled）', /\.enabled\(/.test(CODE_LINES) === false, true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
