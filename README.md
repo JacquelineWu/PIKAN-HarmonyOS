@@ -26,7 +26,7 @@
 | 格式 | HEIC / HEIF / JPG / JPEG / PNG / WEBP / BMP / GIF，走鸿蒙系统解码器 |
 | 挑图入口 | 仅 `选择文件夹`（`DocumentSelectMode.FOLDER`）；**`打开图库`（v1.0.6）、`选择图片` 与 `回到上次`（11-10）三个按钮均已取消**，界面上不再出现（见「按钮区精简」章节） |
 | 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `往上层` / `退格` 按**目录层级**进入直接父目录（**不按浏览历史回退**，连续点击逐级到卷 / 硬盘逻辑最上层后停止）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
-| 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` 在无父级时**真正 grey out 禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
+| 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` **恒亮恒可点，永不 grey out / 永不禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
 | 鼠标键 | 预览区 **左键放大 ×1.5**（以光标为锚点）、**右键还原**（回适应窗口并归位）、**双击切换全屏**（撤销第一下单击的放大）；双击档案名同样切换全屏 |
@@ -589,12 +589,73 @@ HiLog 里看到它就说明设备内存已尽用，角标是真实值。
 实机请在 DevEco Studio 编译后看右下角角标：`缓存 N / 216 张 · xx MB / 1.00 GB`，
 N 即设备实际能驻留的张数；HiLog 的 `preload: budget reached` 是预算用尽的正常收工。
 
-## 退出记住位置 / 重开自动显示上次相片，往上层真正 grey out（2026-11-11）
+## 往上层按钮永不 grey out（2026-11-11 澄清修正）
+
+用户澄清：
+
+> 1）「回上层」真正 grey out 的意思是不要grey out，不能禁用。
+> 之前就是不知道为什么grey out了，我请你修正
+
+**理解反了，已撤销**。上一版把「grey out」读成「要真正禁用」，给按钮加了
+`.enabled(false)` + 条件明暗色 / `.opacity(0.45)`，还在 `upEnabledAfterResume()`
+里把恢复出来的图片列表态强制判成无父级 —— 于是**重开 APP 一上来按钮就灰着点不动**，
+正是用户说的「不知道为什么 grey out」。
+
+### 根因：两个独立原因叠加
+
+| # | 原因 | 后果 |
+|---|---|---|
+| ① | `upEnabledAfterResume()` 在 `browseBase=''`（启动恢复出的图片列表态）强制 `canGoUp=false`，`toolBtn` 再 `.enabled(false)` | 重开 APP 按钮直接灰掉、完全不可交互 |
+| ② | `canGoUpFrom()` / `upLevelOf()` 遇到还原不出绝对路径的 URI（`content://...`、文档碎片）返回 `false` | 明明在深层目录，按钮也被判成「到顶」而灰掉 / 点了没反应；`..` 行也一起消失 |
+
+### 修正
+
+| 位置 | 改动 |
+|---|---|
+| `toolBtn` | 回到三参签名 `(label, act, flex)`；删 `.enabled()`、条件 `fontColor` / `backgroundColor`、条件 `.opacity`；三个按钮无条件同色同亮度 |
+| `ResumePlan.ts` | 删 `upEnabledAfterResume()`，换成恒返回 `true` 的 `upButtonEnabled()`，让「按钮永不禁用」成为可回归的显式契约 |
+| `applyItems()` | `canGoUp = canGoUpFrom(browseBase)` 降级为**纯信息状态**（状态栏文案 / 诊断串 / 行为判据），绝不参与按钮外观或可交互性 |
+| `openFolder()` | 目录浏览态**恒列 `..` 行**，不再由 `canGoUpFrom(base)` 决定；界面元素不因内部路径判定而消失 |
+| `DirName.ts` | 新增 `upNavStateOf()` 四态分派、`upLooseParentOf()` 严格剥一层兜底、`upParentCandidates()` 支持显式父级 |
+| `browseUp()` | 按钮 / 退格 / `..` 行三条入口仍全部收口；按四态分派，UNKNOWN 不再误报「已到最上层」 |
+
+### 四态分派（新增纯函数）
+
+| 状态 | 判定 | 点击行为 |
+|---|---|---|
+| `UP_NAV_NONE` | `browseBase=''`（图片列表态） | 「用「选择文件夹」进入目录浏览」 |
+| `UP_NAV_TOP` | 能定出卷根且剥不动（真到顶） | 「已到卷 / 硬盘的逻辑最上层 · 没有父级了」，不移动、不弹选择器 |
+| `UP_NAV_GO` | `upLevelOf()` 非空 | 按严格层级链逐级上移，`dirLevelOf` 每步 −1 |
+| `UP_NAV_UNKNOWN` | 路径非空但卷根判不出（文档 / `content` URI） | 用 `upLooseParentOf()` 严格剥一层生成候选再试；**绝不假装到顶**。全失败给「请用「选择文件夹」重新进入」的明确指引，且不进补授权选择器（`isUpTargetOf` 此时恒 false，会死锁） |
+
+`upLooseParentOf()` 对**能定出卷根**的路径一律返回 `''` —— 严格链说了算，
+防止宽松父级越过 `/storage/Users/<id>` 跑到系统目录（越级）。
+
+### 与 11-10 层级语义的关系
+
+「逐级上移 / 不越级 / 不循环 / 到卷根停止」**全部保留**，改的只是「到顶时怎么表现」：
+从「按钮被灰掉」改成「按钮照样可点、点了给一句准确提示」。诊断串新增 `st=` 状态字段
+（`up START | up4 | st=2 | L4→L3 ...`），便于实机截图确认新包。
+
+### 验证
+
+`node --experimental-strip-types tests/dirname.test.mjs` **293 → 316/316 通过**：
+新增四态分派、宽松父级防越级、UNKNOWN 显式父级候选、`upButtonEnabled()` 恒 true，
+以及「源码非注释行无 `.enabled(` / 无条件置灰色」「按钮不传 `canGoUp`」「目录态恒列 `..`」
+「UNKNOWN 失败不进补授权死锁」等静态契约。
+按 11-10 约定：**未编译 HAP、未放桌面、未升版本（仍 1.0.7）、未 push**。
+实机请在 DevEco Studio 编译后重开 APP：按钮应始终亮着可点，状态栏带 `rs1`；
+进目录后逐级上移、到卷根给「没有父级了」提示而按钮不变灰。
+
+## 退出记住位置 / 重开自动显示上次相片（2026-11-11）
 
 用户两条需求：
 
 > 1）退出 APP 会记下上次的位置、相片，再次打开 APP 会显示之前的图片
 > 2）回上层 grey out
+
+> ⚠️ 需求 2 当时被理解反了：用户是**抱怨按钮被灰掉、要求修正**，不是要禁用。
+> 当天晚些时候已撤销禁用，见前文「往上层按钮永不 grey out」章节。需求 1 的实现不受影响。
 
 ### 根因：保存一直是好的，断的是「启动恢复」和「退出落盘」
 
@@ -602,7 +663,7 @@ N 即设备实际能驻留的张数；HiLog 的 `preload: budget reached` 是预
 |---|---|---|
 | 记住位置 | `markPos → scheduleFlush(500ms) → flushPos` 写 6 个小 key + 分块快照 | 逻辑完整，但 `flushPos()` 是 **async**；`aboutToDisappear` 里只是「尽力而为」，切后台 / 进程被杀时 Promise 常常没跑完 → **位置丢失** |
 | 启动恢复 | `AUTO_RESUME_ON_START = false`，`readLastPos()` 读完只设一句 `resumeHint` 提示文字 + `warmLast()` 后台预热 1 张 | **根本不显示图片**。历史上因为「启动读 3000 条大快照 + 全量重扫图库」触发 `PreferencesGetValue` 卡死 8 秒，就把整个恢复动作关掉了（见 appfreeze 章节） |
-| 「往上层」置灰 | 明暗色 + `.opacity(0.45)`，但 `onClick` 仍在 | 灰着还能点、点了还弹提示 —— **不是 grey out** |
+| 「往上层」按钮 | 明暗色 + `.opacity(0.45)` 的视觉变暗，`onClick` 仍在 | 当时误以为用户要「真正禁用」，这条理解是错的（见前文澄清修正章节） |
 
 ### 需求 1：安全的启动恢复（绝不重蹈 appfreeze）
 
@@ -615,7 +676,7 @@ N 即设备实际能驻留的张数；HiLog 的 `preload: budget reached` 是预
 | `resumeDelaySafe()` | 恢复延迟必须**严格大于**预热延迟 `WARM_DELAY_MS=300` 且 `>= RESUME_MIN_SAFE_MS=600`；配错就拒绝调度 |
 | `exitFlushAction()` | 退出时 `SKIP`（无位置）/ `ASYNC`（prefs 没建好）/ `SYNC`（同步落盘） |
 | `resumeSnapCap()` | 恢复端再夹一道 `SNAP_MAX=600`，防旧残留的 3000 条被拉进启动路径 |
-| `upEnabledAfterResume()` | 恢复出来的是**图片列表态**（`browseBase=''`）→ 强制 `canGoUp=false`，把需求 2 绑进来 |
+| `upButtonEnabled()` | 「按钮永不禁用」的显式契约，恒返回 `true`；恢复出来的图片列表态按钮照样亮着可点（11-11 澄清修正后） |
 
 `Index.ets` 的执行链：
 
@@ -661,31 +722,28 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
   真没写过的极端情况由上面的 SINGLE 兜底覆盖；
 - `aboutToDisappear` 还会 `clearTimeout(resumeTimer)`，避免恢复在页面销毁后还去改视图。
 
-### 需求 2：「往上层」真正 grey out
+### 需求 2：当时理解反了（已撤销）
 
-11-10 版只做了颜色 + 透明度变暗，`onClick` 还在。现在 `toolBtn` 加 `.enabled(enabled)`：
+> 本节记录的是**当天早些时候的错误实现**，保留只为排障溯源。
+> 当前状态以前文「往上层按钮永不 grey out（2026-11-11 澄清修正）」章节为准。
 
-- **视觉**：明暗色 + `.opacity(0.45)`，再叠系统禁用态；
-- **交互**：`.enabled(false)` 后 `onClick` 不再触发，按钮**完全不可交互**；
-- **状态**：`enabled` 只由 `canGoUp` 传入。有父级亮、到卷根 / 图片列表态 /
-  **启动恢复出来的图片列表态**一律灰 —— `applyItems()` 里
-  `canGoUp = upEnabledAfterResume(browseBase, canGoUpFrom(browseBase))` 是唯一刷新点；
-- 键盘 `退格` / `..` 行不是按钮，仍走 `browseUp()` 同源 guard 给「没有父级」提示，
-  **诊断信息没丢**，三条入口的行为结论仍一致；
-- 三个按钮共用 `toolBtn`，其余两个恒传 `true`，不会被误禁用。
+当时把「grey out」读成「要真正禁用」，于是给 `toolBtn` 加了
+`.enabled(enabled)` + 明暗色 / `.opacity(0.45)`，并用 `upEnabledAfterResume()`
+在恢复出来的图片列表态强制 `canGoUp=false`。**这是反的**：用户是在抱怨按钮
+莫名其妙变灰、点不动，要求把它修回来。该实现已于同日撤销。
 
 ### 验证
 
 `node --experimental-strip-types tests/dirname.test.mjs` **238 → 293/293 通过**：
 新增 `ResumePlan` 纯函数用例（恢复决策 8 例、单张 uri、延迟安全、退出落盘、快照限幅、
 恢复态按钮）与源码静态契约（`onPageHide` / `putSync+flushSync` / 恢复函数体不含重扫与选择器 /
-单张兜底撤销落盘 / `.enabled(enabled)` / 其余按钮恒 true 等）。
+单张兜底撤销落盘等）。其中与「禁用按钮」相关的断言已在澄清修正时一并替换。
 状态栏出现 **`rs1`** 即新包（`RESUME_TAG` 只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
 
 按 11-10 约定：**未编译 HAP、未放桌面、未升版本、未 push**。
 实机请在 DevEco Studio 编译后：看几张图 → 按 Home / 切后台 → 重开 APP，
-应自动回到上次那张图且状态栏带 `rs1`；此时「往上层」为禁用灰态，
-点「选择文件夹」进入有父级的目录后按钮才亮起并可逐级上移。
+应自动回到上次那张图且状态栏带 `rs1`。此时「往上层」**仍是亮着可点的**；
+点「选择文件夹」进入有父级的目录后即可逐级上移。
 
 ## 往上层：改为 Windows 文件管理器的目录层级语义（2026-11-10）
 
@@ -712,7 +770,9 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 | `volumeRootOf()` | 逻辑卷根：`C:` / `/storage/Users/<id>` / `/`；这就是「往上层」能到达的最高层 |
 | `dirLevelOf()` | 层级深度，卷根 = L0，用于诊断串与「每步严格 −1」回归断言 |
 | `upLevelOf()` | **直接父目录**，严格只剥一层；到卷根 / 解析不出返回 `''`，绝不返回自身 |
-| `canGoUpFrom()` | 是否仍有父级，直接复用 `upLevelOf()` —— 按钮状态与点击行为**同源** |
+| `canGoUpFrom()` | 是否仍有父级，直接复用 `upLevelOf()` —— 只作行为判据与诊断，**不驱动按钮外观**（11-11 澄清修正） |
+| `upNavStateOf()` | 区分 图片列表态 / 真到卷根 / 可上移 / URI 层级判不出，避免把解析失败误报成「已到最上层」（11-11 补） |
+| `upLooseParentOf()` | UNKNOWN 态严格剥一层的兜底父级；能定出卷根时返回 `''`，绝不越级（11-11 补） |
 | `upParentCandidates()` | 同一父层的不同 URI 写法，每个候选都要过 `sameDirPath()` 校验，杜绝越级 / 绕圈 |
 | `isUpTargetOf()` | 补授权时只接受直接父级，拒绝自身 / 祖父 / 旁支 / 同名同层旁支 |
 
@@ -720,19 +780,24 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 
 | 触发点 | 统一动作 |
 |---|---|
-| `applyItems()` | **唯一刷新点**：同时更新 `source` / `rowCount` / `listW` / `titlePath` / `canGoUp`；11-11 起 `canGoUp = upEnabledAfterResume(browseBase, canGoUpFrom(browseBase))`（图片列表态强制 false） |
-| `openFolder()` | 成功才写 `browseBase`（实测能列的真实路径），失败不改任何状态；顶层时不列 `..` 行 |
-| `browseUp()` | 成功经 `openFolder → applyItems` 一起刷新当前路径、目录展示、按钮状态，并清掉与层级无关的 `pickRootUri` 旧锚点 |
+| `applyItems()` | **唯一刷新点**：同时更新 `source` / `rowCount` / `listW` / `titlePath` / `canGoUp`；`canGoUp = canGoUpFrom(browseBase)` 只是信息状态，**不控制按钮** |
+| `openFolder()` | 成功才写 `browseBase`（实测能列的真实路径），失败不改任何状态；**目录浏览态恒列 `..` 行**（11-11 起不再受路径判定影响） |
+| `browseUp()` | 成功经 `openFolder → applyItems` 一起刷新当前路径、目录展示、信息状态，并清掉与层级无关的 `pickRootUri` 旧锚点 |
 | 三条入口 | 按钮 / `..` 行 / `退格` 全部收口到 `browseUp()`，行为完全一致 |
 
-- **按钮状态**：`toolBtn('往上层', 'up', true, this.canGoUp)`。有父级亮、到卷根或图片列表态禁用。
-  > **11-11 修订**：11-10 版只做明暗色 + `.opacity()` 的**视觉**置灰，`onClick` 仍在、点了还弹提示，
-  > 不是用户要的 grey out。现改为 `.enabled(enabled)` **真正禁用**（SDK 26 `CommonMethod` 有此属性）
-  > + 视觉置灰双保险：无父级时按钮完全不可交互。
-  > 键盘 `退格` / `..` 行不是按钮，仍走 `browseUp()` 同源 guard，给出
-  > 「已到卷 / 硬盘的逻辑最上层 · 没有父级了」/「当前是图片列表」提示，诊断信息没丢。
-  > 三个按钮共用 `toolBtn`，只有「往上层」传 `this.canGoUp`，其余恒传 `true`。
-- **目录展示**：卷根没有父级时 `rows` 不生成 `..` 行，与按钮置灰、状态提示三者一致。
+- **按钮**：`toolBtn('往上层', 'up', true)` —— **恒亮、恒可点，永不 grey out / 永不禁用**
+  （11-11 澄清修正）。`toolBtn` 回到三参签名，无 `.enabled()`、无条件颜色 / 透明度，
+  从类型上杜绝再次被禁用。`canGoUp` 只用于状态栏文案与诊断串，不传进按钮。
+- **点击行为**（三条入口一致，由 `upNavStateOf()` 分派）：
+
+  | 状态 | 行为 |
+  |---|---|
+  | `GO` | 按 `upLevelOf()` 逐级上移，成功后 `applyItems` 刷新路径 / 目录表 / 信息状态 |
+  | `TOP` | 真到卷根 → 「已到卷 / 硬盘的逻辑最上层 · 没有父级了」，不移动、不弹选择器 |
+  | `NONE` | 图片列表态 → 「用「选择文件夹」进入目录浏览」 |
+  | `UNKNOWN` | URI 层级判不出 → 用 `upLooseParentOf()` 严格剥一层再试；**绝不误报成到顶**，全失败给明确指引 |
+
+- **目录展示**：目录浏览态恒列 `..` 行，与按钮常亮一致；到卷根时点它只给提示、不上移。
 - **无浏览历史**：`Index.ets` 里已彻底删掉历史栈，`openFolder()` 的参数也从 `push` 改名为
   `resetView`（只控制「是否从第一张开始」，与父级推算无关）。
 
@@ -743,7 +808,7 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
   → /storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像              L3
   → /storage/Users/currentUser/Download/com.baidu.netdisk.hmpc                   L2
   → /storage/Users/currentUser/Download                                          L1
-  → /storage/Users/currentUser   （卷根 L0，按钮置灰，不再上移）
+  → /storage/Users/currentUser   （卷根 L0，提示「没有父级了」，不再上移；按钮仍亮着可点）
 ```
 
 Windows 盘符路径同样逐级：`C:/Users/foo/Pictures/2020 → … → C:`，停在盘符根而不进「此电脑」；
@@ -753,13 +818,13 @@ Windows 盘符路径同样逐级：`C:/Users/foo/Pictures/2020 → … → C:`�
 
 `node --experimental-strip-types tests/dirname.test.mjs` **204/204 通过**：新增卷根 / 层级深度 /
 逐级上行链（鸿蒙路径、Windows 盘符、POSIX）、到顶停止、候选同层过滤、补授权防越级，
-以及 22 条源码静态契约（按钮绑定 `canGoUp`、无历史栈、顶层不列 `..`、三条入口收口等）。
+以及 22 条源码静态契约（无历史栈、三条入口收口、逐级链等）。按钮相关契约已在 11-11 澄清修正时改为「永不禁用」。
 右下角诊断串带 **`up4`** 与 `L4→L3` 层级标记，便于实机截图辨认新旧包；
 `UP_NAV_TAG` 只是诊断标记，**不是版本号**。
 
 按 11-10 约定：**未编译 HAP、未放桌面、未升版本（仍 1.0.7）、未 push**。
-请在 DevEco Studio 里编译后实机点几次「往上层」确认逐级上移与到顶禁用。
-> 按钮「真正 grey out」与「重开自动显示上次相片」是 11-11 的后续需求，见下一章节。
+请在 DevEco Studio 里编译后实机点几次「往上层」确认逐级上移与到顶提示（按钮始终可点）。
+> 「重开自动显示上次相片」与「按钮永不 grey out」是 11-11 的后续需求 / 澄清修正，见前文章节。
 
 ## 修复：hover 缩略图「不停闪」（2026-11-10，接上节）
 

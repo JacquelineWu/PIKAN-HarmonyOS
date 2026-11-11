@@ -220,8 +220,9 @@ export function parentDirCandidates(path: string): string[] {
 // 语义对齐 Windows 文件管理器的「向上 / Up」按钮：
 //   · 目标只由**当前路径**算出，与浏览历史无关；
 //   · 每次只剥掉一层，连续点击逐级逼近卷的逻辑最上层；
-//   · 到卷根后没有父级，upLevelOf 返回 ''，按钮置灰、不再上移；
-//   · canGoUpFrom 与 upLevelOf 共用同一推导 —— 按钮状态不可能和点击行为打架。
+//   · 到卷根后没有父级，upLevelOf 返回 ''，不再上移（只给提示）；
+//   · 2026-11-11 修正：按钮**永不 grey out / 永不禁用**。canGoUpFrom / upNavStateOf
+//     只用于「是否上移」的行为判定、状态栏文案与诊断串，**绝不**驱动按钮外观或可交互性。
 // 全部是纯函数，可用 Node 24 直接回归，不必装 HAP。
 // --------------------------------------------------------------------
 
@@ -320,11 +321,58 @@ export function upLevelOf(path: string): string {
   return parent;
 }
 
-/** 是否仍有父级 —— 按钮 enabled 状态与点击行为的**唯一**判据。
- *  直接复用 upLevelOf：只要它为非空，按钮就一定可点且点击一定落到同一层，
- *  从定义上排除「按钮亮着却没父级 / 有父级却点不动」的状态不一致。 */
+/** 是否仍有父级 —— 只作「能否上移」的行为判据与诊断信息。
+ *  ⚠️ 2026-11-11 用户明确要求「往上层」**不要 grey out、不能禁用**：
+ *  本函数**不参与**按钮的 enabled / 颜色 / 透明度，按钮任何时候都可点。
+ *  直接复用 upLevelOf，保证「点击落点」与「是否有父级」不会打架。 */
 export function canGoUpFrom(path: string): boolean {
   return upLevelOf(path).length > 0;
+}
+
+/** 「往上层」点击时的四种状态（数值常量，便于 ArkTS 与 hilog 打印）。
+ *
+ *  为什么要分开 TOP 和 UNKNOWN：DocumentViewPicker 给的目录标识未必能还原成绝对路径
+ *  （`content://...`、`file://docs` 碎片）。这种时候 volumeRootOf 返回 ''、upLevelOf 也返回 ''，
+ *  旧代码一律当成「已到卷 / 硬盘的逻辑最上层」，于是**明明在深层目录却按钮发灰 / 点了没反应**——
+ *  正是 2026-11-11 用户报的「不知道为什么 grey out」。现在两种情况分开：
+ *    · TOP：确实到顶 → 给提示，不再上移；
+ *    · UNKNOWN：只是层级判不出 → 按「严格剥一层」的宽松父级再试一次，绝不假装到顶。 */
+export const UP_NAV_NONE: number = 0;      // 非目录浏览态（browseBase 为空，如启动恢复出的图片列表）
+export const UP_NAV_TOP: number = 1;       // 真到卷 / 盘符根
+export const UP_NAV_GO: number = 2;        // 有直接父级，正常上移
+export const UP_NAV_UNKNOWN: number = 3;   // 路径非空、但卷根判不出（文档 / content URI）
+
+export function upNavStateOf(path: string): number {
+  const s: string = hierPathOf(path);
+  if (s.length === 0) {
+    return UP_NAV_NONE;
+  }
+  if (upLevelOf(s).length > 0) {
+    return UP_NAV_GO;
+  }
+  if (volumeRootOf(s).length > 0) {
+    return UP_NAV_TOP;                     // 能定出卷根却剥不动 = 真的到顶了
+  }
+  return UP_NAV_UNKNOWN;                   // 连卷根都定不出 = URI 形态问题，不是到顶
+}
+
+/** UNKNOWN 态用的「宽松父级」：不依赖卷根判定，只按 parentDirOf 严格剥一层。
+ *  绝不返回自身、绝不返回 scheme 碎片；没有可剥的层级就返回 ''。
+ *  ⚠️ 能定出卷根的路径一律返回 ''：那些情况必须走 upLevelOf 的严格层级链
+ *  （GO 会逐级上移、TOP 会停在盘符根），用宽松父级会越过 /storage/Users/<id> 卷根
+ *  跑到 /storage/Users 这类系统目录，等于越级。 */
+export function upLooseParentOf(path: string): string {
+  if (volumeRootOf(path).length > 0) {
+    return '';
+  }
+  const p: string = parentDirOf(path);
+  if (p.length === 0 || stripTrailingSlash(p) === stripTrailingSlash(path)) {
+    return '';
+  }
+  if (p.indexOf('/') < 0) {
+    return '';
+  }
+  return p;
 }
 
 /** 两个 uri / 路径是否指向同一个目录（同一层级、同一位置）。
@@ -351,14 +399,18 @@ export function isUpTargetOf(picked: string, current: string): boolean {
   return stripTrailingSlash(pickedReal) === target;
 }
 
-/** 「往上层」时逐个尝试的候选：全部是 upLevelOf(currentPath) 那一层的不同 URI 写法
+/** 「往上层」时逐个尝试的候选：全部是目标父层（默认 upLevelOf(currentPath)）的不同 URI 写法
  *  （保留 scheme / 编码的形态最可能仍带 picker 逐 URI 授权）。
  *  任何候选都必须通过 sameDirPath 校验落在同一层；层级不符、等于自身、
- *  等于当前目录的一律剔除 —— 从源头上杜绝越级与循环。 */
-export function upParentCandidates(currentPath: string, rawUri: string): string[] {
-  const target: string = upLevelOf(currentPath);
+ *  等于当前目录的一律剔除 —— 从源头上杜绝越级与循环。
+ *  explicitTarget：UNKNOWN 态（卷根判不出）时由调用方传入 upLooseParentOf 的结果，
+ *  否则 upLevelOf 为空会直接返回 []，按钮点了永远没反应。 */
+export function upParentCandidates(currentPath: string, rawUri: string,
+  explicitTarget?: string): string[] {
+  const target: string = explicitTarget !== undefined && explicitTarget.length > 0
+    ? explicitTarget : upLevelOf(currentPath);
   if (target.length === 0) {
-    return [];                          // 已到卷根：没有候选，也不该再点
+    return [];                          // 真的没有父级：没有候选
   }
   const curKey: string = stripTrailingSlash(hierPathOf(currentPath));
   const out: string[] = [];

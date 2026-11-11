@@ -52,12 +52,12 @@ import window from '@ohos.window';
 import util from '@ohos.util';
 import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, pickerStartOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, isUpTargetOf,
+  UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
   textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../common/PreloadBudget';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
-  resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
-  upEnabledAfterResume } from '../common/ResumePlan';
+  resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap } from '../common/ResumePlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -1186,10 +1186,10 @@ struct Index {
   @State listW: number = LIST_W;
   /** 左栏排序方向：true = 升序（自然序） */
   @State sortAsc: boolean = true;
-  /** 「往上层」按钮是否可用：等价于「当前路径仍有父级」。
-   *  由 canGoUpFrom(当前路径) 统一推导（与点击行为同源），绝不由浏览历史单独维护 ——
-   *  这样按钮明暗、提示文案、点击落点三者不可能出现状态不一致。
-   *  到卷根 / 非目录浏览态为 false，按钮置灰且点击只给提示、不再上移。 */
+  /** 「当前路径是否仍有父级」——只作状态栏文案、诊断串与 browseUp 的行为判据。
+   *  ⚠️ 2026-11-11 用户明确要求「不要 grey out、不能禁用」：这个字段**绝不**参与
+   *  按钮的 enabled / 颜色 / 透明度；「往上层」按钮任何时候都是亮的、可点的。
+   *  到卷根 / 图片列表态为 false 时，点击由 browseUp() 给提示、不移动目录。 */
   @State canGoUp: boolean = false;
   /** 顶栏自动隐藏（Win64 0cfabb2）：鼠标贴近窗口顶端才浮出，默认不占画面 */
   @State topbarVisible: boolean = true;
@@ -1487,7 +1487,8 @@ struct Index {
    *
    *  两条路径最终都会经过 applyItems() → showPreviewOf()，所以
    *  「当前路径 / 目录展示 / 往上层按钮状态」与正常载入完全一致：
-   *  恢复出来的是**图片列表态**（browseBase=''），往上层按钮自然 grey out。 */
+   *  恢复出来的是**图片列表态**（browseBase=''），此时 canGoUp=false，但按钮仍亮着可点，
+   *  点了由 browseUp() 给「请用选择文件夹进入目录浏览」提示（2026-11-11：不再 grey out）。 */
   private async showLastOnStart(): Promise<void> {
     if (this.resumeDone) {
       return;
@@ -1990,7 +1991,7 @@ struct Index {
     this.browseDir = '';
     this.browseBase = '';
     // 没有浏览历史栈可清：往上层只认 browseBase；它在上面置空后，
-    // applyItems() 会把 canGoUp 一起刷成 false（按钮置灰）。
+    // applyItems() 会把 canGoUp 刷成 false（仅用于提示文案，按钮仍然亮着可点）。
     this.diagLine = ''; // 回到图库 / 多选态，别再挂旧目录的诊断串
     this.dirHint = '';  // 非目录态不显示「本层没有图片」提示条
     if (this.dirPollTimer !== -1) {
@@ -2054,12 +2055,12 @@ struct Index {
     this.titlePath = this.browseBase.length > 0 ? this.browseBase :
       (this.browseDir.length > 0 ? this.browseDir :
         (list.length > 0 ? parentDirOf(list[0].uri) : ''));
-    // 「往上层」按钮状态的**唯一**刷新点：与 titlePath 同源，都取自当前真实路径。
+    // 「是否仍有父级」的**唯一**刷新点：与 titlePath 同源，都取自当前真实路径。
     // 任何换源 / 进子目录 / 往上层 / 重扫 / 快照恢复都会经过 applyItems，
-    // 因此按钮明暗、当前路径、目录展示三者永远一起更新，不会各说各话。
-    // 非目录浏览态 browseBase=''（含启动恢复出来的图片列表态）→ 没有父级 →
-    // upEnabledAfterResume 强制 false，按钮 grey out；想往上层先「选择文件夹」进目录。
-    this.canGoUp = upEnabledAfterResume(this.browseBase, canGoUpFrom(this.browseBase));
+    // 因此状态栏文案、诊断串、目录表与点击行为不可能各说各话。
+    // ⚠️ 2026-11-11 用户要求「不要 grey out、不能禁用」：本字段**不驱动按钮外观**，
+    // 「往上层」恒为可点；非目录浏览态点击只会得到「请用选择文件夹」提示。
+    this.canGoUp = canGoUpFrom(this.browseBase);
     // 先算出落点再解码：否则会先按第 1 张解一遍、恢复时又解一遍，白白多一次大图解码
     const start: number = keepView ? -1 : this.restoreIndex(list);
     if (keepView) {
@@ -3592,11 +3593,11 @@ struct Index {
         others.reverse();
       }
       const rows: ImageItem[] = [];
-      // 卷 / 硬盘的逻辑最上层没有父级：不列「..」行，目录展示与按钮置灰保持一致。
-      // 判定与 applyItems() 的 canGoUp、browseUp() 的 canUp 同源，都是 canGoUpFrom(base)。
-      if (canGoUpFrom(base)) {
-        rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
-      }
+      // 对齐 Windows 文件管理器：只要还在目录浏览态就恒列「..」行，与「向上」按钮一样
+      // 永不因内部路径判定而消失。到卷根时点了由 browseUp() 给「没有父级了」提示、不上移。
+      // 2026-11-11：旧版用 canGoUpFrom(base) 控制这一行，遇到还原不出卷根的文档 URI
+      // 会把深层目录的「..」行也一起藏掉 —— 那正是「按钮区莫名其妙变灰 / 少一行」的来源。
+      rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
       for (let i = 0; i < dirs.length; i++) {
         rows.push(dirs[i]);
       }
@@ -3802,9 +3803,9 @@ struct Index {
         this.chooseFolder();
         break;
       case 'up':
-        // 按钮在 canGoUp=false 时已被 .enabled(false) 禁用，点击到不了这里；
-        // 键盘退格 / '..' 行仍走 browseUp()，它按 canGoUpFrom 二次校验后只给
-        // 「没有父级」提示，绝不移动目录。三条入口的**行为结论**因此完全一致。
+        // 2026-11-11：按钮**永不禁用**，任何状态都能点进来。
+        // 按钮 / 键盘退格 / '..' 行三条入口全部收口 browseUp()，由 upNavStateOf
+        // 分派（上移 / 到顶提示 / 图片列表提示 / URI 层级判不出的兜底），结论一致。
         this.browseUp();
         break;
       case 'sort':
@@ -3849,7 +3850,7 @@ struct Index {
    *
    *  现在只认一个真值：browseBase（openFolder 实测能列目录的真实路径）。
    *    · upLevelOf() 严格只剥一层，volumeRootOf() 定出卷的逻辑最上层；
-   *    · canGoUpFrom() 同源推导按钮明暗，到卷根返回 false，按钮置灰、点击只给提示；
+   *    · upNavStateOf() 区分「真到卷根」与「URI 层级判不出」；按钮永不置灰 / 永不禁用；
    *    · upParentCandidates() 只生成同一父层的不同 URI 写法供逐 URI 授权尝试，
    *      任何候选都用 sameDirPath 校验落在同一层，杜绝越级与绕圈；
    *    · 连续点击逐级 L4→L3→L2→L1→L0，到卷根后不再上移；
@@ -3862,28 +3863,45 @@ struct Index {
     }
     // 唯一的当前路径：目录浏览态就是实测能列的真实路径；非目录浏览态为空。
     const current: string = this.browseBase;
+    const state: number = upNavStateOf(current);
     const level: number = dirLevelOf(current);
     const root: string = volumeRootOf(current);
-    const target: string = upLevelOf(current);
-    const canUp: boolean = canGoUpFrom(current);
-    // 按钮状态与点击行为同源：点击瞬间就对齐，不需要等异步结果。
+    // 严格层级链用 upLevelOf；UNKNOWN（卷根判不出的文档 / content URI）再退到
+    // 「严格剥一层」的宽松父级，保证按钮点了确实能上移，而不是被误报成「已到最上层」。
+    let target: string = upLevelOf(current);
+    let loose: boolean = false;
+    if (target.length === 0 && state === UP_NAV_UNKNOWN) {
+      target = upLooseParentOf(current);
+      loose = target.length > 0;
+    }
+    const canUp: boolean = target.length > 0;
+    // canGoUp 只是信息状态（状态栏 / 诊断串），按钮本身永不置灰 / 永不禁用。
     this.canGoUp = canUp;
-    this.diagLine = 'up START | ' + UP_NAV_TAG + ' | L' + level +
-      '→' + (canUp ? 'L' + dirLevelOf(target) : 'TOP') +
+    this.diagLine = 'up START | ' + UP_NAV_TAG + ' | st=' + state +
+      ' | L' + level + '→' + (canUp ? 'L' + dirLevelOf(target) : 'TOP') +
+      (loose ? ' | loose' : '') +
       ' | can=' + (canUp ? '1' : '0') +
       ' | cur=' + ellipsizeMiddle(current, 30) +
       ' | root=' + ellipsizeMiddle(root, 24) + ' | v' + APP_VERSION;
-    if (!canUp || target.length === 0) {
-      // 已到卷 / 硬盘的逻辑最上层，或非目录浏览态：不再上移，也不再弹选择器。
-      this.status = current.length === 0
-        ? '当前是图片列表，没有上层目录（用「选择文件夹」进入目录浏览）'
-        : '已到卷 / 硬盘的逻辑最上层「' + baseName(current) + '」· 没有父级了';
-      this.diagLine = 'up TOP | ' + UP_NAV_TAG + ' | L' + level +
+    if (!canUp) {
+      // 三种「不动」要分开说清楚，绝不把 URI 解析失败误报成「已到最上层」。
+      if (state === UP_NAV_NONE || current.length === 0) {
+        this.status = '当前是图片列表，没有上层目录（用「选择文件夹」进入目录浏览）';
+      } else if (state === UP_NAV_TOP) {
+        this.status = '已到卷 / 硬盘的逻辑最上层「' + baseName(current) + '」· 没有父级了';
+      } else {
+        this.status = '往上层：当前目录标识无法还原层级「' + baseName(current) +
+          '」· 请用「选择文件夹」重新进入该目录后再试';
+      }
+      this.diagLine = 'up NOGO | ' + UP_NAV_TAG + ' | st=' + state + ' | L' + level +
         ' | root=' + ellipsizeMiddle(root, 24) + ' | can=0 | v' + APP_VERSION;
       return;
     }
-    const parents: string[] = upParentCandidates(current,
-      this.browseDir.length > 0 ? this.browseDir : current);
+    const rawUri: string = this.browseDir.length > 0 ? this.browseDir : current;
+    // UNKNOWN 态 upLevelOf 为空，必须显式传入宽松父级，否则候选集为空、按钮又变成没反应。
+    const parents: string[] = loose
+      ? upParentCandidates(current, rawUri, target)
+      : upParentCandidates(current, rawUri);
     const targetName: string = baseName(target);
     this.status = '往上层 L' + level + '→L' + dirLevelOf(target) + ' → ' + targetName;
     this.diagLine = 'up | ' + UP_NAV_TAG + ' | L' + level + '→L' + dirLevelOf(target) +
@@ -3912,11 +3930,20 @@ struct Index {
         return;
       }
     }
+    hilog.warn(DOMAIN, TAG, 'browseUp all same-level cands failed, current=%{public}s', current);
+    if (loose) {
+      // UNKNOWN 态不能走补授权选择器：isUpTargetOf 依赖 upLevelOf，此时恒为 false，
+      // 会把用户选中的任何目录都判成「不是直接父级」，等于死锁。给明确指引即可。
+      this.status = '往上层：无法从「' + baseName(current) +
+        '」上移（目录标识层级不可解析）· 请用「选择文件夹」重新进入该目录后再试';
+      this.diagLine = 'up FAIL | ' + UP_NAV_TAG + ' | loose | ' + parents.length +
+        ' cands denied | target=' + targetName + ' | v' + APP_VERSION;
+      return;
+    }
     this.status = '往上层失败：上级「' + targetName + '」无读取授权 · 已打开目录选择器，请进到「' +
       targetName + '」确认一次（只进一层）';
     this.diagLine = 'up FAIL | ' + UP_NAV_TAG + ' | ' + parents.length +
       ' cands denied | target=' + targetName + ' | need picker auth | v' + APP_VERSION;
-    hilog.warn(DOMAIN, TAG, 'browseUp all same-level cands failed, current=%{public}s', current);
     // 逐 URI 授权模型下，父目录没授权时唯一可靠的补权方式：让用户确认一次，
     // 且只接受恰好一层的父目录（isUpTargetOf 校验），避免补授权时越级。
     this.chooseFolderAt(targetName, target, current);
@@ -4211,29 +4238,26 @@ struct Index {
   // UI 片段
   // ------------------------------------------------------------------
 
-  /** 2026-11-11 需求 2：「往上层」要真正 grey out。
-   *  11-10 版只做了颜色 / 透明度变暗，却没禁用点击 —— 灰着还能点、点了还弹提示，
-   *  不是用户要的 grey out。现在 .enabled(enabled) 让无父级时按钮**完全不可交互**：
-   *   · 视觉：明暗色 + .opacity(0.45)，系统禁用态再叠一层灰；
-   *   · 交互：.enabled(false) 后 onClick 不再触发；
-   *   · 状态：enabled 只由 canGoUp 传入（applyItems 同源刷新），有父级亮、到卷根 /
-   *     图片列表态 / 启动恢复态一律灰；
-   *   · 键盘退格 / '..' 行不是按钮，仍走 browseUp() 的同源 guard 给「没有父级」提示，
-   *     诊断信息没丢。三个按钮共用，只有「往上层」传 canGoUp，其余恒传 true。 */
+  /** 三个工具按钮共用的外观 —— **恒亮、恒可点，永不 grey out / 永不禁用**。
+   *
+   *  2026-11-11 用户澄清：上一版把「按钮 grey out」的反馈理解反了，那是**抱怨**按钮被灰掉、
+   *  要求修正，不是要禁用。所以这里回到无条件外观：
+   *   · 无 .enabled()、无 .opacity() 条件、无条件 fontColor / backgroundColor；
+   *   · 签名回到三参，不再接受任何「是否可用」入参，从类型上杜绝再次被禁用；
+   *   · 到卷根 / 图片列表态 / 启动恢复态点击都照常进 doAction('up') → browseUp()，
+   *     由 upNavStateOf 给准确提示，不移动目录。诊断信息完整保留。 */
   @Builder
-  toolBtn(label: string, act: string, flex: boolean, enabled: boolean) {
+  toolBtn(label: string, act: string, flex: boolean) {
     Button(label)
       .type(ButtonType.Normal)
       .fontSize(12)
-      .fontColor(enabled ? '#e8ecf4' : '#6b7280')
-      .backgroundColor(enabled ? '#2a2f3a' : '#20242c')
+      .fontColor('#e8ecf4')
+      .backgroundColor('#2a2f3a')
       .borderRadius(6)
       .height(30)
       .padding({ left: 10, right: 10 })
       .margin(3)
       .layoutWeight(flex ? 1 : 0)
-      .opacity(enabled ? 1.0 : 0.45)
-      .enabled(enabled)
       .onClick(() => this.doAction(act))
   }
 
@@ -4353,7 +4377,7 @@ struct Index {
 
       // 11-10 起按用户要求彻底移除「选择图片」与「回到上次」两个按钮及其入口；
       // 顶栏其余按钮（全屏 / 幻灯片）与事件保持不变。
-      this.toolBtn('全屏', 'full', false, true)
+      this.toolBtn('全屏', 'full', false)
       Button(this.playing ? '暂停' : '幻灯片')
         .type(ButtonType.Normal)
         .fontSize(13)
@@ -4404,10 +4428,11 @@ struct Index {
             // 统一 height(30) + Row 垂直居中 → 垂直对齐整齐；
             // 合并掉原来的第二行后，按钮区不再有多余垂直空白，也不会重叠 / 错位。
             Row() {
-              this.toolBtn(this.sortAsc ? '排序 ↑' : '排序 ↓', 'sort', true, true)
-              // canGoUp 由 applyItems() 与当前路径同源刷新：有父级亮、到卷根 / 非目录态灰。
-              this.toolBtn('往上层', 'up', true, this.canGoUp)
-              this.toolBtn('选择文件夹', 'folder', true, true)
+              this.toolBtn(this.sortAsc ? '排序 ↑' : '排序 ↓', 'sort', true)
+              // 「往上层」恒亮恒可点（2026-11-11：不要 grey out、不能禁用）。
+              // canGoUp 只用于状态栏 / 诊断串 / browseUp 行为判据，不传进按钮。
+              this.toolBtn('往上层', 'up', true)
+              this.toolBtn('选择文件夹', 'folder', true)
             }
             .width('100%')
             .alignItems(VerticalAlign.Center)

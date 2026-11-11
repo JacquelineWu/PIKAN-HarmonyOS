@@ -8,16 +8,17 @@
  * 时左栏抬头空白。同时覆盖中文、%XX 编码、file://docs 文档 URI、
  * 尾部斜杠、? 参数、多级路径、纯 ASCII、空值兜底，
  * 「往上层」按目录层级逐级上行（不按浏览历史、不越级、不循环、到卷根停止），
- * 以及 2026-11-11 的「退出记住位置 / 启动自动显示上次相片 / 往上层真正 grey out」。
+ * 2026-11-11 的「退出记住位置 / 启动自动显示上次相片」，
+ * 以及同日澄清的「往上层按钮永不 grey out / 永不禁用、点了要有反应」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../entry/src/main/ets/common/PreloadBudget.ts';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, FLUSH_SYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
-  upEnabledAfterResume } from '../entry/src/main/ets/common/ResumePlan.ts';
+  upButtonEnabled } from '../entry/src/main/ets/common/ResumePlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -160,8 +161,8 @@ check('不再有「选择图片」toolBtn', /toolBtn\('选择图片'/.test(INDEX
 check('不再有「回到上次」toolBtn', /toolBtn\('回到上次'/.test(INDEX), false);
 check('doAction 无 files 分支', /case 'files':/.test(INDEX), false);
 check('doAction 无 resume 分支', /case 'resume':/.test(INDEX), false);
-check('三个按钮合并在同一行，且「往上层」绑定 canGoUp',
-  /toolBtn\('往上层', 'up', true, this\.canGoUp\)[\s\S]{0,220}toolBtn\('选择文件夹', 'folder', true, true\)/.test(INDEX), true);
+check('三个按钮合并在同一行，且「往上层」恒亮恒可点',
+  /toolBtn\('往上层', 'up', true\)[\s\S]{0,220}toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), true);
 check('按钮区不再有原来的第二行',
   /bottom: 4 \}\)\s*Row\(\) \{\s*this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), false);
 check('左栏宽度改用自适应 listW',
@@ -289,7 +290,7 @@ check('文件系统根没有父级', upLevelOf('/'), '');
 check('空路径没有父级', upLevelOf(''), '');
 check('canGoUpFrom 与 upLevelOf 同源（有父级）', canGoUpFrom(DEEP), upLevelOf(DEEP).length > 0);
 check('canGoUpFrom 与 upLevelOf 同源（卷根）', canGoUpFrom(VOLROOT), false);
-check('非目录态空路径按钮置灰', canGoUpFrom(''), false);
+check('非目录态空路径无父级（仅提示文案，按钮仍可点）', canGoUpFrom(''), false);
 
 // 连续点击模拟：每一步严格 L-1，遇到重复路径即判定为「绕圈」。
 function climb(path) {
@@ -377,23 +378,44 @@ check('空选中拒绝', isUpTargetOf('', DEEP), false);
 console.log('--- 源码静态契约：「往上层」目录层级语义（2026-11-10） ---');
 check('按钮文案统一为「往上层」', /toolBtn\('往上层', 'up',/.test(INDEX), true);
 check('源码不再出现「回上层」', /回上层/.test(INDEX), false);
-check('按钮状态绑定 canGoUp', /toolBtn\('往上层', 'up', true, this\.canGoUp\)/.test(INDEX), true);
-check('toolBtn 增加 enabled 形参', /toolBtn\(label: string, act: string, flex: boolean, enabled: boolean\)/.test(INDEX), true);
-check('置灰用明暗色 + opacity（不依赖新组件属性）',
-  /\.fontColor\(enabled \?/.test(INDEX) && /\.opacity\(enabled \? 1\.0 : 0\.45\)/.test(INDEX), true);
+const TOOLBTN_FN = INDEX.slice(INDEX.indexOf('  toolBtn(label:'), INDEX.indexOf('/** 主视图：'));
+const CODE_LINES = INDEX.split('\n').filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
+check('往上层按钮恒亮恒可点（不再传 canGoUp）', /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX), true);
+check('toolBtn 三参签名，不接受 enabled 入参',
+  /toolBtn\(label: string, act: string, flex: boolean\)/.test(INDEX), true);
+check('toolBtn 函数体无 .enabled / 条件颜色 / 条件 opacity',
+  /\.enabled\(/.test(TOOLBTN_FN) === false &&
+  /fontColor\(enabled \?/.test(TOOLBTN_FN) === false &&
+  /opacity\(enabled \?/.test(TOOLBTN_FN) === false, true);
+check('toolBtn 无条件恒定外观',
+  /\.fontColor\('#e8ecf4'\)/.test(TOOLBTN_FN) && /\.backgroundColor\('#2a2f3a'\)/.test(TOOLBTN_FN), true);
+check('源码非注释行无 .enabled( 禁用属性', /\.enabled\(/.test(CODE_LINES), false);
 check('源码不再有浏览历史栈 dirStack', /dirStack/.test(INDEX), false);
 check('openFolder 参数改名 resetView（无压栈语义）', /resetView: boolean/.test(INDEX), true);
-check('applyItems 同源刷新 canGoUp（恢复态再经 upEnabledAfterResume 收口）',
-  /this\.canGoUp = upEnabledAfterResume\(this\.browseBase, canGoUpFrom\(this\.browseBase\)\)/.test(INDEX), true);
+check('applyItems 同源刷新 canGoUp（纯信息状态，不驱动按钮）',
+  /this\.canGoUp = canGoUpFrom\(this\.browseBase\);/.test(INDEX) &&
+  /upEnabledAfterResume/.test(INDEX) === false, true);
 const UP_FN = INDEX.slice(INDEX.indexOf('private async browseUp('), INDEX.indexOf('private chooseFolderAt('));
-check('browseUp 用 upLevelOf 求直接父级', /const target: string = upLevelOf\(current\)/.test(UP_FN), true);
-check('browseUp 用 canGoUpFrom 同源判定', /const canUp: boolean = canGoUpFrom\(current\)/.test(UP_FN), true);
-check('browseUp 到顶立即 return，不再弹选择器', /if \(!canUp \|\| target\.length === 0\)/.test(UP_FN), true);
+check('browseUp 用 upLevelOf 求直接父级', /let target: string = upLevelOf\(current\)/.test(UP_FN), true);
+check('browseUp 用 upNavStateOf 区分到顶 / 层级判不出',
+  /const state: number = upNavStateOf\(current\)/.test(UP_FN), true);
+check('browseUp UNKNOWN 态用宽松父级兜底',
+  /target = upLooseParentOf\(current\)/.test(UP_FN) && /state === UP_NAV_UNKNOWN/.test(UP_FN), true);
+check('browseUp 三种不动分开提示',
+  /if \(!canUp\)/.test(UP_FN) && /state === UP_NAV_NONE/.test(UP_FN) &&
+  /state === UP_NAV_TOP/.test(UP_FN), true);
+const LOOSE_FAIL = UP_FN.slice(
+  UP_FN.indexOf('if (loose) {', UP_FN.indexOf('hilog.warn')),
+  UP_FN.indexOf("this.status = '往上层失败："));
+check('browseUp UNKNOWN 失败不进 chooseFolderAt 死锁',
+  /if \(loose\) \{/.test(LOOSE_FAIL) && /return;/.test(LOOSE_FAIL) &&
+  /chooseFolderAt/.test(LOOSE_FAIL) === false, true);
 check('browseUp 不再 pop 浏览历史', /\.pop\(/.test(UP_FN), false);
 check('browseUp 候选只用同层 upParentCandidates', /upParentCandidates\(current,/.test(UP_FN), true);
 check('成功后清掉 pickRootUri 旧锚点', /this\.pickRootUri = '';/.test(UP_FN), true);
-check('顶层不列 .. 行（目录展示与按钮一致）',
-  /if \(canGoUpFrom\(base\)\) \{\s*rows\.push\(\{ uri: '', name: '\.\.'/.test(INDEX), true);
+check('目录浏览态恒列 .. 行（不因路径判定消失）',
+  /rows\.push\(\{ uri: '', name: '\.\.', size: -1, mtime: 0, kind: ROW_UP/.test(INDEX) &&
+  /if \(canGoUpFrom\(base\)\) \{/.test(INDEX) === false, true);
 check('补授权只认 isUpTargetOf', /const exactLevel: boolean = isUpTargetOf\(uris\[0\], current\);/.test(INDEX), true);
 check('补授权不再按「同名 + 层级」放宽', /pickedName === targetName && dirLevelOf/.test(INDEX), false);
 check('按钮 / 退格 / .. 行三条入口都收口 browseUp',
@@ -499,13 +521,41 @@ check('0 条', resumeSnapCap(0, 600), 0);
 check('负数', resumeSnapCap(-5, 600), 0);
 check('上限非正视为 0', resumeSnapCap(600, 0), 0);
 
-console.log('--- upEnabledAfterResume(): 恢复态「往上层」必须 grey out ---');
-check('图片列表态 browseBase 为空 → 强制 false', upEnabledAfterResume('', false), false);
-check('即使 canGoUp 误传 true，空路径仍禁用', upEnabledAfterResume('', true), false);
-check('目录浏览态有父级 → 亮起', upEnabledAfterResume('/storage/Users/currentUser/Download', true), true);
-check('目录浏览态到卷根 → 禁用', upEnabledAfterResume('/storage/Users/currentUser', false), false);
+console.log('--- upNavStateOf(): 区分「真到卷根」与「URI 层级判不出」 ---');
+check('深层目录 GO', upNavStateOf(DEEP), UP_NAV_GO);
+check('卷根 TOP', upNavStateOf(VOLROOT), UP_NAV_TOP);
+check('Windows 盘符根 TOP', upNavStateOf('C:'), UP_NAV_TOP);
+check('文件系统根 TOP', upNavStateOf('/'), UP_NAV_TOP);
+check('图片列表态 NONE', upNavStateOf(''), UP_NAV_NONE);
+check('文档 URI 能还原真实路径仍走 GO', upNavStateOf(`file://docs${DEEP}/`), UP_NAV_GO);
+const CU = 'content://com.example/media/dir/人像';
+check('content URI 判不出 → UNKNOWN（不是 TOP）', upNavStateOf(CU), UP_NAV_UNKNOWN);
+check('UNKNOWN 与 TOP 是不同状态', UP_NAV_UNKNOWN === UP_NAV_TOP, false);
 
-console.log('--- 源码静态契约：启动恢复 / 退出落盘 / 真正 grey out ---');
+console.log('--- upLooseParentOf(): UNKNOWN 态严格剥一层，绝不越级 ---');
+check('content URI 剥一层', upLooseParentOf(CU), 'content://com.example/media/dir');
+check('file://docs 能还原真实路径 → 定出卷根，走严格链不用宽松父级',
+  upLooseParentOf('file://docs/storage/a/b'), '');
+check('空路径无宽松父级', upLooseParentOf(''), '');
+check('卷根可定出卷根 → 不用宽松父级（防越过 /storage/Users/<id>）',
+  upLooseParentOf(VOLROOT), '');
+check('深层目录走严格链 → 不用宽松父级', upLooseParentOf(DEEP), '');
+
+console.log('--- upParentCandidates(): UNKNOWN 态显式父级，按钮点了才有反应 ---');
+const LU = upLooseParentOf(CU);
+check('不传 explicitTarget → 空（旧缺陷：候选为空）', upParentCandidates(CU, CU).length, 0);
+check('传显式父级 → 至少 1 个同层候选', upParentCandidates(CU, CU, LU).length > 0, true);
+check('候选不含当前目录自身', upParentCandidates(CU, CU, LU).every(x => x !== CU), true);
+check('严格链 GO 态仍不传 explicitTarget', upParentCandidates(DEEP, `file://docs${DEEP}/`).length > 0, true);
+
+console.log('--- upButtonEnabled(): 按钮永不 grey out / 永不禁用 ---');
+check('恒为 true', upButtonEnabled(), true);
+check('不依赖任何入参（签名无参）', upButtonEnabled.length, 0);
+check('ResumePlan 已移除 upEnabledAfterResume',
+  Object.prototype.hasOwnProperty.call(
+    await import('../entry/src/main/ets/common/ResumePlan.ts'), 'upEnabledAfterResume'), false);
+
+console.log('--- 源码静态契约：启动恢复 / 退出落盘 / 按钮永不禁用 ---');
 check('新开关默认开、旧重扫护栏仍为 false',
   /const AUTO_SHOW_LAST_ON_START: boolean = true;/.test(INDEX) &&
   /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX), true);
@@ -554,15 +604,23 @@ check('flushPosSync 不写大快照（只补小 key）',
 check('flushPosSync 用 exitFlushAction 决策并保留异步兜底',
   /const act: number = exitFlushAction\(p !== undefined, store !== undefined\);/.test(INDEX) &&
   /if \(act === FLUSH_ASYNC \|\| store === undefined \|\| p === undefined\)/.test(INDEX), true);
-check('toolBtn 真正 .enabled(enabled) 禁用（需求 2）',
-  /\.enabled\(enabled\)/.test(INDEX), true);
-check('往上层按钮仍绑定 canGoUp',
-  /this\.toolBtn\('往上层', 'up', true, this\.canGoUp\)/.test(INDEX), true);
-check('恢复态按钮状态由 upEnabledAfterResume 同源刷新',
-  /this\.canGoUp = upEnabledAfterResume\(this\.browseBase, canGoUpFrom\(this\.browseBase\)\);/.test(INDEX), true);
-check('其余按钮恒传 true（不会被误禁用）',
-  /this\.toolBtn\('全屏', 'full', false, true\)/.test(INDEX) &&
-  /this\.toolBtn\('选择文件夹', 'folder', true, true\)/.test(INDEX), true);
+check('源码（非注释）不再有禁用属性 / 条件置灰',
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /opacity\(enabled \?/.test(CODE_LINES) === false &&
+  /fontColor\(enabled \?/.test(CODE_LINES) === false, true);
+check('往上层按钮不再绑定 canGoUp',
+  /this\.toolBtn\('往上层', 'up', true, this\.canGoUp\)/.test(INDEX) === false &&
+  /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX), true);
+check('三个按钮都是三参调用（不存在 enabled 实参）',
+  /this\.toolBtn\('全屏', 'full', false\)/.test(INDEX) &&
+  /this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), true);
+check('applyItems 不再用 upEnabledAfterResume 把按钮收口',
+  /upEnabledAfterResume/.test(INDEX) === false, true);
+check('canGoUp 仍是纯信息状态（状态栏 / 诊断串）',
+  /this\.canGoUp = canGoUpFrom\(this\.browseBase\);/.test(INDEX), true);
+check('按钮 / 退格 / .. 行三条入口仍全部收口 browseUp',
+  (INDEX.match(/this\.browseUp\(\)/g) || []).length >= 3, true);
+check('诊断串带 st= 状态分派，便于实机辨认新包', /'up START \| ' \+ UP_NAV_TAG \+ ' \| st='/.test(INDEX), true);
 check('诊断标记 rs1 不是版本号',
   /const RESUME_TAG: string = 'rs1'/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);

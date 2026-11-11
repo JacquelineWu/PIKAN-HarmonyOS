@@ -96,15 +96,15 @@ export function resumeSnapCap(rawCount: number, max: number): number {
   return Math.min(rawCount, max);
 }
 
-/** 恢复后「往上层」按钮是否该 grey out。
+/** 「往上层」按钮状态：**恒为可点，永不 grey out / 永不禁用**。
  *
- *  恢复出来的是**图片列表态**（快照里只有图片 uri，没有目录层级，`browseBase = ''`），
- *  没有父级可上 —— 按钮必须禁用。真要往上层，得先用「选择文件夹」进入目录浏览，
- *  那时 applyItems 会按 canGoUpFrom(browseBase) 把按钮点亮。
- *  这条把需求 1（重开显示图片）和需求 2（回上层 grey out）绑成同一个状态。 */
-export function upEnabledAfterResume(browseBase: string, canGoUp: boolean): boolean {
-  if (browseBase.length === 0) {
-    return false;
-  }
-  return canGoUp;
+ *  2026-11-11 用户澄清：上一版把需求 2「回上层 grey out」理解反了 ——
+ *  用户是**抱怨**按钮被灰掉、要求修正，不是要禁用。恢复出来是图片列表态
+ *  （`browseBase = ''`）时按钮也照样亮着可点；点了由 browseUp() 给
+ *  「当前是图片列表，请用选择文件夹进入目录浏览」的提示，而不是把按钮藏起来。
+ *
+ *  保留这个纯函数是为了让「按钮永不禁用」成为一条可回归的显式契约，
+ *  而不是散落在 UI 代码里的隐含约定。 */
+export function upButtonEnabled(): boolean {
+  return true;
 }
