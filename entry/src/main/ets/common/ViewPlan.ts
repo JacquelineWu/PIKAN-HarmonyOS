@@ -125,6 +125,61 @@ export function displayEdgeOf(viewEdgeValue: number, canvasW: number, canvasH: n
   return need;
 }
 
+/** 普通拖窗口 resize 时是否值得按新画布重解码一张。
+ *
+ *  2026-11-11 第四轮：旧 `onAreaChange` 只有 `pendingReload`（仅进出全屏时置位）才重解，
+ *  用户拖窗口改变大小后图片只是被 `objectFit(Contain)` 拉大旧档位 PixelMap（发虚 / 锯齿）。
+ *  这里给一个「变化够大」的判据：任一维变化 ≥ minDelta 才重解，滤掉状态栏动画那种 1~2vp 抖动。
+ *  首次拿到有效尺寸（旧值为 0）也要重解一次；新尺寸非正一律不重解。 */
+export function shouldReloadOnResize(oldW: number, oldH: number, newW: number,
+  newH: number, minDelta: number): boolean {
+  if (newW <= 0 || newH <= 0) {
+    return false;
+  }
+  if (oldW <= 0 || oldH <= 0) {
+    return true;
+  }
+  const d: number = minDelta > 0 ? minDelta : 1;
+  return Math.abs(newW - oldW) >= d || Math.abs(newH - oldH) >= d;
+}
+
+/** 全屏态下画布相对「全屏基准尺寸」明显缩小 → 判定系统已自行退出沉浸。
+ *
+ *  真全屏（ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER）下 ESC 常被窗口管理器先消费，
+ *  APP 的 `onKeyEvent` 收不到；系统自己退出沉浸后窗口 / 画布会缩小，此时若 APP 仍把
+ *  `fullscreen` 当 true，应用内三块栏就永远不回来 —— 实机现象就是「按 ESC 没切回完整界面」。
+ *  据此自愈退出 APP 全屏态，效果与双击退出完全对齐。
+ *
+ *  真全屏态下用户无法自己拖小窗口，所以「宽或高任一维明显缩小」就足以判定系统已退出沉浸；
+ *  用 OR 而非 AND —— 系统常常只恢复标题栏 / dock（只缩高度），要求两维同时缩小会漏判。
+ *  ratio 非法时回退 0.85。 */
+export function shouldExitFullOnResize(fullscreen: boolean, fullW: number, fullH: number,
+  newW: number, newH: number, shrinkRatio: number): boolean {
+  if (!fullscreen || fullW <= 0 || fullH <= 0 || newW <= 0 || newH <= 0) {
+    return false;
+  }
+  const r: number = (shrinkRatio > 0 && shrinkRatio < 1) ? shrinkRatio : 0.85;
+  return newW < fullW * r || newH < fullH * r;
+}
+
+/** 由「根容器尺寸 + 固定栏偏移」反推预览画布尺寸。
+ *
+ *  2026-11-12 第五轮：真机拖窗口 resize 时，深层 `layoutWeight(1)` 的预览 Stack
+ *  **不一定**收到 onAreaChange，而根 Stack 是 100%×100% 直接跟窗口，尺寸必然变化。
+ *  首帧测出 chrome = 根尺寸 - 画布尺寸（左栏 + 顶栏 + 状态栏等固定占用），
+ *  之后任一次根尺寸变化都能精确换算出新画布尺寸，不再赌深层回调是否触发。
+ *  返回 {w:0,h:0} 表示「基准未就绪 / 结果不可用」，调用方必须跳过，
+ *  绝不能拿 0 去设 .width()/.height()（会把图片压没）。 */
+export function canvasFromRootOf(rootW: number, rootH: number,
+  chromeW: number, chromeH: number): Size2 {
+  if (rootW <= 0 || rootH <= 0 || chromeW < 0 || chromeH < 0) {
+    return { w: 0, h: 0 };
+  }
+  const w: number = rootW - chromeW;
+  const h: number = rootH - chromeH;
+  return (w > 0 && h > 0) ? { w: w, h: h } : { w: 0, h: 0 };
+}
+
 /** SDK `colorSpaceManager.ColorSpace` 的数值 → 中文短名。
  *
  *  ⚠️ 平台边界：HarmonyOS 26 的 colorSpaceManager 只有

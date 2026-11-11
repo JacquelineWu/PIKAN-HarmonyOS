@@ -525,6 +525,66 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第五轮：拖窗口 resize 时预览图实时适配（2026-11-12）
+
+用户实机反馈：**「现在 resize windows 还是不会自动调整预览图大小」**。
+第四轮已经加了「尺寸变化 → 防抖重解码」，但真机毫无反应。逐条复核后确认这不是单点故障，
+而是 **4 个缺陷叠加**，任一存在都会让 resize 看起来失效：
+
+| # | 根因 | 为什么实机不生效 |
+|---|---|---|
+| A | `@Builder` 按值传宽度数值 | `previewImage(uri, token, this.frameW())` 第三个参数是**数值快照**。ArkUI 对 @Builder 普通参数不做响应式刷新：`canvasW` 变了，builder 内宽度仍停在旧值 → **图片框尺寸冻结**，这是「大小不变」的直接原因 |
+| B | 判据用「相邻两帧之差」 | `shouldReloadOnResize(oldW, oldH, w, h, 8)` 的 `oldW` 是上一帧的 `canvasW`。拖窗口每帧只变 1~3vp，**永远到不了 8vp**，累积位移被每帧赋值吃掉 → 重解码一次都不触发 |
+| C | 重解用防抖（debounce） | `armResizeReload()` 每次尺寸变化都 `clearTimeout` 重挂计时器；用户只要一直拖着，计时器永不到点，停手前一次都不会重解 |
+| D | 只赌深层组件的 `onAreaChange` | 预览 Stack 是 `layoutWeight(1)` 嵌在 Row 里，PC 窗口 resize 时不一定收到 `onAreaChange`；而根 Stack 是 `100%×100%` 直接跟窗口、尺寸必然变化，却没被利用 |
+
+### 修法
+
+1. **A — 去掉 @Builder 的数值参数**：签名改为 `previewImage(uri, token, half: boolean)` /
+   `rightPageImage(uri, half: boolean)`，`half` 只是静态布尔（并排两页 `true`、单页 `false`）。
+   宽度在 builder **内部**调 `this.viewBoxW(half)`（`= this.frameW() * (half ? 0.5 : 1)`），
+   响应式依赖直接挂在 `@State canvasW` 上，不再经过按值参数；
+   `frameW()/frameH()` 的旋转 90°/270° 宽高互换语义原样保留。
+2. **B — 改成累积差**：新增 `lastReloadW/H`，在 `armResizeReload()` 与
+   `refreshForCanvasResize()` 里记「本次重解用的画布」，判据改为
+   `shouldReloadOnResize(this.lastReloadW, this.lastReloadH, w, h, RESIZE_MIN_DELTA_PX)`。
+   首帧 `0` → 纯函数返回 true，基准自然建立。
+3. **C — 防抖改节流**：`armResizeReload()` 开头 `if (this.resizeReloadTimer !== -1) return;`，
+   拖动中每 `RESIZE_RELOAD_THROTTLE_MS = 140ms` 按当时画布重解一次，最后一帧后由累积判据补最终尺寸。
+   常量从 `RESIZE_RELOAD_DEBOUNCE_MS` 改名，避免误导。
+4. **D — 根 Stack 也挂 `onAreaChange`**：新增 `ViewPlan.canvasFromRootOf(rootW, rootH, chromeW, chromeH)`。
+   首帧测出固定栏偏移 `chrome = 根尺寸 - 画布尺寸`（左栏 + 顶栏 + 状态栏），
+   之后任一次根尺寸变化都精确反推新画布；基准由两处回调共同维护（谁先到都行），
+   `setFull()` 进出全屏时置 `-1` 重新测量（栏结构变了）。纯函数对「chrome 未就绪 /
+   根尺寸非正 / 结果非正」一律返回 `{w:0,h:0}`，调用方跳过，**绝不把 0 设进 `.width()`**。
+5. **尺寸读取归一化**：`Area.width/height` 是 `Length`（个别机型给 `'123vp'` 字符串），
+   改用 `Number(newV.width)` + `w > 0 && w === w` 过滤 NaN，避免整段回调被静默跳过。
+
+> 布局层（`@State canvasW/H` → `.width()`/`.height()` + `objectFit(Contain)`）本来就实时；
+> 上述 2/3/4 补的是**按新画布档位重新解码**，否则只是把旧小图拉大（发虚 / 锯齿）。
+
+### 验证
+
+`632 → 644/644 通过`（新增 5 例 `canvasFromRootOf` 纯函数 + 7 例静态契约，修正 4 条过时断言）。
+`git diff --check` 干净，三个源码文件括号计数与 HEAD 增量全 0。版本仍 `1.0.7`。
+
+## 第四轮：ESC 对齐双击 / 全量缓存并发预解码（2026-11-11）
+
+同批落地的另两项（第 2 项 resize 已由上一节第五轮重修）：
+
+1. **ESC 与双击完全一致**：`onKey` 的 `KEYCODE_ESCAPE` 由单独 `setFull(false)` 改为
+   `toggleFull()`，与 F11 / 双击画布 / 左栏双击走同一入口。真全屏
+   （`ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER`）下 ESC 常被窗口管理器先消费，
+   APP 收不到按键；因此 `onAreaChange` 里加「全屏画布相对基准明显缩小 → 自愈 `setFull(false)`」，
+   由 `shouldExitFullOnResize()` 判定，`FULL_SELF_HEAL_GUARD_MS = 900` 稳定期避开
+   maximize/layout 异步过渡抖动。退出时 `preFull*` 八项快照逐项还原完整界面。
+2. **全量缓存 + 载入即并发预解码**：`PRELOAD_ALL = true` 时 `schedulePreload()` 走
+   `startAllPreload()`，`fullPreloadIndex()` 一次生成整库顺序，`preloadConcurrencyOf()` /
+   `preloadBatchOf()` 受控并发分批解码，整批落地后 `PRELOAD_ALL_YIELD_MS` 让出主线程；
+   位置变化不再 `preloadSeq++` 打断链，只有换数据源由 `clearPreviews()` 自增 `allSeq` 作废旧批次。
+   `fullCacheTargetOf()` 与 `preloadSaturated()` 保留 20000 张 / 1GB 双硬闸，
+   **ro1 的 `bulkIoAllowed(restoreMode)` 总闸门绝不绕过**（历史上启动冻结的真因就是批量同步 IO）。
+
 ## 左右页统一最高画质：修正「左边比右边差」（2026-11-11 第三轮）
 
 用户实机反馈：**「左边显示效果比较右边差，修正为一样，要最好画质」**。
@@ -678,7 +738,10 @@ DevEco Studio 编译由用户侧完成。
 按钮 / 版本 / 防冻结闸门回归），`git diff --check` 干净。
 按约定**未编译 HAP / 未放桌面 / 未升版本（仍 1.0.7）/ 未 push**，DevEco Studio 编译由用户侧完成。
 
-## 尽量缓存前后 100 张图（2026-11-11）
+## 尽量缓存前后 100 张图（2026-11-11，历史记录）
+
+> ⚠️ 本节是**历史记录**：同日第四轮已改为「全量尽力缓存 + 载入并发预解码」（见上文《第四轮》）。
+> `PRELOAD_ALL = false` 时这条「前后各 100」的窗口链仍作为回退保留，代码与常量都还在。
 
 按用户「尽量缓存前后 100 张图」把预载窗口由**前后各 50** 扩到**前后各 100**：
 

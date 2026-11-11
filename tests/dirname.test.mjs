@@ -13,13 +13,17 @@
  * 同日末的「预览右下角只显示缓存数量 + 缩放百分比」，
  * 以及「真全屏 / 最高画质 resample / ICC·HDR·EXIF 旋转」，
  * 以及同日第二轮 5 项实机修正（全屏放大 / ESC 还原 / 右页锯齿 / hover 无档案名 / 梅花间竹列表），
- * 以及第三轮「左边显示比右边差 → 左右页统一最高画质」。
+ * 以及第三轮「左边显示比右边差 → 左右页统一最高画质」，
+ * 以及第四轮「ESC 对齐双击 / resize 实时适配 / 全量缓存并发预解码加速滚轮」，
+ * 以及第五轮「resize 实机仍不生效 → @Builder 参数 / 累积阈值 / 节流 / 根容器兜底」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf, upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
-import { preloadWindowSize, preloadOrder, preloadSaturated } from '../entry/src/main/ets/common/PreloadBudget.ts';
+import { preloadWindowSize, preloadOrder, preloadSaturated,
+  fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
+  shouldResetPreloadChain, fullCacheTargetOf } from '../entry/src/main/ets/common/PreloadBudget.ts';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, FLUSH_SYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   upButtonEnabled, RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed,
@@ -28,6 +32,7 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, F
 import { PERSIST_SKIP, PERSIST_ACTIVATE, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../entry/src/main/ets/common/PersistPlan.ts';
 import { exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf, displayEdgeOf,
+  shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
   colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../entry/src/main/ets/common/ViewPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
@@ -1291,7 +1296,7 @@ const SF0 = INDEX.indexOf('private setFull(on: boolean): void {');
 const SET_FULL_FN = INDEX.slice(SF0, INDEX.indexOf('fullscreenStepsOf(on)', SF0));
 const FB0 = INDEX.indexOf('private armCanvasReloadFallback(): void {');
 const FALLBACK_FN = INDEX.slice(FB0, FB0 + 600);
-const RP0 = INDEX.indexOf('rightPageImage(uri: string, w: number)');
+const RP0 = INDEX.indexOf('rightPageImage(uri: string, half: boolean)');
 const RIGHT_IMAGE_FN = INDEX.slice(RP0, RP0 + 900);
 
 check('① 双击进全屏：先存完整界面快照，再 fitToWindow 复位缩放平移',
@@ -1350,7 +1355,7 @@ check('⑤ 列表两行缝压到 1vp + 交替色格子（回归护栏）',
 
 console.log('--- 源码静态契约：左右页统一最高画质（第三轮：左边比右边差）---');
 check('displayEdgeOf 已 import，Index 有统一 displayEdge() 包装与 headroom 常量',
-  /displayEdgeOf, colorSpaceNameOf/.test(INDEX) &&
+  /displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize,/.test(INDEX) &&
   /const DISPLAY_HEADROOM: number = 1\.05;/.test(INDEX) &&
   /private displayEdge\(srcLong: number\): number \{[\s\S]{0,300}return displayEdgeOf\(this\.viewEdge\(\), this\.canvasW, this\.canvasH,[\s\S]{0,140}DISPLAY_HEADROOM, srcLong\);/.test(INDEX), true);
 check('左页 showNeed 委托同一个 displayEdge（旧的宽松 1.05 公式已删）',
@@ -1381,6 +1386,204 @@ check('左右页显示层仍是最高画质（High + autoResize(false) + HDR 三
   (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
   (INDEX.match(/\.interpolation\(ImageInterpolation\.High\)/g) || []).length >= 3 &&
   (INDEX.match(/\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/g) || []).length === 3, true);
+
+console.log('--- ViewPlan 纯函数：resize 实时重解 / 全屏沉浸自愈（第四轮）---');
+check('shouldReloadOnResize 尺寸明显变化才重解',
+  shouldReloadOnResize(800, 600, 900, 600, 8), true);
+check('shouldReloadOnResize 高度变化也算', shouldReloadOnResize(800, 600, 800, 660, 8), true);
+check('shouldReloadOnResize 滤掉 1~2vp 抖动', shouldReloadOnResize(800, 600, 803, 602, 8), false);
+check('shouldReloadOnResize 完全没变不重解', shouldReloadOnResize(800, 600, 800, 600, 8), false);
+check('shouldReloadOnResize 首次拿到有效尺寸要重解', shouldReloadOnResize(0, 0, 800, 600, 8), true);
+check('shouldReloadOnResize 新尺寸非正不重解', shouldReloadOnResize(800, 600, 0, 600, 8), false);
+check('shouldReloadOnResize minDelta 非正回退 1', shouldReloadOnResize(800, 600, 801, 600, 0), true);
+check('shouldExitFullOnResize 系统退出沉浸（画布明显缩小）→ 自愈',
+  shouldExitFullOnResize(true, 1920, 1080, 1280, 720, 0.85), true);
+check('shouldExitFullOnResize 只缩高度也判（OR，标题栏/dock 回来）',
+  shouldExitFullOnResize(true, 1920, 1080, 1900, 900, 0.85), true);
+check('shouldExitFullOnResize 小幅 resize 不误判',
+  shouldExitFullOnResize(true, 1920, 1080, 1900, 1060, 0.85), false);
+check('shouldExitFullOnResize 非全屏态不判',
+  shouldExitFullOnResize(false, 1920, 1080, 1280, 720, 0.85), false);
+check('shouldExitFullOnResize 基准未记录不判',
+  shouldExitFullOnResize(true, 0, 0, 1280, 720, 0.85), false);
+check('shouldExitFullOnResize ratio 非法回退 0.85',
+  shouldExitFullOnResize(true, 1920, 1080, 1280, 720, 0), true);
+
+console.log('--- PreloadBudget 纯函数：全量顺序 / 受控并发 / 链重置（第四轮）---');
+check('fullPreloadIndex 空图库 / 单张返回空', fullPreloadIndex(0, 0).length, 0);
+check('fullPreloadIndex 单张返回空', fullPreloadIndex(1, 0).length, 0);
+check('fullPreloadIndex 5 张从 cur=0 先近后远', fullPreloadIndex(5, 0).join(','), '1,4,2,3');
+check('fullPreloadIndex 长度恒为 total-1', fullPreloadIndex(9, 3).length, 8);
+check('fullPreloadIndex 每个非当前下标恰好一次',
+  new Set(fullPreloadIndex(9, 3)).size, 8);
+check('fullPreloadIndex 不含当前张', fullPreloadIndex(9, 3).includes(3), false);
+check('fullPreloadIndex 涵盖除当前外全部下标',
+  fullPreloadIndex(9, 3).slice().sort((a, b) => a - b).join(','), '0,1,2,4,5,6,7,8');
+check('fullPreloadIndex 环绕 cur=7 也完整', fullPreloadIndex(9, 7).join(','), '8,6,0,5,1,4,2,3');
+check('fullPreloadIndex 偶数 total 的 cur±total/2 去重',
+  new Set(fullPreloadIndex(6, 0)).size, 5);
+check('fullPreloadIndex cur 越界取模归位', fullPreloadIndex(5, 12).length, 4);
+check('preloadConcurrencyOf 空/单张为 1', preloadConcurrencyOf(0, 4), 1);
+check('preloadConcurrencyOf 小图库降并发', preloadConcurrencyOf(3, 4), 2);
+check('preloadConcurrencyOf 夹到 cap', preloadConcurrencyOf(100, 4), 4);
+check('preloadConcurrencyOf cap 非正为 1', preloadConcurrencyOf(100, 0), 1);
+check('preloadBatchOf 取前 conc 个并给下一批起点',
+  preloadBatchOf([1, 4, 2, 3, 0], 0, 2, new Set()).picks.join(',') + '|' +
+  preloadBatchOf([1, 4, 2, 3, 0], 0, 2, new Set()).nextFrom, '1,4|2');
+check('preloadBatchOf 跳过 done 下标',
+  preloadBatchOf([1, 4, 2, 3, 0], 0, 2, new Set([1])).picks.join(','), '4,2');
+check('preloadBatchOf 扫到尾 picks 为空',
+  preloadBatchOf([1, 4, 2], 3, 2, new Set()).picks.length, 0);
+check('preloadBatchOf from 越界安全', preloadBatchOf([1, 4, 2], 99, 2, new Set()).picks.length, 0);
+check('preloadBatchOf 全 done 时 nextFrom 走到尾',
+  preloadBatchOf([1, 4, 2], 0, 4, new Set([1, 4, 2])).nextFrom, 3);
+check('shouldResetPreloadChain 全量+仅位置变化 → 不重置（滚轮不打断）',
+  shouldResetPreloadChain(true, false), false);
+check('shouldResetPreloadChain 换数据源 → 必须重置', shouldResetPreloadChain(true, true), true);
+check('shouldResetPreloadChain 窗口模式位置变化 → 重置（旧行为）',
+  shouldResetPreloadChain(false, false), true);
+check('fullCacheTargetOf 空图库为 0', fullCacheTargetOf(0, 100), 0);
+check('fullCacheTargetOf 小图库取整库', fullCacheTargetOf(30, 100), 30);
+check('fullCacheTargetOf 夹到 cap', fullCacheTargetOf(500, 100), 100);
+check('fullCacheTargetOf cap 非正不夹', fullCacheTargetOf(500, 0), 500);
+
+console.log('--- 源码静态契约：① ESC 对齐双击 + 全屏沉浸自愈 ---');
+const ONKEY_FN = INDEX.slice(INDEX.indexOf('private onKey(event: KeyEvent): void {'),
+  INDEX.indexOf('// ------------------------------------------------------------------\n  // UI 片段',
+    INDEX.indexOf('private onKey(event: KeyEvent): void {')));
+check('① ESC 与双击/F11 同走 toggleFull()（不再单独 setFull(false)）',
+  /case KeyCode\.KEYCODE_ESCAPE:[\s\S]{0,220}if \(this\.fullscreen\) \{[\s\S]{0,220}this\.toggleFull\(\);/.test(ONKEY_FN) &&
+  /this\.toggleFull\(\);/.test(ONKEY_FN) &&
+  /case KeyCode\.KEYCODE_F11:\s*this\.toggleFull\(\);/.test(ONKEY_FN), true);
+check('① onAreaChange 全屏态画布缩小 → 自愈 setFull(false) 恢复完整界面',
+  /shouldExitFullOnResize\(this\.fullscreen, this\.fullCanvasW, this\.fullCanvasH, w, h,\s*FULL_EXIT_SHRINK_RATIO\)/.test(INDEX) &&
+  /this\.setFull\(false\);\s*return;/.test(INDEX), true);
+check('① 全屏画布基准：进全屏清零并记时刻、期间取最大、退出清零',
+  /private fullCanvasW: number = 0;/.test(INDEX) &&
+  /private fullEnterAt: number = 0;/.test(INDEX) &&
+  /this\.fullCanvasW = 0;\s*this\.fullCanvasH = 0;\s*this\.fullEnterAt = Date\.now\(\);/.test(SET_FULL_FN) &&
+  /this\.fullEnterAt = 0;/.test(SET_FULL_FN) &&
+  /this\.fullCanvasW = Math\.max\(this\.fullCanvasW, w\);/.test(INDEX), true);
+check('① 系统退沉浸自愈带稳定期保护（避免进全屏异步抖动被误踢出）',
+  /const healReady: boolean = this\.fullEnterAt > 0 &&\s*\(Date\.now\(\) - this\.fullEnterAt\) > FULL_SELF_HEAL_GUARD_MS;/.test(INDEX) &&
+  /if \(changed && healReady &&/.test(INDEX), true);
+check('① 阈值 / 稳定期 / resize 常量就位',
+  /const FULL_EXIT_SHRINK_RATIO: number = 0\.92;/.test(INDEX) &&
+  /const FULL_SELF_HEAL_GUARD_MS: number = 900;/.test(INDEX) &&
+  /const RESIZE_RELOAD_THROTTLE_MS: number = 140;/.test(INDEX) &&
+  /const RESIZE_MIN_DELTA_PX: number = 8;/.test(INDEX), true);
+
+console.log('--- 源码静态契约：② resize 实时适配画布 ---');
+check('② onAreaChange 用「累积差」判据重解（不再拿相邻帧差，拖窗口每帧只变 1~3vp 会永远不触发）',
+  /\} else if \(changed &&\s*shouldReloadOnResize\(this\.lastReloadW, this\.lastReloadH, w, h, RESIZE_MIN_DELTA_PX\)\) \{[\s\S]{0,300}this\.armResizeReload\(\);/.test(INDEX) &&
+  /private lastReloadW: number = 0;/.test(INDEX) &&
+  /this\.lastReloadW = this\.canvasW;\s*this\.lastReloadH = this\.canvasH;/.test(INDEX), true);
+check('② pendingReload 立即重解仍保留，并清掉 resize 防抖避免重复解码',
+  /if \(changed && this\.pendingReload\) \{[\s\S]{0,220}this\.clearResizeReload\(\);\s*this\.refreshForCanvasResize\(\);/.test(INDEX), true);
+const AR0 = INDEX.indexOf('private armResizeReload(): void {');
+const ARM_RESIZE_FN = INDEX.slice(AR0, AR0 + 400);
+check('② armResizeReload 改成节流（已有计时器不重挂，拖动中每 140ms 重解一次）',
+  /if \(this\.resizeReloadTimer !== -1\) \{\s*return;/.test(ARM_RESIZE_FN) &&
+  !/this\.clearResizeReload\(\);\s*this\.resizeReloadTimer = setTimeout/.test(ARM_RESIZE_FN) &&
+  /this\.refreshForCanvasResize\(\);\s*\}, RESIZE_RELOAD_THROTTLE_MS\);/.test(ARM_RESIZE_FN) &&
+  /this\.loadViewNow\(uri, token\);/.test(RESIZE_FN), true);
+check('② resize 计时器在 aboutToDisappear 清理（不泄漏）',
+  /private clearResizeReload\(\): void \{/.test(INDEX) &&
+  /this\.clearCanvasReloadFallback\(\);\s*this\.clearResizeReload\(\);/.test(INDEX), true);
+
+console.log('--- 源码静态契约：③ 全量缓存 + 载入并发预解码 + 滚轮加速 ---');
+check('③ PRELOAD_ALL 开关与全量/并发/让出常量',
+  /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
+  /const PRELOAD_ALL_CAP: number = 20000;/.test(INDEX) &&
+  /const PRELOAD_CONCURRENCY: number = 4;/.test(INDEX) &&
+  /const PRELOAD_ALL_YIELD_MS: number = 0;/.test(INDEX), true);
+check('③ schedulePreload 按 PRELOAD_ALL 分流，且守住 ro1 只读名单态闸门',
+  /if \(!bulkIoAllowed\(this\.restoreMode\)\) \{[\s\S]{0,140}if \(PRELOAD_ALL\) \{\s*this\.startAllPreload\(\);\s*return;/.test(INDEX), true);
+check('③ 全量链用整库顺序 + 受控并发批次',
+  /private startAllPreload\(\): void \{/.test(INDEX) &&
+  /this\.allOrder = fullPreloadIndex\(n, this\.cur\);/.test(INDEX) &&
+  /const conc: number = preloadConcurrencyOf\(n, PRELOAD_CONCURRENCY\);/.test(INDEX) &&
+  /const batch: PreloadBatch = preloadBatchOf\(this\.allOrder, this\.allFrom, conc, this\.allDone\);/.test(INDEX), true);
+check('③ 整批落地才让出主线程灌下一批（不同步堆叠 openSync）',
+  /private pumpAll\(seq: number\): void \{/.test(INDEX) &&
+  /private onAllDecoded\(/.test(INDEX) &&
+  /this\.allActive <= 0/.test(INDEX) &&
+  /this\.pumpAll\(seq\);[\s\S]{0,80}PRELOAD_ALL_YIELD_MS/.test(INDEX), true);
+check('③ 滚轮/翻页不打断链：allBusy + shouldResetPreloadChain 短路',
+  /if \(this\.allBusy && !shouldResetPreloadChain\(PRELOAD_ALL, false\)\) \{\s*return;/.test(INDEX) &&
+  /if \(this\.allComplete\) \{\s*return;/.test(INDEX), true);
+check('③ 预算收工判据用全量容量（防「解→淘汰→再解」死循环 / 防 OOM）',
+  /const cap: number = fullCacheTargetOf\(n, PRELOAD_ALL_CAP\);/.test(INDEX) &&
+  /preloadSaturated\(this\.previews\.length, this\.preloadBytes, cap, PRELOAD_MAX_BYTES\)/.test(INDEX), true);
+check('③ pushPreview 容量改用 cacheCap()，PRELOAD_MAX_BYTES 仍是最终硬闸',
+  /private cacheCap\(\): number \{[\s\S]{0,200}fullCacheTargetOf\(this\.items\.length, PRELOAD_ALL_CAP\) : PRELOAD_COUNT/.test(INDEX) &&
+  /while \(\(this\.previews\.length > this\.cacheCap\(\) \|\| this\.preloadBytes > PRELOAD_MAX_BYTES\)/.test(INDEX), true);
+check('③ 换数据源 clearPreviews 作废旧批次并允许重新铺满',
+  /this\.allSeq\+\+;\s*this\.allBusy = false;\s*this\.allComplete = false;/.test(INDEX) &&
+  /this\.allOrder = \[\];/.test(INDEX) && /this\.allDone\.clear\(\);/.test(INDEX), true);
+check('③ 解码失败进黑名单（不再无限重试同一张）',
+  /this\.failed\.add\(uri\);\s*this\.probeFail\+\+;/.test(INDEX), true);
+check('③ 换源时旧解码结果释放，不盖到新数据源',
+  /if \(seq !== this\.allSeq\) \{[\s\S]{0,260}entry\.px\.release\(\);/.test(INDEX), true);
+check('③ 回退路径仍在（PRELOAD_ALL=false 可用旧窗口链）',
+  /const order: number\[\] = preloadOrder\(backSpan, fwdSpan\)/.test(INDEX) &&
+  /this\.evictOutside\(\);/.test(INDEX) &&
+  /const win: Set<string> = this\.windowUris\(\)/.test(INDEX), true);
+check('回归护栏：全量缓存也未拆防冻结 / 按钮 / 版本 / 最高画质',
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8 &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /const PRELOAD_MAX_BYTES: number = 1024 \* 1024 \* 1024;/.test(INDEX) &&
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3, true);
+
+console.log('--- ViewPlan 纯函数：根容器尺寸反推画布（第五轮 resize 兜底）---');
+check('canvasFromRootOf 普通态：根尺寸减去固定栏偏移',
+  JSON.stringify(canvasFromRootOf(1600, 900, 300, 80)) === JSON.stringify({ w: 1300, h: 820 }), true);
+check('canvasFromRootOf 全屏态 chrome=0 → 画布等于根尺寸',
+  JSON.stringify(canvasFromRootOf(1920, 1080, 0, 0)) === JSON.stringify({ w: 1920, h: 1080 }), true);
+check('canvasFromRootOf chrome 未就绪（<0）返回 0 尺寸',
+  JSON.stringify(canvasFromRootOf(1600, 900, -1, -1)) === JSON.stringify({ w: 0, h: 0 }), true);
+check('canvasFromRootOf 根尺寸非正返回 0 尺寸',
+  JSON.stringify(canvasFromRootOf(0, 0, 300, 80)) === JSON.stringify({ w: 0, h: 0 }), true);
+check('canvasFromRootOf 结果非正返回 0 尺寸（绝不把 0 设进画布）',
+  JSON.stringify(canvasFromRootOf(200, 900, 300, 80)) === JSON.stringify({ w: 0, h: 0 }), true);
+
+console.log('--- 源码静态契约：第五轮「resize 实机仍不生效」4 个叠加根因 ---');
+check('⑤ 根因 A：@Builder 不再按值传宽度数值（改 half 布尔 + builder 内直接读 @State）',
+  /previewImage\(uri: string, token: number, half: boolean\)/.test(INDEX) &&
+  /rightPageImage\(uri: string, half: boolean\)/.test(INDEX) &&
+  /private viewBoxW\(half: boolean\): number \{\s*return this\.frameW\(\) \* \(half \? 0\.5 : 1\);/.test(INDEX) &&
+  !/this\.previewImage\(this\.curItem\(\)!\.uri, this\.curToken, this\.frameW\(\)/.test(INDEX) &&
+  (INDEX.match(/\.width\(this\.viewBoxW\(half\)\)/g) || []).length >= 6, true);
+check('⑤ 根因 A：并排两页传 true、单页传 false',
+  /this\.previewImage\(this\.curItem\(\)!\.uri, this\.curToken, true\)/.test(INDEX) &&
+  /this\.rightPageImage\(this\.items\[this\.spreadB\]\.uri, true\)/.test(INDEX) &&
+  /this\.previewImage\(this\.curItem\(\)!\.uri, this\.curToken, false\)/.test(INDEX), true);
+check('⑤ 根因 B：Area 尺寸用 Number 归一化，NaN / 0 不进画布',
+  /const w: number = Number\(newV\.width\);/.test(INDEX) &&
+  /const h: number = Number\(newV\.height\);/.test(INDEX) &&
+  /if \(w > 0 && h > 0 && w === w && h === h\)/.test(INDEX), true);
+check('⑤ 根因 C：根 Stack 也挂 onAreaChange，用 chrome 偏移反推画布（不赌深层回调）',
+  /canvasFromRootOf,/.test(INDEX) &&
+  /const box: Size2 = canvasFromRootOf\(rw, rh, this\.chromeW, this\.chromeH\);/.test(INDEX) &&
+  /private chromeW: number = -1;/.test(INDEX) &&
+  /private lastRootW: number = 0;/.test(INDEX) &&
+  /\.onAreaChange\(\(o: Area, n: Area\)/.test(INDEX) &&
+  /this\.canvasW = box\.w;\s*this\.canvasH = box\.h;\s*this\.armResizeReload\(\);/.test(INDEX), true);
+check('⑤ 根因 C：栏偏移基准由两处回调共同维护，进出全屏重置',
+  /this\.chromeW = this\.lastRootW - w;/.test(INDEX) &&
+  /this\.chromeW = rw - this\.canvasW;/.test(INDEX) &&
+  /this\.chromeW = -1;\s*this\.chromeH = -1;/.test(INDEX), true);
+check('⑤ 根因 D：节流而非防抖 + refreshForCanvasResize 也记累积基准',
+  /const RESIZE_RELOAD_THROTTLE_MS: number = 140;/.test(INDEX) &&
+  !/RESIZE_RELOAD_DEBOUNCE_MS/.test(INDEX) &&
+  /this\.lastReloadW = this\.canvasW;\s*this\.lastReloadH = this\.canvasH;/.test(INDEX), true);
+check('⑤ 回归护栏：最高画质三处齐配 / fitToWindow / 全屏快照 / 全量预载 / 版本未动',
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
+  /this\.fitToWindow\(\);/.test(INDEX) &&
+  /this\.hasFullSnapshot = true;/.test(INDEX) &&
+  /if \(PRELOAD_ALL\) \{/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

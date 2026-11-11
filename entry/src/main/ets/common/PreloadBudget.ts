@@ -9,7 +9,89 @@
  *  历史上修过同一类问题：解码失败的图必须进 failed 黑名单）。
  *  用户要的是「**尽量**缓存前后 100 张」：窗口目标放宽，触到预算就收工，
  *  右下角角标显示真实驻留张数，不强行保证 201 张全驻留。
+ *  2026-11-11 第四轮：用户要「全量缓存到内存、载入时同时预解码、加快滚轮跳转」。
+ *  于是新增「全量顺序 / 受控并发批次 / 链是否重置」三件纯计算，供 Index.ets 的
+ *  全量预载链使用；旧窗口链（前后各 100）保留为 PRELOAD_ALL=false 的回退路径。
  */
+
+/** 全量预解码的遍历顺序（**绝对下标**，环绕，先近后远、前后交替，不含当前张）。
+ *
+ *  与 `preloadOrder`（相对 k，只覆盖窗口）不同：全量模式要把整个图库铺满，
+ *  所以用绝对下标去重；`cur±k` 环绕到同一张时只留一次（total 为偶数、k=total/2 时会出现）。
+ *  结果长度恒为 `total-1`，每个非当前下标恰好出现一次 —— 不会重复解码、不会漏图。 */
+export function fullPreloadIndex(total: number, cur: number): number[] {
+  const out: number[] = [];
+  if (total <= 1) {
+    return out;
+  }
+  const seen: Set<number> = new Set<number>();
+  const c: number = ((cur % total) + total) % total;
+  const span: number = total - 1;
+  for (let k = 1; k <= span; k++) {
+    const fwd: number = (c + k) % total;
+    const back: number = ((c - k) % total + total) % total;
+    if (!seen.has(fwd)) {
+      seen.add(fwd);
+      out.push(fwd);
+    }
+    if (!seen.has(back)) {
+      seen.add(back);
+      out.push(back);
+    }
+    if (out.length >= span) {
+      break;
+    }
+  }
+  return out;
+}
+
+/** 受控并发度：不是「无限同时解码」——`decodePx` 里的 `fs.openSync` 是同步跨进程调用，
+ *  一次并发几百个会把主线程打满（历史 appfreeze 的成因）。
+ *  图库小就自然降并发；cap 是硬上限，至少 1。 */
+export function preloadConcurrencyOf(total: number, cap: number): number {
+  if (total <= 1 || cap <= 0) {
+    return 1;
+  }
+  return Math.max(1, Math.min(cap, total - 1));
+}
+
+/** 从全量顺序里挑本批要解码的下标（跳过已缓存 / 已失败），并给出下一批起点。
+ *  done = 已就绪（缓存命中或解码失败）的绝对下标集合，由调用方按当前快照构建。 */
+export interface PreloadBatch {
+  picks: number[];
+  nextFrom: number;
+}
+export function preloadBatchOf(order: number[], from: number, conc: number,
+  done: Set<number>): PreloadBatch {
+  const picks: number[] = [];
+  let i: number = from < 0 ? 0 : from;
+  const n: number = conc > 0 ? conc : 1;
+  while (i < order.length && picks.length < n) {
+    if (!done.has(order[i])) {
+      picks.push(order[i]);
+    }
+    i++;
+  }
+  return { picks: picks, nextFrom: i };
+}
+
+/** 位置变化（含滚轮连翻）时是否要重置预载链。
+ *
+ *  旧实现每次 `go()` / `schedulePreload()` 都 `preloadSeq++`，滚轮连翻时链被反复打断、
+ *  每次都从「离最新位置最近的缺口」重新找起，前面解码白做 —— 这是滚轮跳读变慢的元凶。
+ *  全量模式下顺序是**固定铺满整库**的，与当前位置无关，所以仅位置变化不该重置；
+ *  只有「换数据源」必须作废旧链（旧 uri 已失效）。窗口模式维持原行为（窗口要跟着挪）。 */
+export function shouldResetPreloadChain(allMode: boolean, sourceChanged: boolean): boolean {
+  return sourceChanged || !allMode;
+}
+
+/** 全量缓存目标张数：整库，但夹在调用方给的容量上限内（内存 OOM 硬闸）。 */
+export function fullCacheTargetOf(total: number, cap: number): number {
+  if (total <= 0) {
+    return 0;
+  }
+  return cap > 0 ? Math.min(total, cap) : total;
+}
 
 /** 期望窗口张数：前 back + 当前 1 + 后 fwd，环绕且不超过图库总数。
  *  与 Index.ets 的 wrapIndex / windowUris 口径一致：span 先夹到 total-1，

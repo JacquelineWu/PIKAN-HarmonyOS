@@ -58,7 +58,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
   textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
-import { preloadWindowSize, preloadOrder, preloadSaturated } from '../common/PreloadBudget';
+import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
+  fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
+  shouldResetPreloadChain, fullCacheTargetOf } from '../common/PreloadBudget';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed, restoreProbeUris,
@@ -66,7 +68,8 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
 import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { ExifTransform, Size2, exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
-  displayEdgeOf, colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
+  displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
+  colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -220,6 +223,21 @@ const PRELOAD_QUANT: number = 256;
  *     （单张约 4.4MB，1GB 反而能装下整窗 201 张）—— 不要调低 PRELOAD_MIN_EDGE，
  *     档位小于屏幕实际像素会让每张命中缓存的图都得再解一次全清（切图卡顿老问题）。 */
 const PRELOAD_MAX_BYTES: number = 1024 * 1024 * 1024;
+/** 全量缓存模式（2026-11-11 第四轮，用户要求「全量缓存到内存、载入时同时预解码」）。
+ *  true = 预载顺序铺满整个图库（fullPreloadIndex），不再按「当前位置前后各 100」滑动窗口，
+ *         也不再 evictOutside() 淘汰窗口外的图；滚轮跳到任意一张都能命中缓存、瞬时上屏。
+ *  false = 回退到旧窗口链（preloadOrder / evictOutside），实机内存吃紧时可一键切回。
+ *  ⚠️ 全量是「尽力铺满」：PRELOAD_ALL_CAP / PRELOAD_MAX_BYTES 仍是防 OOM 的硬闸，
+ *     只读名单态（ro1）的 bulkIoAllowed 闸门也绝不绕过 —— 历史 appfreeze 的教训。 */
+const PRELOAD_ALL: boolean = true;
+/** 全量缓存的张数上限（与 SCAN_CAP 同量级）。超过就触顶收工，不无限吃内存。 */
+const PRELOAD_ALL_CAP: number = 20000;
+/** 载入时「同时预解码」的受控并发路数。
+ *  decodePx 里的 fs.openSync 是同步跨进程调用，一次并发几百个会把主线程打满（历史卡死成因），
+ *  故一批最多 PRELOAD_CONCURRENCY 张，整批落地后 setTimeout 让出主线程再灌下一批。 */
+const PRELOAD_CONCURRENCY: number = 4;
+/** 全量预载每批之间让出主线程的间隔（ms）。0 = 尽快但不堆叠同步 openSync。 */
+const PRELOAD_ALL_YIELD_MS: number = 0;
 /** 主视图解码：长边 = 画布长边 × 该系数，并夹在 [VIEW_EDGE_MIN, VIEW_EDGE_MAX] 内。
  *  系数取 1.5 而不是 2（Win64 版实测）：×2 时一张大图能解到 1.5 秒，
  *  而屏幕实际只需要约 1.0 倍像素 —— 多出来的既不显示又拖慢切图。 */
@@ -260,6 +278,23 @@ const FULLSCREEN_WINDOW_RETRY_MS: number = 120;
 /** 画布尺寸变化后 pendingReload 的兜底超时（ms）：
  *  窗口 API 若不产生 onAreaChange，也要按当前画布重解一次，别让标志永远留着。 */
 const CANVAS_RELOAD_FALLBACK_MS: number = 800;
+/** 普通拖窗口 resize 的重解**节流**间隔（ms）：拖动过程中每过这个间隔就按当前画布重解一次，
+ *  停手后最后那次也会重解。不能用防抖 —— 每帧尺寸变化都重挂计时器的话，
+ *  只要用户一直拖着，计时器永远不到点，重解一次都不会发生（第四轮实机失效原因之一）。
+ *  布局层由 @State 直接驱动本来就实时；这里补的是「按新画布档位重新解码」。 */
+const RESIZE_RELOAD_THROTTLE_MS: number = 140;
+/** resize 重解的最小累积尺寸变化（vp）：相对「上次真正重解时的画布」比较，
+ *  不能用相邻两帧之差（拖窗口每帧只变 1~3vp，永远够不到阈值）。 */
+const RESIZE_MIN_DELTA_PX: number = 8;
+/** 全屏态下画布缩到「全屏基准」的这个比例以下，判定系统已自行退出沉浸。
+ *  真全屏下 ESC 常被窗口管理器消费，APP 收不到按键；此时窗口会缩小，
+ *  据此自愈退出 APP 全屏态、恢复完整界面（与双击退出对齐）。
+ *  0.92 允许「只回来标题栏 / dock」这种小幅缩小；误判由 FULL_SELF_HEAL_GUARD_MS 稳定期挡住。 */
+const FULL_EXIT_SHRINK_RATIO: number = 0.92;
+/** 进全屏后的自愈稳定期（ms）：真全屏的 maximize / layout 是一连串异步 await，
+ *  过渡期画布尺寸会来回变，这段时间不做「缩小→退全屏」判定，避免刚进全屏就被误踢出来。
+ *  用户按 ESC 通常发生在进全屏很久之后，不受影响。 */
+const FULL_SELF_HEAL_GUARD_MS: number = 900;
 /** 预载命中后，停手多久才补一张全清（ms）。
  *  连续翻页时这一步会被下一切图作废，所以延迟执行能省掉大量无用解码。 */
 const UPGRADE_DELAY_MS: number = 250;
@@ -1412,6 +1447,27 @@ struct Index {
   private pendingReload: boolean = false;
   /** pendingReload 的兜底计时器：窗口 API 没产生 onAreaChange 时也要重解一次 */
   private canvasReloadTimer: number = -1;
+  /** 普通 resize 的节流计时器：拖动过程中每 RESIZE_RELOAD_THROTTLE_MS 重解一次 */
+  private resizeReloadTimer: number = -1;
+  /** resize 累积判据：上次**真正触发重解**时的画布尺寸（0 = 首帧还没重解过）。
+   *  ⚠️ 不能拿「上一帧尺寸」比：拖窗口每帧只变 1~3vp，永远够不到 8vp 阈值，
+   *     重解就一次都不会发生 —— 第四轮实机「resize 没反应」的主因之一。 */
+  private lastReloadW: number = 0;
+  private lastReloadH: number = 0;
+  /** 根 Stack（100%×100%，直接跟窗口）上一次的尺寸，以及由此测出的固定栏偏移
+   *  chrome = 根尺寸 - 预览画布尺寸（左栏 + 顶栏 + 状态栏）。
+   *  深层 layoutWeight(1) 的预览 Stack 在 PC 窗口 resize 时可能收不到 onAreaChange，
+   *  用根尺寸 - chrome 就能精确反推新画布尺寸，不赌深层回调。chrome < 0 = 基准未就绪。 */
+  private lastRootW: number = 0;
+  private lastRootH: number = 0;
+  private chromeW: number = -1;
+  private chromeH: number = -1;
+  /** 全屏期间的画布基准尺寸（取进入全屏后的最大值）。系统自行退出沉浸时画布会缩小，
+   *  与这个基准比较即可判定「该自动切回完整界面」，不依赖 APP 是否收到 ESC 按键。 */
+  private fullCanvasW: number = 0;
+  private fullCanvasH: number = 0;
+  /** 进全屏的时刻：稳定期内不做自愈判定，避开 maximize/layout 异步过渡期的尺寸抖动 */
+  private fullEnterAt: number = 0;
   /** 全屏时是否由我们主动最大化过窗口 —— 退出时才知道要不要 recover 回自由窗口 */
   private maximizedByUs: boolean = false;
   /** 进入全屏前的视图 / 界面状态快照：ESC 退出时要「切回之前的完整界面」，
@@ -1503,6 +1559,16 @@ struct Index {
   @State diagLine: string = '';
   private preloadSeq: number = 0;                     // 预载任务代号，切换图片时自增使旧链作废
   private preloadBusy: boolean = false;
+  // ---- 全量预载链（PRELOAD_ALL=true 时启用；与上面的窗口链互斥）----
+  private allSeq: number = 0;                        // 换数据源时自增，作废旧批次的回调
+  private allBusy: boolean = false;                  // 链是否在跑（位置变化不打断）
+  private allOrder: number[] = [];                   // 整库绝对下标顺序（先近后远、前后交替）
+  private allFrom: number = 0;                       // 下一批起点
+  private allActive: number = 0;                     // 本批还没落地的解码数
+  private allDone: Set<number> = new Set<number>();  // 已缓存 / 已失败的下标
+  /** 整库已铺满：滚轮 / 翻页时 schedulePreload() 直接 O(1) 返回，不再重建顺序或扫缓存。
+   *  只在换数据源（clearPreviews）时清零，resize 不清 —— 档位不足的条目由 showNeed 自动升级。 */
+  private allComplete: boolean = false;
   // ↓↓ 排查用计数器：只喂给 hilog，不参与任何逻辑判断。定位完可整块删掉。
   private probeTick: number = 0;   // 预载链跑过的轮数（一直涨 = 死循环）
   private probeFail: number = 0;   // 预载链累计解码失败次数
@@ -1588,6 +1654,7 @@ struct Index {
       this.applyWindowFullScreen(false, 0);
     }
     this.clearCanvasReloadFallback();
+    this.clearResizeReload();
   }
 
   // ------------------------------------------------------------------
@@ -2441,6 +2508,17 @@ struct Index {
 
   private frameH(): number {
     return (this.rot % 180) !== 0 ? this.canvasW : this.canvasH;
+  }
+
+  /** 预览图可用宽度（对开时每页占一半）。
+   *
+   *  ⚠️ 2026-11-12 第五轮：这个值**必须**在 @Builder 内部读取，不能当参数传进去。
+   *     ArkUI 的 @Builder 对普通参数按值传递，参数变化不会触发 builder 内部 UI 刷新；
+   *     原来 `previewImage(uri, token, this.frameW())` 的第三个参数是数值快照，
+   *     于是 canvasW 变了、宽度却还停在旧值 —— 拖窗口时「预览图大小不变」。
+   *     改成在 builder 内直接 `this.viewBoxW(half)`，依赖就挂在 @State canvasW 上了。 */
+  private viewBoxW(half: boolean): number {
+    return this.frameW() * (half ? 0.5 : 1);
   }
 
   /** objectFit=Contain 时图片相对可用框的缩放比 */
@@ -3397,11 +3475,17 @@ struct Index {
     return hit !== undefined ? Math.max(hit.w, hit.h) : 0;
   }
 
+  /** 缓存条目上限：全量模式下扩到整个图库（夹在 PRELOAD_ALL_CAP 内），
+   *  窗口模式沿用 PRELOAD_COUNT=216。PRELOAD_MAX_BYTES 始终是最终防 OOM 硬闸。 */
+  private cacheCap(): number {
+    return PRELOAD_ALL ? fullCacheTargetOf(this.items.length, PRELOAD_ALL_CAP) : PRELOAD_COUNT;
+  }
+
   /** 入缓存，并按「张数 + 总字节」双重上限淘汰最旧的 */
   private pushPreview(e: PreviewEntry): void {
     this.previews.push(e);
     this.preloadBytes += e.bytes;
-    while ((this.previews.length > PRELOAD_COUNT || this.preloadBytes > PRELOAD_MAX_BYTES) &&
+    while ((this.previews.length > this.cacheCap() || this.preloadBytes > PRELOAD_MAX_BYTES) &&
       this.previews.length > 1) {
       const old: PreviewEntry = this.previews[0];
       // 正在显示的不能淘汰：主视图 / 过渡层 / 对开右页，release 掉会让画面变黑/花屏
@@ -3547,6 +3631,14 @@ struct Index {
     this.rightToken++;        // 作废在途的右页解码回调，别让它把旧图盖回来
     this.rightPixelMap = undefined;
     this.releaseRightOwned(); // 自解码的右页不进缓存，单独释放
+    // 全量预载链：换数据源必须作废旧批次（旧 uri 已失效），并允许新源重新铺满。
+    this.allSeq++;
+    this.allBusy = false;
+    this.allComplete = false;
+    this.allOrder = [];
+    this.allFrom = 0;
+    this.allActive = 0;
+    this.allDone.clear();
   }
 
   /** 切到第 idx 张时调用。
@@ -3836,6 +3928,9 @@ struct Index {
     if (!bulkIoAllowed(this.restoreMode)) {
       return;
     }
+    // 本次重解用的就是当前画布，记成下一次 resize 的**累积判据**基准。
+    this.lastReloadW = this.canvasW;
+    this.lastReloadH = this.canvasH;
     const uri: string = this.items[this.cur].uri;
     this.curToken++;
     const token: number = this.curToken;
@@ -3870,6 +3965,33 @@ struct Index {
     }
   }
 
+  /** 普通拖窗口 resize 的**节流**重解：拖动过程中每 RESIZE_RELOAD_THROTTLE_MS 按当前画布重解一次。
+   *
+   *  2026-11-12 第五轮：原来用防抖（每次尺寸变化都 clearTimeout 重挂），
+   *  用户只要一直拖着，计时器永远不到点，重解一次都不会发生 —— 实机「resize 没反应」。
+   *  改成节流：已有计时器就不重挂，到点按**当时**的 canvasW/H 重解；拖动的最后一帧
+   *  之后还会再来一次尺寸回调，自然补上最终尺寸（配合累积判据不会漏）。
+   *  布局层由 @State 直接驱动本来就实时，这里补的是「按新画布档位重新解码」，
+   *  不每帧解码是为了避免拖窗口时反复解码大图把 UI 卡死。 */
+  private armResizeReload(): void {
+    if (this.resizeReloadTimer !== -1) {
+      return; // 节流：本轮已有重解排队，别重挂
+    }
+    this.lastReloadW = this.canvasW;
+    this.lastReloadH = this.canvasH;
+    this.resizeReloadTimer = setTimeout(() => {
+      this.resizeReloadTimer = -1;
+      this.refreshForCanvasResize();
+    }, RESIZE_RELOAD_THROTTLE_MS);
+  }
+
+  private clearResizeReload(): void {
+    if (this.resizeReloadTimer !== -1) {
+      clearTimeout(this.resizeReloadTimer);
+      this.resizeReloadTimer = -1;
+    }
+  }
+
   /** 预载档位：按画布尺寸动态取，向上量化到 PRELOAD_QUANT 的倍数。
    *  全屏时上限放宽到 FULLSCREEN_PRELOAD_MAX_EDGE（普通态 1536），让前后 100 张也跟着画布放大。
    *  ⚠️ 必须是 ceil 不是 floor：向下量化会让档位小于屏幕实际像素，命中缓存还得再解一次全清。 */
@@ -3879,11 +4001,19 @@ struct Index {
       FULLSCREEN_PRELOAD_MAX_EDGE);
   }
 
-  /** 启动后台预载。已在跑就只自增代号，让现有链自动跟到最新位置，避免并发多条链。 */
+  /** 启动后台预载。已在跑就只自增代号，让现有链自动跟到最新位置，避免并发多条链。
+   *
+   *  2026-11-11 第四轮：PRELOAD_ALL=true 时改走**全量并发链**（startAllPreload），
+   *  一次铺满整库、位置变化不打断；false 时保留旧「前后 100 张窗口链」作回退。 */
   private schedulePreload(): void {
-    // 只读名单态：不启动预载链（窗口最多 201 张，逐张 decodePx 全是死 uri）。
+    // 只读名单态：不启动预载链（逐张 decodePx 全是死 uri，会把主线程打满）。
+    // ⚠️ 这是 ro1 防冻结的总闸门，全量缓存也绝不绕过。
     if (!bulkIoAllowed(this.restoreMode)) {
       this.preloadBusy = false;
+      return;
+    }
+    if (PRELOAD_ALL) {
+      this.startAllPreload();
       return;
     }
     this.evictOutside(); // 先把窗口外的释放掉，位置一变就跟着挪，内存不随翻页累积
@@ -3893,6 +4023,111 @@ struct Index {
     }
     this.preloadBusy = true;
     this.preloadNext(this.preloadSeq);
+  }
+
+  /** 全量预载：一次生成整库顺序，按受控并发一批批解码（载入时即开始，滚轮跳到哪都命中）。
+   *  位置变化（滚轮 / 翻页）不重置链 —— 固定顺序与当前位置无关，链继续铺就是最快；
+   *  只有换数据源由 clearPreviews() 自增 allSeq 作废旧批次。 */
+  private startAllPreload(): void {
+    // 链已在跑且只是位置变化 → 不打断、不重排（shouldResetPreloadChain 给出判据）。
+    if (this.allBusy && !shouldResetPreloadChain(PRELOAD_ALL, false)) {
+      return;
+    }
+    if (this.allComplete) {
+      return; // 整库已铺满：翻页 O(1) 短路
+    }
+    const n: number = this.items.length;
+    if (n <= 1) {
+      return;
+    }
+    const cap: number = fullCacheTargetOf(n, PRELOAD_ALL_CAP);
+    if (preloadSaturated(this.previews.length, this.preloadBytes, cap, PRELOAD_MAX_BYTES)) {
+      return; // 预算触顶收工，防「解→淘汰→再解」死循环
+    }
+    this.allOrder = fullPreloadIndex(n, this.cur);
+    this.allFrom = 0;
+    this.allDone = new Set<number>();
+    // 已经缓存 / 已判失败的先标 done，避免重复解码
+    for (let i = 0; i < n; i++) {
+      const u: string = this.items[i].uri;
+      if (this.previewEntry(u) !== undefined || this.failed.has(u)) {
+        this.allDone.add(i);
+      }
+    }
+    this.allBusy = true;
+    const seq: number = ++this.allSeq;
+    this.pumpAll(seq);
+  }
+
+  /** 一批最多 PRELOAD_CONCURRENCY 张同时解码；整批落地后 setTimeout 让出主线程再灌下一批。
+   *  受控并发是关键：decodePx 的 fs.openSync 是同步跨进程调用，一次并发几百个会卡死主线程。 */
+  private pumpAll(seq: number): void {
+    if (seq !== this.allSeq) {
+      this.allBusy = false;
+      return; // 换数据源：旧批次作废
+    }
+    if (!bulkIoAllowed(this.restoreMode)) {
+      this.allBusy = false;
+      return;
+    }
+    const n: number = this.items.length;
+    const cap: number = fullCacheTargetOf(n, PRELOAD_ALL_CAP);
+    if (preloadSaturated(this.previews.length, this.preloadBytes, cap, PRELOAD_MAX_BYTES)) {
+      this.allBusy = false;
+      hilog.info(DOMAIN, TAG, 'all preload: budget reached, cached %{public}d', this.previews.length);
+      return;
+    }
+    const conc: number = preloadConcurrencyOf(n, PRELOAD_CONCURRENCY);
+    const batch: PreloadBatch = preloadBatchOf(this.allOrder, this.allFrom, conc, this.allDone);
+    this.allFrom = batch.nextFrom;
+    if (batch.picks.length === 0) {
+      this.allBusy = false;
+      this.allComplete = true;
+      hilog.info(DOMAIN, TAG, 'all preload: complete, cached %{public}d/%{public}d',
+        this.previews.length, n);
+      return;
+    }
+    this.allActive = batch.picks.length;
+    const edge: number = this.preloadEdge();
+    for (let i = 0; i < batch.picks.length; i++) {
+      const idx: number = batch.picks[i];
+      const u: string = this.items[idx].uri;
+      this.decodeTo(u, edge)
+        .then((entry: PreviewEntry | undefined) => {
+          this.onAllDecoded(seq, idx, u, entry);
+        })
+        .catch(() => {
+          this.onAllDecoded(seq, idx, u, undefined);
+        });
+    }
+  }
+
+  /** 全量链单张解码落地：入缓存 / 记黑名单，整批收齐后让出主线程继续下一批。 */
+  private onAllDecoded(seq: number, idx: number, uri: string,
+    entry: PreviewEntry | undefined): void {
+    if (seq !== this.allSeq) {
+      if (entry !== undefined) {
+        try {
+          entry.px.release();
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'release stale all-preload skipped');
+        }
+      }
+      return; // 换源：旧结果丢弃，别盖到新数据源
+    }
+    this.allDone.add(idx);
+    if (entry !== undefined) {
+      this.pushPreview(entry);
+    } else {
+      this.failed.add(uri);
+      this.probeFail++;
+    }
+    this.allActive--;
+    if (this.allActive <= 0) {
+      setTimeout(() => {
+        this.pumpAll(seq);
+      }, PRELOAD_ALL_YIELD_MS);
+    }
   }
 
   /** 一张一张解码，每张之间用 setTimeout 让出主线程，避免卡住 UI */
@@ -4793,6 +5028,10 @@ struct Index {
     }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
+    // 全屏切换会整块隐藏 / 恢复顶栏、状态栏、左栏，固定栏偏移 chrome 已经失效，
+    // 置 -1 让下一轮 onAreaChange 重新测量，别拿旧偏移去反推画布尺寸。
+    this.chromeW = -1;
+    this.chromeH = -1;
     this.clearTopbarTimer();
     if (on) {
       // 进全屏：先把「之前的完整界面」逐项存档，ESC 退出时才能原样还原
@@ -4805,16 +5044,24 @@ struct Index {
       this.preFullFlipV = this.flipV;
       this.preFullStatus = this.status;
       this.preFullTopbar = this.topbarVisible;
+      // 全屏画布基准清零，交给 onAreaChange 记录进入全屏后的最大尺寸。
+      // 系统自行退出沉浸时画布会缩小，据此自愈切回完整界面（ESC 常被系统消费）。
+      this.fullCanvasW = 0;
+      this.fullCanvasH = 0;
+      this.fullEnterAt = Date.now();
       // 双击 / F11 进全屏：复位缩放与平移，objectFit(Contain) 会按放大后的画布
       // 把预览图铺满放大 —— 这就是「预览图案跟窗口大小一齐适配放大」。
       // 同时 refreshForCanvasResize() 按新画布重解（左右页都算），不发虚。
       this.fitToWindow();
       this.topbarVisible = false;
       this.status = '全屏 · Esc / F11 / 双击退出';
-    } else {
-      // ESC 退出：把进全屏前的视图状态、状态栏文案、顶栏可见性全部还原，
-      // 应用内三块栏本就由 if (!this.fullscreen) 恢复，窗口形态由 applyWindowFullScreen 还原。
-      if (this.hasFullSnapshot) {
+      } else {
+        // ESC 退出：把进全屏前的视图状态、状态栏文案、顶栏可见性全部还原，
+        // 应用内三块栏本就由 if (!this.fullscreen) 恢复，窗口形态由 applyWindowFullScreen 还原。
+        this.fullCanvasW = 0;
+        this.fullCanvasH = 0;
+        this.fullEnterAt = 0;
+        if (this.hasFullSnapshot) {
         this.zoom = this.preFullZoom;
         this.tx = this.preFullTx;
         this.ty = this.preFullTy;
@@ -5074,7 +5321,9 @@ struct Index {
         break;
       case KeyCode.KEYCODE_ESCAPE:
         if (this.fullscreen) {
-          this.setFull(false); // 全屏时 Esc 先退全屏（第一优先，避免误触直接退出）
+          // 2026-11-11 第四轮：ESC 与双击 / F11 **完全同一个入口** toggleFull()，
+          // 不再单独写 setFull(false) —— 两条路径分叉正是「ESC 效果跟双击不一样」的来源。
+          this.toggleFull();
         } else {
           this.quitApp();
         }
@@ -5118,7 +5367,7 @@ struct Index {
    *  （`const pm = this.viewPixelMap` 会报 "Only UI component syntax can be written here"），
    *  因此这里直接读状态字段、用 `!` 做非空断言。 */
   @Builder
-  previewImage(uri: string, token: number, w: number) {
+  previewImage(uri: string, token: number, half: boolean) {
     Stack() {
       if (this.viewPixelMap !== undefined) {
         Image(this.viewPixelMap!)          // 自解码结果：清晰，且一定是当前这张
@@ -5130,7 +5379,7 @@ struct Index {
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
-          .width(w)
+          .width(this.viewBoxW(half))
           .height(this.frameH())
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
       } else if (this.viewFailed) {
@@ -5142,7 +5391,7 @@ struct Index {
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
-          .width(w)
+          .width(this.viewBoxW(half))
           .height(this.frameH())
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
           .onComplete((ev) => {
@@ -5165,7 +5414,7 @@ struct Index {
           .objectFit(ImageFit.Contain)
           .interpolation(ImageInterpolation.Medium)
           .draggable(false)
-          .width(w)
+          .width(this.viewBoxW(half))
           .height(this.frameH())
           .scale({
             x: this.zoom * (this.flipH ? -1 : 1) * this.focusZoom(),
@@ -5175,7 +5424,7 @@ struct Index {
           .opacity(this.lowOpacity)
       }
     }
-    .width(w)
+    .width(this.viewBoxW(half))
     .height(this.frameH())
   }
 
@@ -5188,7 +5437,7 @@ struct Index {
    *  autoResize 默认为 true 时组件会按显示尺寸重新采样放大低分辨率图，正是锯齿来源。
    *  现在右页与左页用完全同一套画质属性 + 同一 viewEdge() 档位。 */
   @Builder
-  rightPageImage(uri: string, w: number) {
+  rightPageImage(uri: string, half: boolean) {
     Stack() {
       if (this.rightPixelMap !== undefined) {
         Image(this.rightPixelMap!)
@@ -5197,19 +5446,19 @@ struct Index {
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
-          .width(w)
+          .width(this.viewBoxW(half))
           .height(this.frameH())
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
       } else {
         // 右页还在解码：只占住这一半画布，不触发任何原图解码。
         // 底色与主预览区一致，视觉上就是「这一页还没到」，不会有上一对的残影。
         Column()
-          .width(w)
+          .width(this.viewBoxW(half))
           .height(this.frameH())
           .backgroundColor(CANVAS_BG)
       }
     }
-    .width(w)
+    .width(this.viewBoxW(half))
     .height(this.frameH())
   }
 
@@ -5417,13 +5666,13 @@ struct Index {
             Column() {
               if (this.spreadB >= 0 && this.spreadB < this.items.length) {
                 Row() {
-                  this.previewImage(this.curItem()!.uri, this.curToken, this.frameW() / 2)
-                  this.rightPageImage(this.items[this.spreadB].uri, this.frameW() / 2)
+                  this.previewImage(this.curItem()!.uri, this.curToken, true)
+                  this.rightPageImage(this.items[this.spreadB].uri, true)
                 }
                 .justifyContent(FlexAlign.Center)
                 .alignItems(VerticalAlign.Center)
               } else {
-                this.previewImage(this.curItem()!.uri, this.curToken, this.frameW())
+                this.previewImage(this.curItem()!.uri, this.curToken, false)
               }
             }
             .width('100%')
@@ -5620,18 +5869,50 @@ struct Index {
         .backgroundColor(CANVAS_BG)
         .clip(true)
         .onAreaChange((oldV: Area, newV: Area) => {
-          const w = newV.width as number;
-          const h = newV.height as number;
-          if (w > 0 && h > 0) {
+          // Area.width/height 是 Length：正常给 number(vp)，个别机型给 '123vp' 之类的字符串。
+          // 用 Number() 归一化；NaN / 0 一律跳过（绝不把 0 设进画布，那会把图片压没）。
+          const w: number = Number(newV.width);
+          const h: number = Number(newV.height);
+          if (w > 0 && h > 0 && w === w && h === h) {
             const changed: boolean = (w !== this.canvasW) || (h !== this.canvasH);
+            // ① 系统自行退出沉浸（真全屏下 ESC 常被窗口管理器先消费，APP 收不到按键）：
+            //    全屏态画布相对基准明显缩小 → 自动切回完整界面，与双击退出完全对齐。
+            const healReady: boolean = this.fullEnterAt > 0 &&
+              (Date.now() - this.fullEnterAt) > FULL_SELF_HEAL_GUARD_MS;
+            if (changed && healReady &&
+              shouldExitFullOnResize(this.fullscreen, this.fullCanvasW, this.fullCanvasH, w, h,
+                FULL_EXIT_SHRINK_RATIO)) {
+              this.canvasW = w;
+              this.canvasH = h;
+              this.setFull(false);
+              return;
+            }
             this.canvasW = w;
             this.canvasH = h;
-            // 进出全屏后画布尺寸变了：按新尺寸立刻重解（不走升级延迟），
+            // ② 同步「根尺寸 → 画布」的固定栏偏移：根 Stack 的 onAreaChange 兜底要用。
+            //    全屏 / 收起左栏会改变栏结构，届时 chrome 由 setFull() 重置后在这里重建。
+            if (this.lastRootW > 0 && this.lastRootH > 0) {
+              this.chromeW = this.lastRootW - w;
+              this.chromeH = this.lastRootH - h;
+            }
+            // ③ 记录全屏期间的画布基准（取最大值），供 ① 判定「缩小」；纯比对，不触发解码。
+            if (this.fullscreen && (w > this.fullCanvasW || h > this.fullCanvasH)) {
+              this.fullCanvasW = Math.max(this.fullCanvasW, w);
+              this.fullCanvasH = Math.max(this.fullCanvasH, h);
+            }
+            // ④ 进出全屏后画布尺寸变了：按新尺寸立刻重解（不走升级延迟），
             // 否则沿用旧档位的 PixelMap 只是把小图拉大 —— 全屏画质会明显发虚。
             if (changed && this.pendingReload) {
               this.pendingReload = false;
               this.clearCanvasReloadFallback();
+              this.clearResizeReload();
               this.refreshForCanvasResize();
+            } else if (changed &&
+              shouldReloadOnResize(this.lastReloadW, this.lastReloadH, w, h, RESIZE_MIN_DELTA_PX)) {
+              // ⑤ 普通拖窗口 resize：**累积差**判据 + 节流重解。
+              //    跟「上次真正重解时的画布」比，而不是跟上一帧比 —— 每帧只变 1~3vp
+              //    也能累积到阈值；防抖改成节流，拖动过程中就会持续按新画布重解。
+              this.armResizeReload();
             }
           }
         })
@@ -5740,6 +6021,35 @@ struct Index {
     }
     .width('100%')
     .height('100%')
+    .onAreaChange((o: Area, n: Area) => {
+      // 根 Stack 是 100%×100%，直接跟窗口尺寸，PC 拖窗口时它**必然**变化；
+      // 深层 layoutWeight(1) 的预览 Stack 却不一定收到 onAreaChange。
+      // 用首帧测出的固定栏偏移 chrome 精确反推新画布，作为 resize 的第二数据源。
+      const rw: number = Number(n.width);
+      const rh: number = Number(n.height);
+      if (rw <= 0 || rh <= 0 || rw !== rw || rh !== rh) {
+        return;
+      }
+      const changed: boolean = (rw !== this.lastRootW) || (rh !== this.lastRootH);
+      this.lastRootW = rw;
+      this.lastRootH = rh;
+      // 两个回调谁先到不确定：根先到时直接用当前画布反算一次基准，别等下一次预览回调。
+      if (this.chromeW < 0 && this.canvasW > 0 && this.canvasH > 0 &&
+        rw >= this.canvasW && rh >= this.canvasH) {
+        this.chromeW = rw - this.canvasW;
+        this.chromeH = rh - this.canvasH;
+      }
+      if (!changed || this.chromeW < 0 || this.chromeH < 0) {
+        return; // 基准未就绪（首帧 / 刚进出全屏），等预览 Stack 那边重建
+      }
+      const box: Size2 = canvasFromRootOf(rw, rh, this.chromeW, this.chromeH);
+      if (box.w <= 0 || box.h <= 0 || (box.w === this.canvasW && box.h === this.canvasH)) {
+        return; // 预览 Stack 已经报过同样的尺寸，别重复触发重解
+      }
+      this.canvasW = box.w;
+      this.canvasH = box.h;
+      this.armResizeReload();
+    })
     .onMouse((event: MouseEvent) => this.onRootMouse(event))
   }
 }
