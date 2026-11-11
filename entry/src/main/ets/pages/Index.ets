@@ -25,9 +25,10 @@
  *     隐藏应用三块栏 + 隐藏系统状态栏/导航栏，画布铺满屏幕
  *   · 键盘：← → 翻页，↑ ↓ 缩放，空格 幻灯片，R 旋转，F 1:1，0 复位，Esc 关闭应用
  *   · 快速：缩略图随 List 虚拟化懒加载，仅可见项参与解码
- *   · 后台预载：自动预先解码当前位置「前后各 20 张」（低清预览），窗口随位置滑动，
- *     切换时先出预览再被原图覆盖
- *   · 切图过渡：新图先以「低清 + 大模糊」出现，分档对焦、清晰图就绪后整层淡出（动态模糊）
+ *   · 后台预载：自动预先解码当前位置「前后各 100 张」（可直接显示的清晰度），
+ *     窗口随位置滑动、触到内存预算就收工；切换时命中即上屏、不再补解码
+ *   · 切图过渡：默认 FOCUS_BLUR = false，命中预载瞬时上屏、无动画；
+ *     未命中才先用 768px 低清占位，清晰图就绪后瞬时替换
  *
  * 变换分层（与旧版一致的设计）：
  *   外层 Column —— translate（拖拽）与 rotate（旋转），尺寸即画布
@@ -53,6 +54,7 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, pickerStartO
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, isUpTargetOf,
   textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
+import { preloadWindowSize, preloadOrder, preloadSaturated } from '../common/PreloadBudget';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -139,15 +141,18 @@ const CLICK_MOVE_TOL: number = 4;
 const DBL_CLICK_UNDO_MS: number = 400;
 
 /** 预载窗口：当前位置「往后」的张数（主要浏览方向）。
- *  Win64 版 c111e2c 起由 20 扩到 50 张 —— 悬停缩略图要能立刻命中，长图库连翻也更稳。 */
-const PRELOAD_FWD: number = 50;
+ *  2026-11-11 由 50 扩到 100（用户：「尽量缓存前后 100 张图」）——
+ *  长图库连翻 / 快速跳读更容易命中，翻页不等解码。
+ *  「尽量」= 窗口目标放宽到 100，实际驻留由 PRELOAD_COUNT / PRELOAD_MAX_BYTES 双重预算裁剪；
+ *  右下角角标「缓存 N / 216 张 · xx MB」显示真实值，不强行保证 201 张全驻留。 */
+const PRELOAD_FWD: number = 100;
 /** 预载窗口：当前位置「往前」的张数 —— 没有它的话，快速往回滚就一张都命中不了缓存。
  *  改这两个常量就等于改窗口大小；缓存是**跟着当前位置滑动**的（见 evictOutside），
- *  所以前后各 50 意味着最多同时驻留 101 张，而不是越翻越多。 */
-const PRELOAD_BACK: number = 50;
-/** 缓存条目上限（LRU 容量）。窗口 101 张，留 11 张余量：
+ *  所以前后各 100 意味着最多同时驻留 201 张，而不是越翻越多。 */
+const PRELOAD_BACK: number = 100;
+/** 缓存条目上限（LRU 容量）。窗口 = 100+100+1 = 201 张，留 15 张余量：
  *  容量必须 > 窗口大小，否则每入一张就淘汰一张、又被预载链加回来，会来回抖动。 */
-const PRELOAD_COUNT: number = 112;
+const PRELOAD_COUNT: number = 216;
 /** 未命中缓存时的低清占位档位（单张约 1.7MB）—— 只为「不空白」，不是拿来显示的 */
 const QUICK_EDGE: number = 768;
 /** 预载档位（长边像素）的下限 / 上限，实际取值由 preloadEdge() 按画布尺寸动态算。
@@ -162,10 +167,14 @@ const PRELOAD_MAX_EDGE: number = 1536;
 const PRELOAD_EDGE_FACTOR: number = 1.15;
 const PRELOAD_QUANT: number = 256;
 /** 预载缓存的总字节上限（双重保险，防 OOM）。
- *  窗口 101 张 × 1536 档位（约 7MB/张）≈ 700MB，与 Win64 版（768MB）同一量级。
- *  ⚠️ 鸿蒙设备内存普遍小于 PC，这里给 512MB：一旦触顶会按 LRU 淘汰，
- *     窗口实际驻留张数会小于 101，右下角角标的「N / 112 张」能直接看出来。 */
-const PRELOAD_MAX_BYTES: number = 512 * 1024 * 1024;
+ *  窗口 201 张 × 1536 档位（3:2 图约 6.3MB/张）≈ 1.27GB；方图（1536² 约 9.4MB/张）≈ 1.9GB。
+ *  2026-11-11 由 512MB 提到 1GB：旧上限只够约 80 张，窗口扩到 100 后会被立刻挤掉，等于白扩。
+ *  ⚠️ 鸿蒙设备内存普遍小于 PC，1GB 是「尽量」的安全天花板 —— 触顶即按 LRU 淘汰并收工
+ *     （preloadSaturated 防止「解→淘汰→再解」死循环），实际驻留数看角标「N / 216 张」。
+ *  ⚠️ 内存吃紧的机器：把 PRELOAD_MAX_BYTES 调回 512MB，或把 PRELOAD_MAX_EDGE 调到 1280
+ *     （单张约 4.4MB，1GB 反而能装下整窗 201 张）—— 不要调低 PRELOAD_MIN_EDGE，
+ *     档位小于屏幕实际像素会让每张命中缓存的图都得再解一次全清（切图卡顿老问题）。 */
+const PRELOAD_MAX_BYTES: number = 1024 * 1024 * 1024;
 /** 主视图解码：长边 = 画布长边 × 该系数，并夹在 [VIEW_EDGE_MIN, VIEW_EDGE_MAX] 内。
  *  系数取 1.5 而不是 2（Win64 版实测）：×2 时一张大图能解到 1.5 秒，
  *  而屏幕实际只需要约 1.0 倍像素 —— 多出来的既不显示又拖慢切图。 */
@@ -2602,12 +2611,16 @@ struct Index {
   // 后台预载（低清预览缓存）
   //
   // 思路（2026-10-27 参照 Win64 版实测重写，旧版是「预载低清 + 切图再解全清」）：
-  //   · 后台把当前位置「前后各 20 张」按**可直接显示的清晰度**解码并缓存（preloadEdge()）；
+  //   · 后台把当前位置「前后各 100 张」按**可直接显示的清晰度**解码并缓存（preloadEdge()）；
+  //     窗口 201 张，实际驻留由张数 / 字节双重预算裁剪（2026-11-11「尽量缓存前后 100 张」）。
   //   · 切到某张时命中缓存 → **立刻上主视图，不再解码**；
   //     只有放大到缓存档位不够时才停手 250ms 补一张全清（连续翻页会被下一切图作废）。
   //   · 未命中 → 768 低清占位（只是不空白）+ 立刻解可显示清晰度。
-  //   · 窗口**跟着当前位置滑动且环绕**（evictOutside / inWindow）：
+  //   · 窗口**跟着当前位置滑动且环绕**（evictOutside / windowUris）：
   //     翻到哪缓存哪附近，跨首尾也不重解；翻一整个大图库内存不会一路涨上去。
+  //   · 预算触顶就收工（preloadSaturated）：窗口比设备内存装得下的时候，
+  //     再解一张只会把窗口里另一张挤掉，链会变成「解→淘汰→再解」的死循环。
+  //     前后交替补齐（preloadOrder）保证预算不足时两个方向都有覆盖。
   //   · 档位不能按原图分辨率预载（几十张就是几个 GB），故夹在 [1024, 1536]。
   //
   //  ⚠️ 旧版把预载定为 768px「仅供模糊占位」，于是每张命中缓存的图都还要再解一次
@@ -2667,14 +2680,17 @@ struct Index {
 
   /** 释放「窗口外」的缓存 —— 让缓存真正跟着位置滑动。
    *  只靠 LRU 容量淘汰的话，跳转（回到上次 / 点列表跳很远）之后，远处那一批旧图还会赖着，
-   *  把新窗口的位置挤掉；这里按位置主动清掉，翻多远内存都稳定在窗口大小。 */
+   *  把新窗口的位置挤掉；这里按位置主动清掉，翻多远内存都稳定在窗口大小。
+   *  ⚠️ 窗口扩到前后各 100 后不能逐条调 inWindow()（O(缓存数 × 窗口数) ≈ 216×201）；
+   *     先建一次窗口 uri 集合，复杂度降到 O(缓存数 + 窗口数)。 */
   private evictOutside(): void {
     if (this.cur < 0) {
       return;
     }
+    const win: Set<string> = this.windowUris();
     for (let i = this.previews.length - 1; i >= 0; i--) {
       const e: PreviewEntry = this.previews[i];
-      if (this.inWindow(e.uri)) {
+      if (win.has(e.uri)) {
         continue;
       }
       // 正在显示 / 正在做过渡 / 对开右页的那张不能 release，否则画面变黑或花屏
@@ -2692,25 +2708,23 @@ struct Index {
     this.syncCacheStat();
   }
 
-  /** uri 是否落在「当前位置前后各 PRELOAD_BACK / PRELOAD_FWD 张」这个窗口里。
+  /** 当前窗口内的所有 uri（环绕），一次建好给 evictOutside 查表用。
    *
    *  ⚠️ 窗口是**环绕**的（Win64 版 10-27 提交 8cde542）：go() 本来就按模运算循环，
    *  翻过最后一张就回到第一张，缓存窗口若还按线性截断，每次跨过首尾都要重新解码一批图 ——
    *  绕回第一张时会明显卡一下。图库比窗口小时取 min(span, n-1)，避免绕整圈重复。 */
-  private inWindow(uri: string): boolean {
+  private windowUris(): Set<string> {
+    const win: Set<string> = new Set<string>();
     const n: number = this.items.length;
     if (n === 0 || this.cur < 0) {
-      return false;
+      return win;
     }
     const back: number = Math.min(PRELOAD_BACK, n - 1);
     const fwd: number = Math.min(PRELOAD_FWD, n - 1);
     for (let k: number = -back; k <= fwd; k++) {
-      const i: number = ((this.cur + k) % n + n) % n;
-      if (this.items[i].uri === uri) {
-        return true;
-      }
+      win.add(this.items[this.wrapIndex(k)].uri);
     }
-    return false;
+    return win;
   }
 
   /** 环绕取第 cur+k 张的下标（k 可负、可越界） */
@@ -3025,34 +3039,38 @@ struct Index {
     // 窗口环绕：末尾的「前方」绕回开头，与 go() 的模运算一致（否则跨首尾要重解一批）
     const fwdSpan: number = Math.min(PRELOAD_FWD, n - 1);
     const backSpan: number = Math.min(PRELOAD_BACK, n - 1);
-    // 先补「前方」（主要浏览方向）
-    for (let k = 1; k <= fwdSpan; k++) {
-      const u: string = this.items[this.wrapIndex(k)].uri;
+    // 前后交替、先近后远地找第一张还没缓存的图：预算装不下整窗时两个方向都留有覆盖，
+    // 不会变成「前方 100 张占满预算、后方一张都没有」（见 PreloadBudget.preloadOrder）。
+    const order: number[] = preloadOrder(backSpan, fwdSpan);
+    for (let i = 0; i < order.length; i++) {
+      const u: string = this.items[this.wrapIndex(order[i])].uri;
       if (this.previewEntry(u) === undefined && !this.failed.has(u)) {
         target = u;
         break;
       }
     }
-    // 再补「后方」：否则快速往回滚时一张都命中不了缓存，退化成全靠原图解码
-    if (target.length === 0) {
-      for (let k = 1; k <= backSpan; k++) {
-        const u: string = this.items[this.wrapIndex(-k)].uri;
-        if (this.previewEntry(u) === undefined && !this.failed.has(u)) {
-          target = u;
-          break;
-        }
-      }
-    }
     if (target.length === 0) {
       this.preloadBusy = false; // 窗口内都预载好了
       // 窗口理论容量 = 前 span + 后 span + 当前张；不足说明有图解不开，或被字节上限挤掉。
-      const want: number = Math.min(n, fwdSpan + backSpan + 1);
+      const want: number = preloadWindowSize(backSpan, fwdSpan, n);
       hilog.info(DOMAIN, TAG,
         'preload: window full, cached %{public}d/%{public}d, %{public}d MB, failed=%{public}d, tick %{public}d',
         this.previews.length, want, Math.round(this.preloadBytes / (1024 * 1024)), this.failed.size, this.probeTick);
       if (this.previews.length < want && this.previews.length > 0) {
         hilog.warn(DOMAIN, TAG, 'preload: window NOT full — 多为坏图黑名单，或 PRELOAD_MAX_BYTES 上限挤出');
       }
+      return;
+    }
+    // 「尽量」的收工点：窗口 201 张可能装不进设备内存预算。此时再解一张只会把窗口里
+    // 另一张挤掉，链会变成「解 → 淘汰 → 又发现缺口 → 再解」的死循环（CPU 打满）。
+    // 触到预算就收工，实际驻留多少看角标；下次切图 evictOutside 释放窗口外旧图后会自动再补。
+    if (preloadSaturated(this.previews.length, this.preloadBytes, PRELOAD_COUNT, PRELOAD_MAX_BYTES)) {
+      this.preloadBusy = false;
+      hilog.info(DOMAIN, TAG,
+        'preload: budget reached, cached %{public}d/%{public}d, %{public}d/%{public}d MB — 窗口尽力填充',
+        this.previews.length, preloadWindowSize(backSpan, fwdSpan, n),
+        Math.round(this.preloadBytes / (1024 * 1024)),
+        Math.round(PRELOAD_MAX_BYTES / (1024 * 1024)));
       return;
     }
     this.probeTick++;

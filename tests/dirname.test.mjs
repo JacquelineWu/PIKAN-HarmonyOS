@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
+import { preloadWindowSize, preloadOrder, preloadSaturated } from '../entry/src/main/ets/common/PreloadBudget.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -393,6 +394,57 @@ check('补授权不再按「同名 + 层级」放宽', /pickedName === targetNam
 check('按钮 / 退格 / .. 行三条入口都收口 browseUp',
   (INDEX.match(/this\.browseUp\(\)/g) || []).length >= 3, true);
 check('诊断串标记 up4（辨认新包，不升版本号）', /const UP_NAV_TAG: string = 'up4'/.test(INDEX), true);
+check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+console.log('--- 预载窗口扩容：前后各 100 张（2026-11-11） ---');
+check('窗口 = 100+100+1 = 201 张', preloadWindowSize(100, 100, 1000), 201);
+check('图库比窗口小时取总数（不绕圈重复）', preloadWindowSize(100, 100, 30), 30);
+check('图库只有 1 张', preloadWindowSize(100, 100, 1), 1);
+check('空图库窗口为 0', preloadWindowSize(100, 100, 0), 0);
+check('前后不等时按实际 span', preloadWindowSize(20, 30, 1000), 51);
+check('交替顺序前 6 项（先近后远）', preloadOrder(100, 100).slice(0, 6).join(','), '1,-1,2,-2,3,-3');
+check('交替顺序总长 200', preloadOrder(100, 100).length, 200);
+check('交替顺序 2/2', preloadOrder(2, 2).join(','), '1,-1,2,-2');
+check('前多后少时剩余只补前方', preloadOrder(1, 3).join(','), '1,-1,2,3');
+check('前少后多时剩余只补后方', preloadOrder(3, 1).join(','), '1,-1,-2,-3');
+check('顺序不含 0（当前张不走预载链）', preloadOrder(100, 100).includes(0), false);
+check('每个 k 只出现一次（不会重复解码）', new Set(preloadOrder(100, 100)).size, 200);
+check('窗口 0 时无候选', preloadOrder(0, 0).length, 0);
+
+console.log('--- preloadSaturated(): 预算触顶收工，防「解→淘汰→再解」死循环 ---');
+check('空缓存不算触顶（还没开始解）', preloadSaturated(0, 0, 216, 1024), false);
+check('张数触顶', preloadSaturated(216, 100, 216, 1024), true);
+check('字节触顶', preloadSaturated(10, 1024, 216, 1024), true);
+check('再加一张就触顶 → 提前收工（防边界抖动）', preloadSaturated(10, 950, 216, 1000), true);
+check('还有余量时继续预载', preloadSaturated(10, 100, 216, 1000), false);
+check('张数上限非正 = 不受限', preloadSaturated(10, 100, 0, 1000), false);
+check('字节上限非正 = 不受限', preloadSaturated(10, 100, 216, 0), false);
+check('容量 216 必须大于窗口 201（否则每入一张就淘汰）', 216 > preloadWindowSize(100, 100, 1000), true);
+
+console.log('--- 源码静态契约：预载扩容 + 预算收工 ---');
+check('预载窗口前后各 100',
+  /const PRELOAD_FWD: number = 100;/.test(INDEX) && /const PRELOAD_BACK: number = 100;/.test(INDEX), true);
+check('LRU 容量 216', /const PRELOAD_COUNT: number = 216;/.test(INDEX), true);
+check('字节上限提到 1GB', /const PRELOAD_MAX_BYTES: number = 1024 \* 1024 \* 1024;/.test(INDEX), true);
+check('不再有旧的 50 / 112 / 512MB 常量',
+  /const PRELOAD_(FWD|BACK): number = 50;/.test(INDEX) === false &&
+  /const PRELOAD_COUNT: number = 112;/.test(INDEX) === false &&
+  /const PRELOAD_MAX_BYTES: number = 512/.test(INDEX) === false, true);
+check('引入 PreloadBudget 纯函数', /from '..\/common\/PreloadBudget'/.test(INDEX), true);
+check('preloadNext 用交替顺序找缺口',
+  /const order: number\[\] = preloadOrder\(backSpan, fwdSpan\)/.test(INDEX), true);
+check('preloadNext 有预算收工判据',
+  /if \(preloadSaturated\(this\.previews\.length, this\.preloadBytes, PRELOAD_COUNT, PRELOAD_MAX_BYTES\)\)/.test(INDEX), true);
+check('收工时释放 preloadBusy 并打日志', /preload: budget reached/.test(INDEX), true);
+check('window full 用 preloadWindowSize 算 want',
+  /const want: number = preloadWindowSize\(backSpan, fwdSpan, n\)/.test(INDEX), true);
+check('evictOutside 用窗口集合查表（窗口翻倍后不 O(P×W)）',
+  /const win: Set<string> = this\.windowUris\(\)/.test(INDEX) &&
+  /if \(win\.has\(e\.uri\)\)/.test(INDEX), true);
+check('不再逐条调 inWindow', /this\.inWindow\(/.test(INDEX), false);
+check('角标仍显示 PRELOAD_COUNT 与 PRELOAD_MAX_BYTES',
+  /'缓存 ' \+ this\.cacheCount \+ ' \/ ' \+ PRELOAD_COUNT \+ ' 张'/.test(INDEX) &&
+  /'\/ ' \+ fmtBytes\(PRELOAD_MAX_BYTES\)/.test(INDEX), true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
