@@ -119,9 +119,10 @@ export const RESTORE_FULL: number = 0;
  *
  *  为什么必须分这两态（本次实机反馈的三个症状其实是同一条因果链）：
  *  快照里的 uri 是上次会话 `openFolder` 拼出来的子项路径，
- *  `DocumentViewPicker` 的逐 URI 授权默认**不跨进程持久**（工程没有
- *  `persistPermission`）。重开后这些 uri 一个都打不开 —— 名单（纯字符串）
- *  照样能显示，图片却全白。
+ *  `DocumentViewPicker` 的逐 URI 授权默认**不跨进程持久**（本轮之前工程没有
+ *  `persistPermission`；现已用 PersistPlan + fileShare 补上，但旧快照、
+ *  被平台拒绝持久化的 uri 仍会失效）。重开后这些 uri 一个都打不开 ——
+ *  名单（纯字符串）照样能显示，图片却全白。
  *
  *  更糟的是 `setItems → applyItems` 会像正常换源那样启动全套后台任务：
  *  预载最多 201 张 `decodePx`、补体积最多 600 次 `statSync`、对开元数据

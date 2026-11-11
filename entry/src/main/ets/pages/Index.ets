@@ -41,6 +41,7 @@
 import common from '@ohos.app.ability.common';
 import picker from '@ohos.file.picker';
 import fs from '@ohos.file.fs';
+import fileShare from '@ohos.fileshare';
 import fileUri from '@ohos.file.fileuri';
 import hilog from '@ohos.hilog';
 import photoAccessHelper from '@ohos.file.photoAccessHelper';
@@ -60,6 +61,8 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed, restoreProbeUris,
   readonlyHint, readonlyTapHint, readonlyUpHint } from '../common/ResumePlan';
+import { PERSIST_SKIP, persistAction, persistPolicyUris,
+  persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -82,6 +85,16 @@ const RESTORE_TAG: string = 'ro1';
 /** 恢复前最多探几张 uri 判断授权是否还在。⚠️ 必须保持很小：
  *  每次 fs.openSync 对失效授权 uri 都是一次同步跨进程调用，批量探测会把主线程打满。 */
 const RESTORE_PROBE_LIMIT: number = 3;
+/** 「目录 URI 持久授权」的诊断标记（也不是版本号）。实机诊断串出现 p1 即带此功能。 */
+const PERSIST_TAG: string = 'p1';
+/** 启动激活持久授权最多等多久（ms）。activatePermission 是跨进程调用，
+ *  必须有超时兜底，否则系统服务挂住时恢复链永远不往下走、界面停在空态。 */
+const PERSIST_ACTIVATE_MS: number = 1500;
+/** 上面这个超时的硬上限：防止以后有人把它调成几十秒，变相把恢复拖回启动关键路径。 */
+const PERSIST_TIMEOUT_MAX_MS: number = 3000;
+/** 一次 persist / activate 最多带几个 policy。**恒为 1**：只授权 picker 返回的原始
+ *  目录 URI，绝不把快照里几百条拼出来的子文件 uri 塞进去（批量跨进程调用 = 冻结源）。 */
+const PERSIST_POLICY_LIMIT: number = 1;
 /** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
  *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
 const CANVAS_BG: string = '#5F5F5F';
@@ -601,6 +614,10 @@ const POS_KEY_SRC: string = 'lastSrc';
  *  与 POS_KEY_URI 的区别：那个记的是「停在第几张」（切过去就记，哪怕没解出来），
  *  这个只在真的解出画面后才记，预热解不开的图毫无意义。 */
 const POS_KEY_OK: string = 'lastOkUri';
+/** 上次用 picker 选过的**原始目录 URI**（持久授权的根）。
+ *  重开时先 fileShare.activatePermission(它)，再恢复快照 → 直接出图。
+ *  老版本没有这个 key → 没有持久授权，退回「探测 + 只读名单态」。 */
+const POS_KEY_DIR: string = 'lastDirUri';
 /** 写盘防抖间隔：滚轮连翻时没必要每张都落盘，停手后再存 */
 const POS_SAVE_MS: number = 500;
 /** 启动预热推迟多少毫秒再开始解码。首帧渲染 + 窗口初始化那几十毫秒最金贵，
@@ -1289,6 +1306,15 @@ struct Index {
   private pendingRestoreReadonly: boolean = false;
   private pendingRestoreCount: number = 0;
   private pendingRestoreSrc: string = '';
+
+  // ---- 目录 URI 持久授权（见 PersistPlan.ts）----
+  /** 启动时从 preferences 读回的上次目录 URI；空串 = 旧数据 / 首次安装。 */
+  private savedDirUri: string = '';
+  /** activate 竞速是否已收口：超时定时器与 activate 回调谁先到都只生效一次。 */
+  private persistSettled: boolean = false;
+  private persistTimer: number = -1;
+  /** 本次运行持久授权是否激活成功（仅用于状态栏 / 诊断串）。 */
+  private persistActivated: boolean = false;
   /** 用户是否已经主动操作过（选文件夹 / 选图 / 往上层）。恢复绝不能抢用户当前的视图。 */
   private userActed: boolean = false;
   /** 本次运行是否已经弹过「读取图库」权限申请。
@@ -1390,6 +1416,10 @@ struct Index {
       clearTimeout(this.resumeTimer); // 别让恢复在页面已经销毁后还去改视图
       this.resumeTimer = -1;
     }
+    if (this.persistTimer !== -1) {
+      clearTimeout(this.persistTimer); // activate 超时兜底也别在页面销毁后触发恢复
+      this.persistTimer = -1;
+    }
     this.flushPosSync(); // 退出前把最后一次位置**同步**落盘（进程被杀也不丢）
     if (this.fullscreen) {
       // 页面销毁时若还在全屏，把系统状态栏 / 导航栏还回去，别把窗口状态留在隐藏态
@@ -1439,9 +1469,12 @@ struct Index {
       const rawIdx = await p.get(POS_KEY_IDX, -1);
       const rawUri = await p.get(POS_KEY_URI, '');
       const rawOk = await p.get(POS_KEY_OK, '');
+      const rawDir = await p.get(POS_KEY_DIR, '');
       const idx: number = typeof rawIdx === 'number' ? rawIdx : -1;
       const uri: string = typeof rawUri === 'string' ? rawUri : '';
       const ok: string = typeof rawOk === 'string' ? rawOk : '';
+      // 必须在 scheduleShowLast() / 可能的提前 return 之前读到：恢复前要先激活它。
+      this.savedDirUri = typeof rawDir === 'string' ? rawDir : '';
       this.okUri = ok;
       // 预热「上次成功显示的那张」：后台解 1 张，与下面读位置/恢复完全解耦，
       // 就算它失败也只是少一次缓存命中，不影响任何别的路径。
@@ -1529,7 +1562,13 @@ struct Index {
       const n: number = this.pendingRestoreCount > 0 ? this.pendingRestoreCount : count;
       const from: string = this.pendingRestoreSrc.length > 0 ? this.pendingRestoreSrc : src;
       this.restoreHintText = readonlyHint(n, from, RESTORE_TAG);
-      this.diagLine = 'restore READONLY | ' + RESTORE_TAG + ' | ' + n + ' 张 | v' + APP_VERSION;
+      // 旧数据（升级前保存的快照）没有建立过持久授权：明确说明只需重选一次，
+      // 不是「以后每次都要重选」。
+      if (this.savedDirUri.length === 0) {
+        this.restoreHintText = this.restoreHintText + persistLegacyHint(PERSIST_TAG);
+      }
+      this.diagLine = 'restore READONLY | ' + RESTORE_TAG + ' | ' + n + ' 张 | p' +
+        (this.persistActivated ? '1' : '0') + ' | v' + APP_VERSION;
       hilog.warn(DOMAIN, TAG, 'restore: READONLY %{public}d items (uri auth lost after restart)', n);
     } else {
       this.restoreHintText = '';
@@ -1537,6 +1576,132 @@ struct Index {
     this.pendingRestoreReadonly = false;
     this.pendingRestoreCount = 0;
     this.pendingRestoreSrc = '';
+  }
+
+  // ------------------------------------------------------------------------
+  // 目录 URI 持久授权（2026-11-11）：让重开直接出图，不必每次重新选文件夹
+  // ------------------------------------------------------------------------
+
+  /** 恢复链入口：先决定要不要激活持久授权，再进入原来的 showLastOnStart()。
+   *
+   *  ⚠️ 这里仍然只在「首帧后 RESUME_DELAY_MS」的定时器里跑，绝不在 aboutToAppear
+   *     调用栈上做跨进程调用。activatePermission 是异步的，本方法**不 await** 它，
+   *     而是用 PERSIST_ACTIVATE_MS 超时兜底：哪怕系统服务挂住，恢复链也照样往下走。 */
+  private beginRestore(): void {
+    const act: number = persistAction(this.savedDirUri.length > 0,
+      AUTO_SHOW_LAST_ON_START, this.userActed, this.resumeDone);
+    if (act === PERSIST_SKIP || !persistTimeoutSafe(PERSIST_ACTIVATE_MS, PERSIST_TIMEOUT_MAX_MS)) {
+      this.showLastOnStart();
+      return;
+    }
+    this.persistSettled = false;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = -1;
+      // 超时：不等系统服务了，按「授权没激活」继续恢复，靠探测 + 只读名单态兜底。
+      this.finishPersistActivate(false);
+    }, PERSIST_ACTIVATE_MS);
+    // fire-and-forget：与超时定时器竞速，谁先到谁收口，finishPersistActivate 只跑一次。
+    // 外层再兜一层 .catch：即便 SDK 入口本身抛同步异常，恢复链也不会被挂住。
+    this.activatePersistedUri(this.savedDirUri).catch(() => {
+      this.finishPersistActivate(false);
+    });
+  }
+
+  /** 激活上次持久化的目录授权。**只传 picker 原始目录 URI 一个 policy**。
+   *  ⚠️ 任何异常（权限未授予 / PERSISTENCE_FORBIDDEN / 服务不支持）都必须吞掉并降级，
+   *     绝不抛出、绝不阻塞恢复链 —— 后面的 probeRestoreUris 会给出最终裁决。 */
+  private async activatePersistedUri(dirUri: string): Promise<void> {
+    const uris: Array<string> = persistPolicyUris(dirUri, '', PERSIST_POLICY_LIMIT);
+    if (uris.length === 0) {
+      this.finishPersistActivate(false);
+      return;
+    }
+    const policies: Array<fileShare.PolicyInfo> = [];
+    for (let i: number = 0; i < uris.length; i++) {
+      const policy: fileShare.PolicyInfo = {
+        uri: uris[i],
+        operationMode: fileShare.OperationMode.READ_MODE
+      };
+      policies.push(policy);
+    }
+    try {
+      await fileShare.activatePermission(policies);
+      this.finishPersistActivate(true);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'persist: activate failed: %{public}s', JSON.stringify(e));
+      this.finishPersistActivate(false);
+    }
+  }
+
+  /** activate 收口点：只跑一次，清掉超时定时器，然后照常进入恢复链。
+   *  ⚠️ 无论激活成功与否都**不改** probeRestoreUris / RESTORE_READONLY 的行为 ——
+   *     那是上一轮修好的防冻结兜底，持久授权只是提高「探测通过」的概率。 */
+  private finishPersistActivate(ok: boolean): void {
+    if (this.persistSettled) {
+      return;
+    }
+    this.persistSettled = true;
+    if (this.persistTimer !== -1) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = -1;
+    }
+    this.persistActivated = ok;
+    // 用户已经在这段时间里自己选了目录 → 别用恢复阶段的话覆盖他的状态栏。
+    if (!this.userActed) {
+      this.status = ok ? persistOkHint(PERSIST_TAG) : persistFailHint(PERSIST_TAG);
+    }
+    this.diagLine = 'persist ' + (ok ? 'OK' : 'FAIL') + ' | ' + PERSIST_TAG + ' | v' + APP_VERSION;
+    hilog.info(DOMAIN, TAG, 'persist: activate=%{public}d tag=%{public}s', ok ? 1 : 0, PERSIST_TAG);
+    this.showLastOnStart();
+  }
+
+  /** 用户用 picker 选过目录（或往上层补授权）后：把该目录 URI 持久授权并落盘。
+   *
+   *  ⚠️ 必须在拿到 `picker.select()` 返回的**原始 URI** 时调用 —— 那是用户授权的
+   *     根节点；`openFolder` 里的 dirCandidates / 拼接子文件 uri 都不是。
+   *  ⚠️ fire-and-forget：绝不让用户等一次跨进程调用才看到目录列表。 */
+  private async persistFolderUri(dirUri: string): Promise<void> {
+    const uris: Array<string> = persistPolicyUris(dirUri, '', PERSIST_POLICY_LIMIT);
+    if (uris.length === 0) {
+      return;
+    }
+    // 先更新内存：即使 persist 还没回来用户就切后台，flushPosSync 也会把授权根写下去。
+    this.savedDirUri = uris[0];
+    const policies: Array<fileShare.PolicyInfo> = [];
+    for (let i: number = 0; i < uris.length; i++) {
+      const policy: fileShare.PolicyInfo = {
+        uri: uris[i],
+        operationMode: fileShare.OperationMode.READ_MODE
+      };
+      policies.push(policy);
+    }
+    try {
+      await fileShare.persistPermission(policies);
+      await this.saveDirUri(uris[0]);
+      this.persistActivated = true;
+      hilog.info(DOMAIN, TAG, 'persist: folder uri persisted, len=%{public}d', uris[0].length);
+    } catch (e) {
+      // 某些 picker uri 不允许持久化（PERSISTENCE_FORBIDDEN），或权限尚未生效：
+      // 记日志即可，启动恢复会靠探测 + 只读名单态兜底，绝不阻塞用户当前操作。
+      this.persistActivated = false;
+      hilog.warn(DOMAIN, TAG, 'persist: folder uri rejected: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 把目录 URI 同步写进 preferences（下次启动 activate 要用）。
+   *  选目录时立即写，不等 500ms 防抖；flushPos / flushPosSync 也会再补一次。 */
+  private async saveDirUri(uri: string): Promise<void> {
+    this.savedDirUri = uri;
+    try {
+      const store: preferences.Preferences | undefined = await this.posStore();
+      if (store === undefined) {
+        return;
+      }
+      store.putSync(POS_KEY_DIR, uri);
+      store.flushSync();
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'persist: save dir uri failed: %{public}s', JSON.stringify(e));
+    }
   }
 
   /** 排一次「首帧后显示上次相片」。只排一个定时器，重复调用无副作用。
@@ -1552,7 +1717,9 @@ struct Index {
     }
     this.resumeTimer = setTimeout(() => {
       this.resumeTimer = -1;
-      this.showLastOnStart();
+      // 先（有超时兜底地）激活持久授权，再进入原来的恢复链；
+      // 没有持久记录时 beginRestore 会直接落到 showLastOnStart，行为与旧版一致。
+      this.beginRestore();
     }, RESUME_DELAY_MS);
   }
 
@@ -1598,7 +1765,8 @@ struct Index {
         this.status = this.restoreHintText.length > 0
           ? this.restoreHintText
           : '已恢复上次会话 · ' + this.items.length + ' 张 · 第 ' +
-            (this.cur + 1) + ' 张 · ' + RESUME_TAG;
+            (this.cur + 1) + ' 张 · ' + RESUME_TAG +
+            (this.persistActivated ? ' · ' + PERSIST_TAG + ' 目录授权已持久' : '');
         hilog.info(DOMAIN, TAG, 'resume: snapshot restored %{public}d items at %{public}d ro=%{public}d',
           this.items.length, this.cur, this.restoreHintText.length > 0 ? 1 : 0);
         return;
@@ -1752,6 +1920,7 @@ struct Index {
       await store.put(POS_KEY_COUNT, p.count);
       await store.put(POS_KEY_SRC, p.src);
       await store.put(POS_KEY_OK, this.okUri); // 下次启动预热的那一张
+      await store.put(POS_KEY_DIR, this.savedDirUri); // 下次启动 activate 的目录授权根
       // 换了图片源才需要重写快照（切图时列表没变，不必每次都写这几千个 uri）
       if (this.snapDirty) {
         this.snapDirty = false;
@@ -1793,6 +1962,7 @@ struct Index {
       store.putSync(POS_KEY_COUNT, p.count);
       store.putSync(POS_KEY_SRC, p.src);
       store.putSync(POS_KEY_OK, this.okUri);
+      store.putSync(POS_KEY_DIR, this.savedDirUri); // 切后台也补一次，进程被杀不丢授权根
       store.flushSync();
       this.posPending = undefined;
       hilog.info(DOMAIN, TAG, 'flushPosSync: idx=%{public}d uri=%{public}s',
@@ -3612,6 +3782,9 @@ struct Index {
             return;
           }
           hilog.info(DOMAIN, TAG, 'chooseFolder picked uri=%{public}s', uris[0]);
+          // 这是 picker 授予的**原始目录 URI**：立刻建立持久授权，
+          // 下次重开就能直接出图，不必再选一次文件夹。fire-and-forget，不挡列目录。
+          this.persistFolderUri(uris[0]);
           this.pickRootUri = uris[0]; // 只作 picker 起点，不参与父级推算
           this.openFolder(uris[0], false);
         })
@@ -4175,6 +4348,9 @@ struct Index {
           hilog.warn(DOMAIN, TAG, 'chooseFolderAt rejected non-parent pick: %{public}s', uris[0]);
           return;
         }
+        // 往上层补授权同样是 picker 返回的原始 URI：之后看的图都在这个父目录下，
+        // 把它设为新的持久授权根，退出后恢复的正是这一层。
+        this.persistFolderUri(uris[0]);
         this.pickRootUri = uris[0];
         this.openFolder(uris[0], false, false).then((ok: boolean) => {
           if (!ok) {

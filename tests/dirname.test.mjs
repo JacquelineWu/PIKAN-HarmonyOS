@@ -20,6 +20,8 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, F
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   upButtonEnabled, RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed,
   restoreProbeUris, readonlyHint, readonlyTapHint, readonlyUpHint } from '../entry/src/main/ets/common/ResumePlan.ts';
+import { PERSIST_SKIP, PERSIST_ACTIVATE, persistAction, persistPolicyUris,
+  persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../entry/src/main/ets/common/PersistPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -739,6 +741,142 @@ check('只读态行组件不发起 hover 缩略图解码',
   /thumbDisabled: this\.restoreMode === RESTORE_READONLY,/.test(INDEX), true);
 check('正常换源（pending=false）自动回到完整模式，行为不变',
   /this\.pendingRestoreReadonly = false;\s*\n\s*this\.pendingRestoreCount = 0;/.test(INDEX), true);
+check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+// ===========================================================================
+// 目录 URI 持久授权（2026-11-11）：让重开直接出图，不必每次重新选文件夹
+// ===========================================================================
+const MODULE = readFileSync(new URL('../entry/src/main/module.json5', import.meta.url), 'utf8');
+const STRINGS = readFileSync(new URL('../entry/src/main/resources/base/element/string.json', import.meta.url), 'utf8');
+const PERSIST_PLAN = readFileSync(new URL('../entry/src/main/ets/common/PersistPlan.ts', import.meta.url), 'utf8');
+const PERSIST_FNS = INDEX.slice(INDEX.indexOf('private async activatePersistedUri('),
+  INDEX.indexOf('/** 排一次「首帧后显示上次相片」'));
+
+console.log('--- PersistPlan.persistAction(): 只在「有持久记录 + 用户没抢先」时激活 ---');
+check('两个动作是不同常量', PERSIST_SKIP === PERSIST_ACTIVATE, false);
+check('有目录 uri + 开关开 + 未操作 + 未恢复 → 激活',
+  persistAction(true, true, false, false), PERSIST_ACTIVATE);
+check('旧数据没有目录 uri → 跳过（走探测 + 只读名单态）',
+  persistAction(false, true, false, false), PERSIST_SKIP);
+check('自动恢复总开关关 → 跳过', persistAction(true, false, false, false), PERSIST_SKIP);
+check('用户已自己选了东西 → 跳过', persistAction(true, true, true, false), PERSIST_SKIP);
+check('本轮已恢复过 → 跳过', persistAction(true, true, false, true), PERSIST_SKIP);
+check('多个否决条件同时命中仍是 SKIP', persistAction(false, false, true, true), PERSIST_SKIP);
+
+console.log('--- persistPolicyUris(): 只放目录 URI、去重、限量、恒不含空串 ---');
+check('目录优先、fallback 其次',
+  persistPolicyUris('file://docs/a', 'file://docs/b', 2).join('|'),
+  'file://docs/a|file://docs/b');
+check('相同 uri 去重', persistPolicyUris('a', 'a', 2).join('|'), 'a');
+check('全空输入 → 空数组', persistPolicyUris('', '', 2).length, 0);
+check('limit<=0 → 空数组（绝不发 SDK 调用）', persistPolicyUris('a', 'b', 0).length, 0);
+check('limit=1 只留目录（绝不批量跨进程调用）',
+  persistPolicyUris('a', 'b', 1).join('|'), 'a');
+check('目录为空时退回 fallback',
+  persistPolicyUris('', 'file://docs/b', 2).join('|'), 'file://docs/b');
+check('返回数组恒不含空串',
+  persistPolicyUris('a', '', 2).every(x => x.length > 0), true);
+check('不修改传入值（纯函数）', persistPolicyUris('a', 'b', 2).length, 2);
+
+console.log('--- persistTimeoutSafe(): activate 超时必须有界 ---');
+check('1500 / 3000 安全', persistTimeoutSafe(1500, 3000), true);
+check('等于上限安全', persistTimeoutSafe(3000, 3000), true);
+check('超过上限拒绝', persistTimeoutSafe(3001, 3000), false);
+check('0 拒绝', persistTimeoutSafe(0, 3000), false);
+check('负数拒绝', persistTimeoutSafe(-1, 3000), false);
+check('上限非正拒绝', persistTimeoutSafe(100, 0), false);
+
+console.log('--- 持久授权提示文案：成功 / 失败 / 旧数据迁移 ---');
+check('成功提示带 p1 且说明正在恢复',
+  persistOkHint('p1').includes('p1') && persistOkHint('p1').includes('正在恢复'), true);
+check('失败提示说明只显示名单 + 指引选择文件夹',
+  persistFailHint('p1').includes('只显示名单') &&
+  persistFailHint('p1').includes('选择文件夹'), true);
+check('旧数据提示说明只需重选一次，且带 p1',
+  persistLegacyHint('p1').includes('重新选一次该目录后') &&
+  persistLegacyHint('p1').includes('p1'), true);
+check('旧数据提示不会说成「每次都要重选」',
+  persistLegacyHint('p1').includes('以后重开即可直接出图'), true);
+
+console.log('--- 源码静态契约：权限声明 / SDK 接线 / 超时兜底 ---');
+check('module.json5 声明 FILE_ACCESS_PERSIST（system_grant，安装时不弹框）',
+  /"name": "ohos\.permission\.FILE_ACCESS_PERSIST"/.test(MODULE) &&
+  /^\s*"requestPermissions": \[/m.test(MODULE), true);
+check('未启用 READ_IMAGEVIDEO（避免 debug 签名安装失败）',
+  MODULE.split('\n').filter(l => /^\s*"name": "ohos\.permission\./.test(l))
+    .every(l => l.includes('FILE_ACCESS_PERSIST')), true);
+check('权限 reason 有对应字符串资源',
+  STRINGS.includes('permission_reason_file_access_persist'), true);
+check('Index 引入 @ohos.fileshare 与 PersistPlan',
+  /import fileShare from '@ohos\.fileshare';/.test(INDEX) &&
+  /from '\.\.\/common\/PersistPlan'/.test(INDEX), true);
+check('PersistPlan 不依赖鸿蒙 SDK（纯函数可 Node 回归）',
+  /@ohos|@kit/.test(PERSIST_PLAN), false);
+check('PersistPlan 不写函数类型变量（ArkTS arkts-no-func-type）',
+  /const\s+\w+\s*:\s*\([^)]*\)\s*=>/.test(PERSIST_PLAN), false);
+check('PERSIST_TAG=p1 是诊断标记、不是版本号',
+  /const PERSIST_TAG: string = 'p1';/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+check('一次只带 1 个 policy、超时 1500ms 且不超过 3000ms 硬上限',
+  /const PERSIST_POLICY_LIMIT: number = 1;/.test(INDEX) &&
+  /const PERSIST_ACTIVATE_MS: number = 1500;/.test(INDEX) &&
+  /const PERSIST_TIMEOUT_MAX_MS: number = 3000;/.test(INDEX) &&
+  persistTimeoutSafe(1500, 3000), true);
+check('选目录与往上层补授权都持久化 picker 原始 URI',
+  (INDEX.match(/this\.persistFolderUri\(uris\[0\]\);/g) || []).length, 2);
+check('persistPermission / activatePermission 各一次，且只用 READ_MODE',
+  (INDEX.match(/fileShare\.persistPermission\(policies\)/g) || []).length === 1 &&
+  (INDEX.match(/fileShare\.activatePermission\(policies\)/g) || []).length === 1 &&
+  (INDEX.match(/fileShare\.OperationMode\.READ_MODE/g) || []).length === 2, true);
+check('PolicyInfo 显式类型、SDK 调用都包在 try/catch 内',
+  (INDEX.match(/Array<fileShare\.PolicyInfo>/g) || []).length === 2 &&
+  /try \{\s*\n\s*await fileShare\.activatePermission\(policies\);/.test(PERSIST_FNS) &&
+  /try \{\s*\n\s*await fileShare\.persistPermission\(policies\);/.test(PERSIST_FNS), true);
+check('activate 异常一律降级、绝不抛出',
+  /catch \(e\) \{\s*\n\s*hilog\.warn\(DOMAIN, TAG, 'persist: activate failed/.test(PERSIST_FNS) &&
+  /catch \(e\) \{\s*\n\s*\/\/ 某些 picker uri 不允许持久化/.test(PERSIST_FNS), true);
+check('beginRestore 用 persistAction + 超时校验，且绝不 await activate',
+  /const act: number = persistAction\(this\.savedDirUri\.length > 0,/.test(INDEX) &&
+  /persistTimeoutSafe\(PERSIST_ACTIVATE_MS, PERSIST_TIMEOUT_MAX_MS\)/.test(INDEX) &&
+  /act === PERSIST_SKIP/.test(INDEX) &&
+  /this\.activatePersistedUri\(this\.savedDirUri\)\.catch/.test(INDEX), true);
+check('activate 有超时竞速 + 只跑一次的收口',
+  /this\.persistTimer = setTimeout\(/.test(INDEX) &&
+  /if \(this\.persistSettled\) \{/.test(INDEX) &&
+  /this\.persistSettled = true;/.test(INDEX) &&
+  /clearTimeout\(this\.persistTimer\);/.test(INDEX), true);
+check('收口后照常进入原恢复链',
+  /this\.showLastOnStart\(\);/.test(PERSIST_FNS) &&
+  /this\.beginRestore\(\);/.test(INDEX) && /}, RESUME_DELAY_MS\);/.test(INDEX), true);
+check('aboutToDisappear 清掉 activate 超时定时器',
+  (INDEX.match(/clearTimeout\(this\.persistTimer\)/g) || []).length, 2);
+check('目录 URI 有独立 key，读 / 立即写 / 异步写 / 同步写四处都在',
+  /const POS_KEY_DIR: string = 'lastDirUri';/.test(INDEX) &&
+  (INDEX.match(/POS_KEY_DIR/g) || []).length >= 5, true);
+check('旧数据只读名单态追加「只需重选一次」说明',
+  /if \(this\.savedDirUri\.length === 0\) \{/.test(INDEX) &&
+  /this\.restoreHintText = this\.restoreHintText \+ persistLegacyHint\(PERSIST_TAG\);/.test(INDEX), true);
+check('完整恢复的状态栏带 p1 授权标记（实机可辨认）',
+  /PERSIST_TAG \+ ' 目录授权已持久'/.test(INDEX), true);
+
+console.log('--- 回归契约：持久授权绝不能拆掉上一轮的防冻结兜底 ---');
+check('探测上限 3 / ro1 标记 / 两条恢复路径仍先探授权',
+  /const RESTORE_PROBE_LIMIT: number = 3;/.test(INDEX) &&
+  /const RESTORE_TAG: string = 'ro1';/.test(INDEX) &&
+  (INDEX.match(/this\.pendingRestoreReadonly = !readable;/g) || []).length === 2, true);
+check('bulkIoAllowed 闸门数量不减（≥8 个 IO 入口）',
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8, true);
+check('只读态提示卡与「选择文件夹」按钮仍在',
+  /if \(this\.restoreHintText\.length > 0\) \{/.test(INDEX) &&
+  /Button\('选择文件夹重新打开'\)/.test(INDEX), true);
+check('按钮永不禁用（非注释行无 .enabled）', /\.enabled\(/.test(CODE_LINES) === false, true);
+check('AUTO_RESUME_ON_START 护栏仍 false（启动绝不重扫 / 弹权限框）',
+  /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX), true);
+check('showLastOnStart 仍不含选择器 / 权限 / 全量重扫',
+  /loadAllGallery|queryAllPhotos|ensureGalleryPermission|DocumentViewPicker|PhotoViewPicker/
+    .test(RESUME_FN), false);
+check('启动关键路径仍无 new Promise / Promise.race（不引入同步等待）',
+  /new Promise|Promise\.race/.test(INDEX), false);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);

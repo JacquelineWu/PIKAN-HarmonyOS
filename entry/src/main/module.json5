@@ -33,6 +33,26 @@
      *   }
      * ],
      * ------------------------------------------------------------------ */
+    /* 目录 URI 持久授权（2026-11-11）：让用户用「选择文件夹」选过的目录在进程重启后
+     * 仍能读取 —— 重开 APP 直接出图，不必每次重新选一次目录。
+     *
+     * 这个权限是 system_grant + normal（SDK 26 PermissionDefinitions.json）：
+     * 安装时自动授予，**不会弹权限框**，也不会像上面的 READ_IMAGEVIDEO
+     * （user_grant / system_basic）那样因 debug 签名缺少 ACL 而安装失败。
+     *
+     * ⚠️ 权限只是让 fileShare.persistPermission / activatePermission 可以调用；
+     *    真正生效仍需用户至少选过一次目录 —— picker 授予的原始 URI 才是授权根节点。
+     *    老版本残留的快照没有建立过持久授权，重开时会落只读名单态并提示重选一次。 */
+    "requestPermissions": [
+      {
+        "name": "ohos.permission.FILE_ACCESS_PERSIST",
+        "reason": "$string:permission_reason_file_access_persist",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "always"
+        }
+      }
+    ],
     "abilities": [
       {
         "name": "EntryAbility",

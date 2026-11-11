@@ -706,10 +706,10 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
    全部复位）—— 否则 500ms 后 `flushPos()` 会把「只有 1 张」的列表写进快照，
    **覆盖掉上次会话的整批 uri**，下次就再也恢复不出来了。
 
-> **平台限制**：HarmonyOS `DocumentViewPicker` 的 URI 授权是逐 URI、默认不持久的
-> （工程里没有 `persistPermission`）。重启后系统回收授权时，恢复出来的那批 URI 一个都打不开。
-> **2026-11-11 实机反馈已按下一节处理**：授权未证实就落「只读名单态」，
-> 不再让整条批量 IO 链打到死 URI 上。
+> **平台限制与本次解法**：HarmonyOS `DocumentViewPicker` 的 URI 授权是逐 URI、默认不持久的。
+> 重启后系统回收授权时，恢复出来的那批 URI 一个都打不开。
+> **2026-11-11 分两步处理**：先用下一节的「只读名单态」挡住授权失效时的批量 IO 冻结；
+> 再补上「目录 URI 持久授权」一节，从根上让重开能直接出图。
 
 ### 实机反馈：重开后「名单在、图片白、往上层没反应、档案列表点不动」（2026-11-11）
 
@@ -738,11 +738,34 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 - 诊断标记 **`ro1`**（`RESTORE_TAG`，不是版本号）出现在状态栏 / 提示卡 / 右下角诊断串里，
   实机一眼就能认出新包；`APP_VERSION` 仍为 1.0.7。
 
-> 想彻底消除「重启后必须重新选一次目录」，需要引入
-> `ohos.permission.FILE_ACCESS_PERSIST` + `fileShare.persistPermission/activatePermission`
-> 并在选择文件夹时持久化该目录 URI（SDK 26 `PermissionDefinitions.json` 里它是
-> `system_grant / normal`，比受限的 `READ_IMAGEVIDEO` 安全得多）。这属于**新增权限声明**，
-> 会动 `module.json5` 且需重新签名，故本次按最小改动先修冻结与交互失效，未纳入。
+### 目录 URI 持久授权：让重开直接出图（2026-11-11 追加）
+
+上一节修的是「授权失效时不要卡死」，这一节修的是「让授权不再失效」。
+
+| 环节 | 做法 |
+|---|---|
+| 权限 | `module.json5` 声明 `ohos.permission.FILE_ACCESS_PERSIST`。SDK 26 `PermissionDefinitions.json` 里它是 `system_grant / normal / provisionEnable` —— **安装时自动授予、不弹权限框**，也不会像 `READ_IMAGEVIDEO`（`user_grant / system_basic`）那样让 debug 签名安装失败 |
+| 选目录时 | `chooseFolder()` / `chooseFolderAt()` 拿到 `picker.select()` 返回的**原始目录 URI** 后，fire-and-forget 调 `fileShare.persistPermission([{uri, READ_MODE}])`，并把该 URI 同步写进 `POS_KEY_DIR`（`lastDirUri`） |
+| 重开时 | `beginRestore()` 在首帧后 900ms 的定时器里先（有超时兜底地）`activatePermission()`，再进入原恢复链 |
+| 裁决 | **探测仍由 `probeRestoreUris()` 说了算**：activate 成功 → 3 张探测通过 → `RESTORE_FULL` 直接出图；activate 失败 / 平台拒绝 → 探测失败 → `RESTORE_READONLY`，防冻结兜底原样保留 |
+
+安全边界（与历史 appfreeze 同源的护栏，逐条保留）：
+
+- `persistPolicyUris()` 恒限量 1：只授权 picker 原始目录 URI，**绝不**把快照里几百条拼出来的
+  子文件 URI 塞进 policy —— 那会变成启动期批量跨进程调用，且平台会返回 `PERSISTENCE_FORBIDDEN`。
+- `activatePermission` 是异步跨进程调用，`beginRestore()` **不 await** 它：用
+  `PERSIST_ACTIVATE_MS = 1500ms` 超时定时器与之竞速，`finishPersistActivate()` 靠
+  `persistSettled` 只收口一次，随后照常 `showLastOnStart()`。系统服务挂住也不会让界面停在空态。
+- 全部 SDK 异常吞掉并降级；`PersistPlan.ts` 只做纯决策、不依赖鸿蒙 SDK，可 Node 回归。
+- 诊断标记 **`p1`**（`PERSIST_TAG`，不是版本号）：激活成功时状态栏带「`p1` 目录授权已持久」，
+  右下角诊断串带 `persist OK | p1`；只读名单态诊断串带 `p0/p1`。
+
+> ⚠️ **升级后的首次启动仍要重选一次目录**：老版本保存的快照里没有 `lastDirUri`，也没有建立过
+> 持久授权，所以第一次重开会落只读名单态，提示「这是升级后的首次恢复：重新选一次该目录后，
+> 以后重开即可直接出图」。再选一次（picker 授权只能由用户给）之后，后续重开才直接出图。
+>
+> ⚠️ 若平台对该目录 URI 返回 `PERSISTENCE_FORBIDDEN`（某些 picker URI 不允许持久化），
+> `persistPermission` 会失败并记日志，重开时探测失败 → 依旧落只读名单态，**不会卡死、不会崩**。
 
 ### 需求 1 的另一半：退出必须**同步**落盘
 
@@ -767,20 +790,28 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 
 ### 验证
 
-`node --experimental-strip-types tests/dirname.test.mjs` **238 → 293 → 367/367 通过**：
+`node --experimental-strip-types tests/dirname.test.mjs` **238 → 293 → 367 → 419/419 通过**：
 新增 `ResumePlan` 纯函数用例（恢复决策 8 例、单张 uri、延迟安全、退出落盘、快照限幅、
 恢复态按钮）与源码静态契约（`onPageHide` / `putSync+flushSync` / 恢复函数体不含重扫与选择器 /
 单张兜底撤销落盘等）。其中与「禁用按钮」相关的断言已在澄清修正时一并替换。
-最后 74 例覆盖本次「恢复态守卫」：`restoreModeOf` / `bulkIoAllowed` / `restoreProbeUris`
+中间 74 例覆盖「恢复态守卫」：`restoreModeOf` / `bulkIoAllowed` / `restoreProbeUris`
 （优先级、去重、限量、无空串）/ 三种只读提示文案，以及源码静态契约
 （探测上限 3、`applyItems` 先落地模式、7 个 IO 入口各有闸门、两条恢复路径都先探授权、
 `select/go/browseUp` 有可见反馈、hover 解码被挡、按钮仍无 `.enabled(`、版本未升）。
-状态栏出现 **`rs1`** 或 **`ro1`** 即新包（二者都只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
+最后 52 例覆盖本次「目录 URI 持久授权」：`persistAction` / `persistPolicyUris` /
+`persistTimeoutSafe` / 三种提示文案，以及源码静态契约（`module.json5` 只声明
+`FILE_ACCESS_PERSIST`、两个 SDK 调用各一次且只用 `READ_MODE`、超时竞速与只跑一次的收口、
+目录 URI 四处落盘、旧数据迁移提示），并**逐条回归**上一轮的防冻结兜底
+（探测上限 3、两条恢复路径先探授权、≥8 个 `bulkIoAllowed` 闸门、按钮仍无 `.enabled(`、版本未升）。
+状态栏出现 **`rs1`** / **`ro1`** / **`p1`** 即新包（都只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
 
 按 11-10 约定：**未编译 HAP、未放桌面、未升版本、未 push**。
-实机请在 DevEco Studio 编译后：看几张图 → 按 Home / 切后台 → 重开 APP，
-应自动回到上次那张图且状态栏带 `rs1`。此时「往上层」**仍是亮着可点的**；
-点「选择文件夹」进入有父级的目录后即可逐级上移。
+实机请在 DevEco Studio 编译后：
+
+1. 点「选择文件夹」进一个有图的目录、看几张图（这一步建立持久授权）→ 按 Home / 切后台 →
+   重开 APP，应自动回到上次那张图，状态栏带 `rs1 · p1 目录授权已持久`，**无需再选文件夹**。
+2. 若是刚升级的首次启动：先看只读名单态提示，按提示重选一次该目录，之后重复第 1 步验证。
+3. 此时「往上层」**仍是亮着可点的**；点「选择文件夹」进入有父级的目录后即可逐级上移。
 
 ## 往上层：改为 Windows 文件管理器的目录层级语义（2026-11-10）
 
