@@ -57,7 +57,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf, pickerStartO
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../common/PreloadBudget';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
-  resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap } from '../common/ResumePlan';
+  resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
+  RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed, restoreProbeUris,
+  readonlyHint, readonlyTapHint, readonlyUpHint } from '../common/ResumePlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -72,6 +74,14 @@ const APP_VERSION: string = '1.0.7';
 const UP_NAV_TAG: string = 'up4';
 /** 「启动恢复上次相片」的诊断标记（也不是版本号）。状态栏出现 rs1 即表示装的是新包。 */
 const RESUME_TAG: string = 'rs1';
+/** 「恢复名单降级为只读」的诊断标记（也不是版本号）。
+ *  2026-11-11 实机反馈：重开后名单在、图片白、按钮与列表点不动。根因是快照 uri 的
+ *  逐 URI 授权在重启后失效，恢复链却照常对这批死 uri 跑预载/补体积/对开探测，
+ *  几百次同步跨进程调用把主线程打满。状态栏/提示卡片出现 ro1 即表示装的是带此修复的新包。 */
+const RESTORE_TAG: string = 'ro1';
+/** 恢复前最多探几张 uri 判断授权是否还在。⚠️ 必须保持很小：
+ *  每次 fs.openSync 对失效授权 uri 都是一次同步跨进程调用，批量探测会把主线程打满。 */
+const RESTORE_PROBE_LIMIT: number = 3;
 /** 预览区底色：Win64 版 c42d92b 起由近黑 #0a0b0d 改为中灰 #5F5F5F —— 看竖图 / 白底扫描件时
  *  更容易判断图片边界，也不至于把暗部细节和背景混在一起。想回深色改回 '#0a0b0d' 即可。 */
 const CANVAS_BG: string = '#5F5F5F';
@@ -838,6 +848,9 @@ struct ArchiveRow {
   @Prop idx: number = 0;
   @Prop selected: boolean = false;
   @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
+  /** 只读名单态：快照 uri 的授权已失效，悬停时**绝不**发起 384px 缩略图解码
+   *  （ThumbLoader 走 decodePx → fs.openSync，同样是同步跨进程调用）。 */
+  @Prop thumbDisabled: boolean = false;
   // ⚠️ 回调也不能加 private：ArkTS 会报
   //    "Property 'onTap' is private and can not be initialized through the component constructor"。
   onTap: (idx: number) => void = () => {};
@@ -915,7 +928,8 @@ struct ArchiveRow {
    *  先查悬停自己的 LRU，命中即同步出图；没命中才后台解一张 384px（同时最多一个）。
    *  目录行 / 不支持预览的灰行不弹；离屏、点击、划走由 alive / showHover 收起。 */
   private onHoverChange(on: boolean): void {
-    if (this.kind !== ROW_IMAGE) {
+    // 只读名单态：连浮层都不弹，彻底断掉 hover 解码链（预览区指引卡会说明原因）。
+    if (this.kind !== ROW_IMAGE || this.thumbDisabled) {
       return;
     }
     const key: string = this.rowKey();
@@ -1264,6 +1278,17 @@ struct Index {
   /** 启动恢复：只跑一次，且用户已经自己选了东西就立刻让路。 */
   private resumeDone: boolean = false;
   private resumeTimer: number = -1;
+  /** 恢复模式（见 ResumePlan）：默认 RESTORE_FULL（正常使用），
+   *  只有启动恢复探测到「快照 uri 一个都打不开」才降为 RESTORE_READONLY。
+   *  只读态只列名单，禁止一切批量同步磁盘 IO，保证主线程空闲、按钮与列表可操作。 */
+  private restoreMode: number = RESTORE_FULL;
+  /** 只读名单态的提示文案（@State，驱动预览区提示卡）。空串 = 非只读态。 */
+  @State restoreHintText: string = '';
+  /** 恢复链专用：探测结果先暂存，等真正建列表（setItems / openFolder）时才落地。
+   *  这样「用户主动换源」不必逐个入口手写清除 —— pending 恒为 false，自动回到完整模式。 */
+  private pendingRestoreReadonly: boolean = false;
+  private pendingRestoreCount: number = 0;
+  private pendingRestoreSrc: string = '';
   /** 用户是否已经主动操作过（选文件夹 / 选图 / 往上层）。恢复绝不能抢用户当前的视图。 */
   private userActed: boolean = false;
   /** 本次运行是否已经弹过「读取图库」权限申请。
@@ -1465,6 +1490,55 @@ struct Index {
     }
   }
 
+  /** 只探最多 RESTORE_PROBE_LIMIT 张 uri 能否 open —— 判断快照授权在重启后是否还在。
+   *
+   *  ⚠️ 每次 fs.openSync 对失效授权的 `file://docs/...` uri 都是一次同步跨进程调用，
+   *     **绝不能探整批**（几百次就足以把主线程打满，正是历史 appfreeze 的根因）。
+   *     这里最多 3 张、且只在首帧后 900ms 的恢复链里跑一次。
+   *  返回 true = 这批 uri 还能读，走完整恢复；false = 授权已失效，落只读名单态。 */
+  private probeRestoreUris(uris: Array<string>, okUri: string, savedUri: string): boolean {
+    const cand: Array<string> = restoreProbeUris(uris, okUri, savedUri, RESTORE_PROBE_LIMIT);
+    for (let i: number = 0; i < cand.length; i++) {
+      let f: fs.File | undefined = undefined;
+      try {
+        f = fs.openSync(cand[i], fs.OpenMode.READ_ONLY);
+        return true;
+      } catch (e) {
+        // 这一张打不开，继续试下一个候选
+      } finally {
+        if (f !== undefined) {
+          try {
+            fs.closeSync(f);
+          } catch (e) {
+            hilog.warn(DOMAIN, TAG, 'probe close skipped');
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /** 在建列表前统一落地恢复模式 —— applyItems 是唯一的收口点。
+   *  pending 恒为 false（用户主动换源 / 正常启动）→ RESTORE_FULL，行为与旧版完全一致；
+   *  pending=true（恢复链探测到授权失效）→ RESTORE_READONLY + 提示卡 + 诊断串。
+   *  决策走纯函数 restoreModeOf()，便于 Node 回归覆盖。 */
+  private applyPendingRestore(count: number, src: string): void {
+    const mode: number = restoreModeOf(!this.pendingRestoreReadonly);
+    this.restoreMode = mode;
+    if (mode === RESTORE_READONLY) {
+      const n: number = this.pendingRestoreCount > 0 ? this.pendingRestoreCount : count;
+      const from: string = this.pendingRestoreSrc.length > 0 ? this.pendingRestoreSrc : src;
+      this.restoreHintText = readonlyHint(n, from, RESTORE_TAG);
+      this.diagLine = 'restore READONLY | ' + RESTORE_TAG + ' | ' + n + ' 张 | v' + APP_VERSION;
+      hilog.warn(DOMAIN, TAG, 'restore: READONLY %{public}d items (uri auth lost after restart)', n);
+    } else {
+      this.restoreHintText = '';
+    }
+    this.pendingRestoreReadonly = false;
+    this.pendingRestoreCount = 0;
+    this.pendingRestoreSrc = '';
+  }
+
   /** 排一次「首帧后显示上次相片」。只排一个定时器，重复调用无副作用。
    *  ⚠️ 绝不在这里读 preferences / 读快照 / 建列表：这里还在启动调用栈上。 */
   private scheduleShowLast(): void {
@@ -1518,12 +1592,15 @@ struct Index {
       return;
     }
     if (act === RESUME_SNAPSHOT) {
-      const ok: boolean = await this.restoreFromSnapshot(); // setItems → applyItems → restoreIndex → 出图
+      const ok: boolean = await this.restoreFromSnapshot(); // setItems → applyItems → restoreIndex
       if (ok) {
-        this.status = '已恢复上次会话 · ' + this.items.length + ' 张 · 第 ' +
-          (this.cur + 1) + ' 张 · ' + RESUME_TAG + '（若图片打不开请重新选择文件夹）';
-        hilog.info(DOMAIN, TAG, 'resume: snapshot restored %{public}d items at %{public}d',
-          this.items.length, this.cur);
+        // 只读名单态（授权失效）时不说「已恢复图片」：名单在、图打不开，给明确指引。
+        this.status = this.restoreHintText.length > 0
+          ? this.restoreHintText
+          : '已恢复上次会话 · ' + this.items.length + ' 张 · 第 ' +
+            (this.cur + 1) + ' 张 · ' + RESUME_TAG;
+        hilog.info(DOMAIN, TAG, 'resume: snapshot restored %{public}d items at %{public}d ro=%{public}d',
+          this.items.length, this.cur, this.restoreHintText.length > 0 ? 1 : 0);
         return;
       }
       hilog.warn(DOMAIN, TAG, 'resume: snapshot empty/unreadable → fall back to single');
@@ -1533,6 +1610,11 @@ struct Index {
     // act 走到这里只可能是 RESUME_SINGLE，或 RESUME_SNAPSHOT 读不出可用快照后的降级。
     if ((act === RESUME_SINGLE || act === RESUME_SNAPSHOT) && single.length > 0) {
       const src: string = saved !== undefined && saved.src.length > 0 ? saved.src : '上次会话';
+      // 单张兜底同样先探授权：只有 1 张，探一次即可，不让 Image(uri) 兜底反复重试死 uri。
+      const readable: boolean = this.probeRestoreUris([single], this.okUri, savedUri);
+      this.pendingRestoreReadonly = !readable;
+      this.pendingRestoreCount = 1;
+      this.pendingRestoreSrc = src;
       this.setItems([single], src);
       // ⚠️ setItems → applyItems 末尾会 markPos() + snapDirty=true，500ms 后 flushPos
       //    会把「只有 1 张」的列表写进快照，覆盖掉上次会话的整批 uri；位置记忆也会被
@@ -1547,10 +1629,13 @@ struct Index {
       if (saved !== undefined) {
         this.lastPos = saved;
       }
-      this.status = '已显示上次看到的「' +
-        (saved !== undefined && saved.name.length > 0 ? saved.name : baseName(single)) +
-        '」· ' + RESUME_TAG + '（用「选择文件夹」可重新打开整批图片）';
-      hilog.info(DOMAIN, TAG, 'resume: single shown, snapshot preserved');
+      this.status = this.restoreHintText.length > 0
+        ? this.restoreHintText
+        : '已显示上次看到的「' +
+          (saved !== undefined && saved.name.length > 0 ? saved.name : baseName(single)) +
+          '」· ' + RESUME_TAG + '（用「选择文件夹」可重新打开整批图片）';
+      hilog.info(DOMAIN, TAG, 'resume: single shown, snapshot preserved, ro=%{public}d',
+        this.restoreHintText.length > 0 ? 1 : 0);
     }
   }
 
@@ -1790,9 +1875,17 @@ struct Index {
       }
       const p: LastPos | undefined = this.lastPos;
       const src: string = (p !== undefined && p.src.length > 0) ? p.src : '系统图库';
-      this.setItems(uris, src);       // 内部 applyItems → restoreIndex → 自动落回上次那张
+      // ⚠️ 恢复前只探最多 3 张：重启后逐 URI 授权通常整体失效。
+      //    证实可读才走完整恢复（预载 / 补体积 / 解码照常）；证伪则落只读名单态，
+      //    绝不把几百次同步跨进程 IO 打到主线程上（那正是「名单在、界面全卡住」的根因）。
+      const readable: boolean = this.probeRestoreUris(uris, this.okUri,
+        p !== undefined ? p.uri : '');
+      this.pendingRestoreReadonly = !readable;
+      this.pendingRestoreCount = uris.length;
+      this.pendingRestoreSrc = src;
+      this.setItems(uris, src);       // 内部 applyItems → applyPendingRestore → restoreIndex
       this.snapDirty = false;         // 列表本来就是从快照来的，没必要再写回去
-      this.status = this.status + '（来自上次会话；若图片打不开请重新选择）';
+      this.status = this.status + '（来自上次会话）';
       return true;
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'restore snapshot failed: %{public}s', JSON.stringify(e));
@@ -2029,6 +2122,10 @@ struct Index {
     // 不滚动列表、不清预览缓存、不重解大图。否则 hover 解码让目录 mtime 抖动后，
     // 一次自动重扫就会把用户视图整个拉回「上次档案 / 目录」。
     const keepView: boolean = preserveView === true;
+    // ⚠️ 必须**先**落地恢复模式：下面 showPreviewOf / fillSizes / schedulePreload /
+    //    refreshSpread 全都要读它。只读名单态时它们会被闸门挡住，主线程保持空闲。
+    this.applyPendingRestore(list.length, src);
+    const ioOk: boolean = bulkIoAllowed(this.restoreMode);
     const prevUri: string = (keepView && this.cur >= 0 && this.cur < this.items.length)
       ? this.items[this.cur].uri : '';
     this.items = list;
@@ -2101,7 +2198,10 @@ struct Index {
     }
     // 接上启动预热的那张：此刻列表已有、cur 已定，交给缓存后 showPreviewOf 会直接命中。
     // 若它不属于这一批（用户换了别的来源），schedulePreload → evictOutside 会顺手释放掉。
-    if (!keepView) {
+    // ⚠️ 只读名单态（ioOk=false）：名单已建好、cur 已落位，但**绝不**碰 uri —— 解码 /
+    //    补体积 / 预载 / 对开探测一律跳过。否则几百次失败的同步跨进程调用会把主线程打满，
+    //    表现就是「名单在、图片白、按钮和列表全点不动」。UI 由 restoreHintText 提示卡接管。
+    if (!keepView && ioOk) {
       if (this.warm !== undefined) {
         const w: PreviewEntry = this.warm;
         this.warm = undefined;
@@ -2112,8 +2212,20 @@ struct Index {
       this.showPreviewOf(this.cur);
       this.fillSizes();
     }
-    this.refreshSpread();
-    this.schedulePreload();
+    if (ioOk) {
+      this.refreshSpread();
+      this.schedulePreload();
+    } else {
+      // 清掉可能残留的上一批视图，避免只读态还显示一张不属于这批的旧图。
+      this.releaseViewOwned();
+      this.viewPixelMap = undefined;
+      this.viewFailed = false;
+      this.clearBlur();
+      this.spreadB = -1;
+      this.clearRightPage();
+      this.cacheCount = 0;
+      this.cacheBytes = this.preloadBytes;
+    }
     this.snapDirty = true; // 列表换了 → 下次写盘时把这一批 uri 存成快照
     this.markPos();        // 顺带把「起始位置」也记下来（含快照在内一起落盘）
   }
@@ -2125,6 +2237,10 @@ struct Index {
    *  这里切成小批，批与批之间 setTimeout 让出主线程 ——
    *  用户会看到列表里的体积陆续从 '--' 变成实际值，界面始终可操作。 */
   private fillSizes(): void {
+    // 只读名单态：绝不逐个 statSync（最多 600 次同步跨进程调用会打满主线程）。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      return;
+    }
     this.sizeSeq++;
     const seq: number = this.sizeSeq;
     let i: number = 0;
@@ -2181,6 +2297,12 @@ struct Index {
     const it = this.items[idx];
     if (!it) {
       this.bytes = 0;
+      return;
+    }
+    // 只读名单态：绝不对失效授权 uri 做 statSync（同步跨进程调用）。
+    // 已有体积就照实显示，没有就留 0，重新授权后由 fillSizes 补齐。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      this.bytes = it.size > 0 ? it.size : 0;
       return;
     }
     this.bytes = it.size > 0 ? it.size : this.trySize(it.uri);
@@ -2422,6 +2544,15 @@ struct Index {
     }
     this.cur = idx;
     this.resetView();
+    // 只读名单态：名单照常可选 / 高亮 / 记位置，只切断一切 uri IO。
+    // 状态栏给一句明确指引 —— 按钮和列表「点了必须看得见反应」，不能像死了一样。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      this.scroller.scrollToIndex(this.rowOfItem(idx), false);
+      this.status = readonlyTapHint(this.items[idx].name);
+      this.dataSource.reload(this.rows);
+      this.markPos();
+      return;
+    }
     this.loadMeta(idx);
     this.showPreviewOf(idx);
     this.refreshSpread();
@@ -2440,6 +2571,15 @@ struct Index {
     const n = this.items.length;
     this.cur = ((this.cur + delta) % n + n) % n;
     this.resetView();
+    // 只读名单态：滚轮 / 翻页照常走名单（位置、高亮、记忆都更新），
+    // 只切断解码与元数据 IO，并给一句看得见的反馈。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      this.scroller.scrollToIndex(this.rowOfItem(this.cur), false);
+      this.status = readonlyTapHint(this.items[this.cur].name);
+      this.dataSource.reload(this.rows);
+      this.markPos();
+      return;
+    }
     this.loadMeta(this.cur);
     this.showPreviewOf(this.cur);
     this.refreshSpread();
@@ -2807,6 +2947,12 @@ struct Index {
    *  edge = QUICK_EDGE(768) 得到低清占位；edge = preloadEdge() 得到「可显示清晰度」的预载；
    *  edge = viewEdge() 得到放大时用的全清图。三种场景共用同一套系统 codec。 */
   private decodeTo(uri: string, edge: number): Promise<PreviewEntry | undefined> {
+    // ⚠️ 只读名单态的总闸门：所有主视图 / 预载 / 右页 / 预热解码都从这里过。
+    //    恢复出来的是一批授权已失效的死 uri，任何一次 decodePx 都是同步跨进程 openSync；
+    //    在这里集中短路，比在每个调用点各挡一次更可靠，也杜绝漏网。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      return Promise.resolve<PreviewEntry | undefined>(undefined);
+    }
     // 抽离到模块级 decodePx：列表缩略图也用同一份解码逻辑（同一套系统 codec）
     return decodePx(uri, edge);
   }
@@ -2955,6 +3101,12 @@ struct Index {
     this.viewPixelMap = undefined;
     this.imgW = 0;
     this.imgH = 0;
+    // 只读名单态：不解码，也不让 viewFailed 变 true —— 否则 previewImage 会画
+    // Image(uri) 交给系统对死 uri 反复重试。画面留中灰，由预览区指引卡接管。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      this.clearBlur();
+      return;
+    }
     if (idx < 0 || idx >= this.items.length) {
       this.clearBlur();
       return;
@@ -3195,6 +3347,11 @@ struct Index {
 
   /** 启动后台预载。已在跑就只自增代号，让现有链自动跟到最新位置，避免并发多条链。 */
   private schedulePreload(): void {
+    // 只读名单态：不启动预载链（窗口最多 201 张，逐张 decodePx 全是死 uri）。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      this.preloadBusy = false;
+      return;
+    }
     this.evictOutside(); // 先把窗口外的释放掉，位置一变就跟着挪，内存不随翻页累积
     this.preloadSeq++;
     if (this.preloadBusy) {
@@ -3304,6 +3461,12 @@ struct Index {
    *  「点到 / 翻到哪张，哪张就在左边」—— 固定按 [0,1][2,3] 分组会让第 2 张永远选不中，
    *  所以以当前落点为基准，下一张同为竖图才并排。翻页步长恒为一格（go(±1)）。 */
   private refreshSpread(): void {
+    // 只读名单态：不碰任何 uri（createImageSource / createPixelMap 都是跨进程 IO）。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      this.spreadB = -1;
+      this.clearRightPage();
+      return;
+    }
     if (!SPREAD_PORTRAIT || this.items.length === 0 || this.cur < 0) {
       this.spreadB = -1;
       this.clearRightPage();
@@ -3353,6 +3516,10 @@ struct Index {
 
   /** 异步探一张图的原始宽高（只读 ImageInfo，不解码像素），结果进缓存并触发一次重算。 */
   private probeOne(uri: string, seq: number): void {
+    // 只读名单态：即便被 isPortrait 间接调到，也绝不 createImageSource 死 uri。
+    if (!bulkIoAllowed(this.restoreMode)) {
+      return;
+    }
     if (this.probeCache.has(uri)) {
       return;
     }
@@ -3859,6 +4026,13 @@ struct Index {
   private async browseUp(): Promise<void> {
     if (this.folderBusy) {
       this.status = '往上层：上一批目录还在列，稍候再点';
+      return;
+    }
+    // 只读名单态：恢复出来是图片列表态，本来就没有目录层级。
+    // 绝不禁用按钮 —— 点了必须给明确指引，不能像没反应一样（2026-11-11 实机反馈）。
+    if (this.restoreMode === RESTORE_READONLY) {
+      this.status = readonlyUpHint();
+      this.diagLine = 'up READONLY | ' + RESTORE_TAG + ' | 无目录层级 | v' + APP_VERSION;
       return;
     }
     // 唯一的当前路径：目录浏览态就是实测能列的真实路径；非目录浏览态为空。
@@ -4490,8 +4664,9 @@ struct Index {
                       kind: item.kind ?? ROW_IMAGE,
                       idx: idx,
                       selected: (item.itemIndex ?? idx) === this.cur,
-                      collapsed: this.listCollapsed,
-                      onTap: (i: number) => {
+                       collapsed: this.listCollapsed,
+                       thumbDisabled: this.restoreMode === RESTORE_READONLY,
+                       onTap: (i: number) => {
                         this.onRowTap(i);
                       },
                       onDblTap: (i: number) => {
@@ -4596,6 +4771,49 @@ struct Index {
             .height('100%')
             .justifyContent(FlexAlign.Center)
             .alignItems(HorizontalAlign.Center)
+          }
+
+          // 只读名单态：授权失效时一张图都不画，改给一张可操作的指引卡。
+          // 外层 Row 用 Transparent：既不吞滚轮 / 拖拽，也不挡右栏浮层；卡片里的按钮照常可点。
+          if (this.restoreHintText.length > 0) {
+            Row() {
+              Column() {
+                Text('⚠ 上次名单已恢复，图片暂时不能预览')
+                  .fontSize(16)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#f6c85f')
+                  .margin({ bottom: 10 })
+                Text(this.restoreHintText)
+                  .fontSize(13)
+                  .fontColor('#dfe5ef')
+                  .textAlign(TextAlign.Center)
+                  .maxLines(4)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .constraintSize({ maxWidth: 440 })
+                  .margin({ bottom: 14 })
+                Button('选择文件夹重新打开')
+                  .type(ButtonType.Normal)
+                  .fontSize(13)
+                  .fontColor('#101216')
+                  .backgroundColor('#f6c85f')
+                  .borderRadius(6)
+                  .height(34)
+                  .padding({ left: 16, right: 16 })
+                  .onClick(() => {
+                    this.chooseFolder();
+                  })
+              }
+              .padding(20)
+              .backgroundColor('#e61a1d23')
+              .border({ width: 1, color: '#3a4150' })
+              .borderRadius(10)
+              .constraintSize({ maxWidth: 500 })
+            }
+            .width('100%')
+            .height('100%')
+            .justifyContent(FlexAlign.Center)
+            .alignItems(VerticalAlign.Center)
+            .hitTestBehavior(HitTestMode.Transparent)
           }
 
           // 左上角信息浮层（Win64 015464f：只留档案名；对开时两个数并列）

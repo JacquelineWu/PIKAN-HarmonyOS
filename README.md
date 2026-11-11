@@ -707,9 +707,42 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
    **覆盖掉上次会话的整批 uri**，下次就再也恢复不出来了。
 
 > **平台限制**：HarmonyOS `DocumentViewPicker` 的 URI 授权是逐 URI、默认不持久的
-> （工程里没有 `persistPermission`）。重启后若系统回收了授权，恢复出来的部分图片可能打不开。
-> 此时 `showPreviewOf` 有 `Image(uri)` 兜底，且状态栏明确提示「若图片打不开请重新选择文件夹」；
-> 列表、位置、文件名都在，不会白屏也不会崩。用「选择文件夹」重新打开同一目录即可恢复全部图片。
+> （工程里没有 `persistPermission`）。重启后系统回收授权时，恢复出来的那批 URI 一个都打不开。
+> **2026-11-11 实机反馈已按下一节处理**：授权未证实就落「只读名单态」，
+> 不再让整条批量 IO 链打到死 URI 上。
+
+### 实机反馈：重开后「名单在、图片白、往上层没反应、档案列表点不动」（2026-11-11）
+
+三个症状其实是**同一条因果链**，不是三个独立 bug：
+
+| # | 环节 | 后果 |
+|---|---|---|
+| ① | 快照里的 uri 是上次会话 `openFolder` 拼出来的子项路径；`DocumentViewPicker` 的逐 URI 授权默认不跨进程持久 | 重开后这批 uri **一个都打不开** → 名单（纯字符串）照样能显示，图片却全白 |
+| ② | 恢复链 `setItems → applyItems` 像正常换源一样启动全套后台任务：预载最多 201 张 `decodePx`（同步 `openSync`）、补体积最多 600 次 `statSync`、对开元数据 `createImageSource`，再加 `viewFailed` 后系统 `Image(uri)` 反复重试 | 每次对失效授权 uri 的调用都是**同步跨进程**的，几百次累积就把主线程占满 → 与历史 appfreeze 同源 |
+| ③ | 主线程被占满 + 恢复出来是图片列表态（`browseBase=''`） | 表现就是「往上层按了没反应、档案列表点不动」，其实按钮和列表根本没被禁用 |
+
+**修法：先证实授权，再决定恢复模式**（决策抽成 `ResumePlan` 纯函数，可 Node 回归）：
+
+- `restoreProbeUris()` 生成最多 `RESTORE_PROBE_LIMIT = 3` 个候选（okUri → savedUri → 快照开头），
+  `probeRestoreUris()` 逐个 `fs.openSync` —— **只探 3 张**，绝不探整批（探整批本身就是新的冻结源）。
+- 任一能打开 → `restoreModeOf(true) = RESTORE_FULL`，预载 / 补体积 / 解码 / 对开照常跑，旧行为完全不变。
+- 全打不开 → `RESTORE_READONLY`：`bulkIoAllowed()` 恒 false，作为**防冻结总闸门**串在
+  `decodeTo` / `showPreviewOf` / `fillSizes` / `schedulePreload` / `loadMeta` /
+  `refreshSpread` / `probeOne` / `applyItems` 所有会碰 uri 的入口上；
+  预览区不再画 `Image(uri)`，改由一张可操作的指引卡接管（带「选择文件夹重新打开」按钮）。
+- **按钮与列表绝不禁用、绝不置灰**（延续 11-11 澄清）：只读态下点档案行 / 滚轮翻页仍更新
+  位置、高亮与位置记忆，状态栏给 `readonlyTapHint()`；点「往上层」给 `readonlyUpHint()`；
+  悬停缩略图由 `@Prop thumbDisabled` 挡掉，连解码都不发起 —— **点了一定看得见反应**。
+- `applyItems()` 是唯一收口点：`applyPendingRestore()` 在建列表前落地模式。
+  用户主动换源时 pending 恒为 false → 自动回到 `RESTORE_FULL`，无需逐个入口手写清除。
+- 诊断标记 **`ro1`**（`RESTORE_TAG`，不是版本号）出现在状态栏 / 提示卡 / 右下角诊断串里，
+  实机一眼就能认出新包；`APP_VERSION` 仍为 1.0.7。
+
+> 想彻底消除「重启后必须重新选一次目录」，需要引入
+> `ohos.permission.FILE_ACCESS_PERSIST` + `fileShare.persistPermission/activatePermission`
+> 并在选择文件夹时持久化该目录 URI（SDK 26 `PermissionDefinitions.json` 里它是
+> `system_grant / normal`，比受限的 `READ_IMAGEVIDEO` 安全得多）。这属于**新增权限声明**，
+> 会动 `module.json5` 且需重新签名，故本次按最小改动先修冻结与交互失效，未纳入。
 
 ### 需求 1 的另一半：退出必须**同步**落盘
 
@@ -734,11 +767,15 @@ aboutToAppear → readLastPos()（异步读几个小 key，不阻塞首帧）
 
 ### 验证
 
-`node --experimental-strip-types tests/dirname.test.mjs` **238 → 293/293 通过**：
+`node --experimental-strip-types tests/dirname.test.mjs` **238 → 293 → 367/367 通过**：
 新增 `ResumePlan` 纯函数用例（恢复决策 8 例、单张 uri、延迟安全、退出落盘、快照限幅、
 恢复态按钮）与源码静态契约（`onPageHide` / `putSync+flushSync` / 恢复函数体不含重扫与选择器 /
 单张兜底撤销落盘等）。其中与「禁用按钮」相关的断言已在澄清修正时一并替换。
-状态栏出现 **`rs1`** 即新包（`RESUME_TAG` 只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
+最后 74 例覆盖本次「恢复态守卫」：`restoreModeOf` / `bulkIoAllowed` / `restoreProbeUris`
+（优先级、去重、限量、无空串）/ 三种只读提示文案，以及源码静态契约
+（探测上限 3、`applyItems` 先落地模式、7 个 IO 入口各有闸门、两条恢复路径都先探授权、
+`select/go/browseUp` 有可见反馈、hover 解码被挡、按钮仍无 `.enabled(`、版本未升）。
+状态栏出现 **`rs1`** 或 **`ro1`** 即新包（二者都只是诊断标记，**不是版本号**，`APP_VERSION` 仍 1.0.7）。
 
 按 11-10 约定：**未编译 HAP、未放桌面、未升版本、未 push**。
 实机请在 DevEco Studio 编译后：看几张图 → 按 Home / 切后台 → 重开 APP，

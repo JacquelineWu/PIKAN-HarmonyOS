@@ -18,7 +18,8 @@ import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated } from '../entry/src/main/ets/common/PreloadBudget.ts';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, FLUSH_SYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
-  upButtonEnabled } from '../entry/src/main/ets/common/ResumePlan.ts';
+  upButtonEnabled, RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed,
+  restoreProbeUris, readonlyHint, readonlyTapHint, readonlyUpHint } from '../entry/src/main/ets/common/ResumePlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -207,8 +208,8 @@ check('重扫传给 applyItems 的 preserveView', /rows, isRescan === true/.test
 check('preserveView 时不 restoreIndex', /keepView \? -1 : this\.restoreIndex\(list\)/.test(APPLY_FN), true);
 check('preserveView 时按 uri 保持当前张', /list\[i\]\.uri === prevUri/.test(APPLY_FN), true);
 check('preserveView 时不清预览缓存', /if \(!keepView\) \{\s*this\.clearPreviews\(\)/.test(APPLY_FN), true);
-check('preserveView 时不重解大图',
-  /if \(!keepView\) \{[\s\S]{0,700}this\.showPreviewOf\(this\.cur\)/.test(APPLY_FN), true);
+check('preserveView 时不重解大图（只读名单态同样不重解）',
+  /if \(!keepView && ioOk\) \{[\s\S]{0,900}this\.showPreviewOf\(this\.cur\)/.test(APPLY_FN), true);
 check('preserveView 时不覆盖状态栏（不闪「已载入 N 张」）',
   /if \(!keepView\) \{\s*this\.status = '已载入/.test(APPLY_FN), true);
 check('sameDirEntries 用纯函数比对', /return sameEntryNames\(want, cur\)/.test(INDEX), true);
@@ -626,6 +627,119 @@ check('诊断标记 rs1 不是版本号',
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 check('AppScope 版本未改', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+console.log('--- 恢复态守卫：授权证实 → 完整恢复 / 证伪 → 只读名单态（2026-11-11 实机反馈） ---');
+check('两种恢复模式是不同常量', RESTORE_FULL === RESTORE_READONLY, false);
+check('探测打开 → 完整恢复', restoreModeOf(true), RESTORE_FULL);
+check('探测打不开 → 只读名单态', restoreModeOf(false), RESTORE_READONLY);
+check('完整恢复允许批量 IO', bulkIoAllowed(RESTORE_FULL), true);
+check('只读名单态禁止批量 IO', bulkIoAllowed(RESTORE_READONLY), false);
+check('未知模式一律禁止批量 IO（保守兜底）', bulkIoAllowed(999), false);
+
+console.log('--- restoreProbeUris(): 候选去重、限量、不含空串 ---');
+const SNAP = ['/a/1.jpg', '/a/2.jpg', '/a/3.jpg', '/a/4.jpg'];
+check('优先级 okUri → savedUri → 快照开头',
+  restoreProbeUris(SNAP, '/a/ok.jpg', '/a/saved.jpg', 3).join('|'),
+  '/a/ok.jpg|/a/saved.jpg|/a/1.jpg');
+check('去重：okUri 与快照首张相同不会重复',
+  restoreProbeUris(SNAP, '/a/1.jpg', '/a/1.jpg', 3).join('|'),
+  '/a/1.jpg|/a/2.jpg|/a/3.jpg');
+check('严格限量（不能探整批，否则主线程被打满）',
+  restoreProbeUris(SNAP, '', '', 2).length, 2);
+check('limit<=0 → 空数组（不探、不 IO）',
+  restoreProbeUris(SNAP, '/a/ok.jpg', '', 0).length, 0);
+check('空串来源被过滤',
+  restoreProbeUris(['', '/a/1.jpg', ''], '', '', 3).join('|'), '/a/1.jpg');
+check('全空输入 → 空数组',
+  restoreProbeUris([], '', '', 3).length, 0);
+check('返回数组恒不含空串',
+  restoreProbeUris(SNAP, '', '', 3).every(x => x.length > 0), true);
+check('不修改传入的快照数组', SNAP.length, 4);
+
+console.log('--- 只读名单态提示：必须给出可操作指引 ---');
+const RH = readonlyHint(217, '人像', 'ro1');
+check('提示带名单张数', RH.includes('217 张'), true);
+check('提示带上次来源目录名', RH.includes('人像'), true);
+check('提示带实机诊断标记 ro1', RH.includes('ro1'), true);
+check('提示点名「选择文件夹」重新授权', RH.includes('选择文件夹'), true);
+check('提示说明授权在重启后失效', RH.includes('授权在重启后已失效'), true);
+check('空来源名有兜底文案', readonlyHint(3, '', 'ro1').includes('上次那个目录'), true);
+const RTH = readonlyTapHint('IMG_0001.HEIC');
+check('点档案行提示带档案名', RTH.includes('IMG_0001.HEIC'), true);
+check('点档案行提示说明暂不能预览', RTH.includes('暂不能预览'), true);
+check('点档案行提示仍指引选择文件夹', RTH.includes('选择文件夹'), true);
+check('往上层提示说明没有目录层级', readonlyUpHint().includes('没有目录层级'), true);
+check('往上层提示仍指引选择文件夹', readonlyUpHint().includes('选择文件夹'), true);
+
+console.log('--- 源码静态契约：恢复态分派 / 批量 IO 闸门 / 交互不失效 ---');
+check('诊断标记 ro1 存在且不是版本号',
+  /const RESTORE_TAG: string = 'ro1';/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+check('探测上限是 3（绝不探整批）',
+  /const RESTORE_PROBE_LIMIT: number = 3;/.test(INDEX), true);
+check('纯函数已从 ResumePlan 引入',
+  /restoreModeOf, bulkIoAllowed, restoreProbeUris,/.test(INDEX) &&
+  /readonlyHint, readonlyTapHint, readonlyUpHint/.test(INDEX), true);
+check('probeRestoreUris 只探候选、openSync 后立即 closeSync',
+  /private probeRestoreUris\(/.test(INDEX) &&
+  /fs\.openSync\(cand\[i\], fs\.OpenMode\.READ_ONLY\)/.test(INDEX) &&
+  /fs\.closeSync\(f\)/.test(INDEX), true);
+check('probeRestoreUris 用纯函数生成候选且走限量常量',
+  /restoreProbeUris\(uris, okUri, savedUri, RESTORE_PROBE_LIMIT\)/.test(INDEX), true);
+check('applyItems 是第一收口点：先 applyPendingRestore 再算 ioOk',
+  /this\.applyPendingRestore\(list\.length, src\);\s*\n\s*const ioOk: boolean = bulkIoAllowed\(this\.restoreMode\);/.test(INDEX), true);
+check('applyPendingRestore 用 restoreModeOf 决策（可回归）',
+  /const mode: number = restoreModeOf\(!this\.pendingRestoreReadonly\);/.test(INDEX), true);
+check('只读态设提示卡 + 诊断串，完整态清空提示',
+  /this\.restoreHintText = readonlyHint\(n, from, RESTORE_TAG\);/.test(INDEX) &&
+  /this\.diagLine = 'restore READONLY \| ' \+ RESTORE_TAG/.test(INDEX) &&
+  /this\.restoreHintText = '';/.test(INDEX), true);
+check('快照恢复与单张兜底两条路径都先探授权',
+  /const readable: boolean = this\.probeRestoreUris\(uris, this\.okUri,/.test(INDEX) &&
+  /const readable: boolean = this\.probeRestoreUris\(\[single\], this\.okUri, savedUri\);/.test(INDEX), true);
+check('两条恢复路径都写 pendingRestoreReadonly',
+  (INDEX.match(/this\.pendingRestoreReadonly = !readable;/g) || []).length, 2);
+check('只读态不启动预载 / 补体积 / 对开探测',
+  /if \(!keepView && ioOk\)/.test(INDEX) &&
+  /if \(ioOk\) \{\s*\n\s*this\.refreshSpread\(\);\s*\n\s*this\.schedulePreload\(\);/.test(INDEX), true);
+check('只读态清掉残留视图与缓存账目（不显示上一批旧图）',
+  /this\.releaseViewOwned\(\);\s*\n\s*this\.viewPixelMap = undefined;\s*\n\s*this\.viewFailed = false;/.test(INDEX), true);
+const DECODE_FN = INDEX.slice(INDEX.indexOf('private decodeTo('),
+  INDEX.indexOf('private decodeTo(') + 600);
+check('解码总闸门在 decodeTo（只读态直接 resolve undefined）',
+  /private decodeTo\(uri: string, edge: number\): Promise<PreviewEntry \| undefined> \{/.test(DECODE_FN) &&
+  /if \(!bulkIoAllowed\(this\.restoreMode\)\) \{[\s\S]{0,160}return Promise\.resolve<PreviewEntry \| undefined>\(undefined\);/.test(DECODE_FN) &&
+  /return decodePx\(uri, edge\);/.test(DECODE_FN), true);
+for (const [label, fn] of [
+  ['fillSizes', 'private fillSizes(): void {'],
+  ['schedulePreload', 'private schedulePreload(): void {'],
+  ['loadMeta', 'private loadMeta(idx: number): void {'],
+  ['refreshSpread', 'private refreshSpread(): void {'],
+  ['probeOne', 'private probeOne(uri: string, seq: number): void {'],
+  ['showPreviewOf', 'private showPreviewOf(idx: number): void {']
+]) {
+  const at = INDEX.indexOf(fn);
+  const body = at >= 0 ? INDEX.slice(at, at + 900) : '';
+  check(`${label} 内有 bulkIoAllowed 闸门`, body.includes('bulkIoAllowed(this.restoreMode)'), true);
+}
+check('select / go 在只读态仍更新位置与高亮，并给可见反馈',
+  (INDEX.match(/readonlyTapHint\(this\.items\[/g) || []).length, 2);
+check('browseUp 在只读态给明确指引且按钮不禁用',
+  /if \(this\.restoreMode === RESTORE_READONLY\) \{\s*\n\s*this\.status = readonlyUpHint\(\);/.test(INDEX) &&
+  /\.enabled\(/.test(CODE_LINES) === false, true);
+check('只读态提示卡落在预览区，带「选择文件夹」可点按钮',
+  /if \(this\.restoreHintText\.length > 0\) \{/.test(INDEX) &&
+  /Button\('选择文件夹重新打开'\)/.test(INDEX) &&
+  /\.onClick\(\(\) => \{\s*\n\s*this\.chooseFolder\(\);/.test(INDEX), true);
+check('提示卡外层不吞滚轮 / 拖拽事件',
+  /\.hitTestBehavior\(HitTestMode\.Transparent\)/.test(INDEX), true);
+check('只读态行组件不发起 hover 缩略图解码',
+  /@Prop thumbDisabled: boolean = false;/.test(INDEX) &&
+  /if \(this\.kind !== ROW_IMAGE \|\| this\.thumbDisabled\)/.test(INDEX) &&
+  /thumbDisabled: this\.restoreMode === RESTORE_READONLY,/.test(INDEX), true);
+check('正常换源（pending=false）自动回到完整模式，行为不变',
+  /this\.pendingRestoreReadonly = false;\s*\n\s*this\.pendingRestoreCount = 0;/.test(INDEX), true);
+check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

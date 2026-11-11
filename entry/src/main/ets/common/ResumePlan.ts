@@ -108,3 +108,83 @@ export function resumeSnapCap(rawCount: number, max: number): number {
 export function upButtonEnabled(): boolean {
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// 恢复模式：名单恢复了，但那批 URI 的读取授权是否被证实（2026-11-11 实机反馈）
+// ---------------------------------------------------------------------------
+
+/** 完整恢复：探测证实 uri 现在仍能打开 → 预载 / 补体积 / 解码 / 对开照常跑。 */
+export const RESTORE_FULL: number = 0;
+/** 只读名单态：探测打不开 → **只列名单，切断一切批量同步磁盘 IO**。
+ *
+ *  为什么必须分这两态（本次实机反馈的三个症状其实是同一条因果链）：
+ *  快照里的 uri 是上次会话 `openFolder` 拼出来的子项路径，
+ *  `DocumentViewPicker` 的逐 URI 授权默认**不跨进程持久**（工程没有
+ *  `persistPermission`）。重开后这些 uri 一个都打不开 —— 名单（纯字符串）
+ *  照样能显示，图片却全白。
+ *
+ *  更糟的是 `setItems → applyItems` 会像正常换源那样启动全套后台任务：
+ *  预载最多 201 张 `decodePx`、补体积最多 600 次 `statSync`、对开元数据
+ *  `createImageSource`，加上 `viewFailed` 后交给系统 `Image(uri)` 反复重试。
+ *  每一次对失效授权 uri 的调用都是**同步跨进程**的，累积几百次就把主线程
+ *  占满 —— 表现正是「名单在、图片白、往上层按了没反应、档案列表点不动」，
+ *  与历史 appfreeze（启动路径同步 IO 卡死）同源。
+ *
+ *  只读态只保留名单与交互，把这条 IO 链整条切断，并给一句可操作的指引
+ *  （点「选择文件夹」重新授权）。按钮与列表**不禁用、不置灰**，点了有反馈。 */
+export const RESTORE_READONLY: number = 1;
+
+/** 探测结果 → 恢复模式。探测对象只有一张，纯决策、无 IO。 */
+export function restoreModeOf(probeOk: boolean): number {
+  return probeOk ? RESTORE_FULL : RESTORE_READONLY;
+}
+
+/** 该模式是否允许「批量同步磁盘 IO」（预载 / 补体积 / 对开探测 / 主视图解码）。
+ *  只读态恒 false —— 这是防冻结的总闸门，所有会碰 uri 的批量入口都过它。 */
+export function bulkIoAllowed(mode: number): boolean {
+  return mode === RESTORE_FULL;
+}
+
+/** 生成「授权探测」的候选 uri（去重、最多 limit 张、恒不含空串）。
+ *  顺序：最后一次成功显示的 okUri → 位置里记的 savedUri → 快照开头若干条。
+ *  只探前几张就够了：授权是整批一起失效的，任一能打开即证明这批还能用；
+ *  多给几个候选只是为了避免「恰好那一张被删了」误判整批失效。 */
+export function restoreProbeUris(uris: Array<string>, okUri: string, savedUri: string,
+  limit: number): Array<string> {
+  const out: Array<string> = [];
+  if (limit <= 0) {
+    return out;
+  }
+  // 先把三个来源按优先级拼成一条序列，再一次去重取前 limit 个 ——
+  // 不写局部 lambda / 函数类型变量（ArkTS 的 arkts-no-func-type 不允许）。
+  const seq: Array<string> = [];
+  seq.push(okUri);
+  seq.push(savedUri);
+  for (let i: number = 0; i < uris.length; i++) {
+    seq.push(uris[i]);
+  }
+  for (let j: number = 0; j < seq.length && out.length < limit; j++) {
+    const u: string = seq[j];
+    if (u.length > 0 && out.indexOf(u) < 0) {
+      out.push(u);
+    }
+  }
+  return out;
+}
+
+/** 只读名单态的主提示。dir 是上次来源名，tag 是实机辨认用的诊断标记。 */
+export function readonlyHint(count: number, dir: string, tag: string): string {
+  const where: string = dir.length > 0 ? '「' + dir + '」' : '上次那个目录';
+  return '已恢复上次名单（' + count + ' 张）· 图片读取授权在重启后已失效，' +
+    '点「选择文件夹」重新打开 ' + where + ' 即可看图 · ' + tag;
+}
+
+/** 只读态点档案行 / 翻页的提示：不解码，但列表与按钮「点了必须看得见反应」。 */
+export function readonlyTapHint(name: string): string {
+  return '「' + name + '」暂不能预览（授权已失效）· 点「选择文件夹」重新打开该目录即可';
+}
+
+/** 只读态点「往上层」的提示：恢复出来是图片列表态，本来就没有目录层级。 */
+export function readonlyUpHint(): string {
+  return '当前是上次的图片名单，没有目录层级 · 点「选择文件夹」重新进入目录后即可逐级往上层';
+}
