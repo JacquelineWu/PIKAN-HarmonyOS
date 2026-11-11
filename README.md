@@ -525,6 +525,32 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 五项实机修正：全屏放大 / ESC 还原 / 右页锯齿 / hover 无档案名 / 梅花间竹列表（2026-11-11 第二轮）
+
+用户第二轮实机反馈 5 项，逐条定位与实现：
+
+| # | 反馈 | 根因 | 修正 |
+|---|---|---|---|
+| ① | 双击切全屏时预览图没跟窗口一齐放大 | `setFull()` 只置 `pendingReload`，没复位 `zoom/tx/ty`；而 `maximize` / `setWindowLayoutFullScreen` 是一串异步 `await`，应用内三块栏先隐藏会触发一次 `onAreaChange`（窗口仍是旧尺寸）把 `pendingReload` 消费掉，等窗口真正变大时已不再重解；并排右页也不在重解范围内 | 新增 `fitToWindow()` 复位缩放平移，让 `objectFit(Contain)` 按新画布铺满；`armCanvasReloadFallback()` 改为到点**无条件**按最终 `canvasW/H` 重解一次；`refreshForCanvasResize()` 连带 `loadRightPage()` 重解右页 |
+| ② | ESC 退出没切回之前的完整界面 | 进入时 `maximize(ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)` 是**持久形态设置**，恢复系统栏 / layout / immersiveMode 都管不到它；旧 `recover()` 只在「进入前是浮动窗口」才调用，PC 上窗口本就最大化时标题栏 / dock / 任务栏永远回不来。另外旧 `setFull(false)` 只翻布尔 + 写固定文案，缩放 / 平移 / 手动旋转 / 状态栏 / 顶栏全丢了 | 进入前把 `zoom/tx/ty/rot/flipH/flipV/status/topbarVisible` 存进 `preFull*` 快照，退出逐项还原；退出窗口形态：浮动窗口走 `recover()`，否则 `maximize(EXIT_IMMERSIVE)`，再双保险 `setWindowDecorVisible(true)` + `setTitleAndDockHoverShown(true, true)` |
+| ③ | 并排右页明显锯齿，左页没有 | `rightPageImage()` 只有 `interpolation(High)`，缺 `autoResize(false)`（默认 `true` 会让组件按显示尺寸重采样放大低清图）与 `dynamicRangeMode`；`loadRightPage()` 又用较低的 `preloadEdge()` 解码，且**任意**缓存命中都直接上屏，低档位图被拉成半屏 | 右页补齐与左页完全相同的画质属性；解码档位提到 `viewEdge()`，缓存只在 `hit.edge >= need` 时命中，否则重解 |
+| ④ | mouseover 档案列表时缩略图里显示档案名 | `hoverThumb()` 里有一行 `Text(this.name)` | 删掉，浮层只留 `Image(hoverPx)` / `读取预览…` 占位；档案名本来就在左栏那一行上 |
+| ⑤ | 档案列表要梅花间竹颜色格子、行距压到 1mm | 行背景原为 `selected ? '#1f2730' : 'transparent'`，透明底看不出格子；`padding top/bottom: 2` + `List space: 2` | 新增 `ROW_STRIPE_EVEN/ODD/ROW_SELECTED_BG` 与 `ArchiveRow.rowBgColor()`（选中优先，其余按 `idx % 2` 交替）；`padding` 改 `top/bottom: 1`、`borderRadius: 3`、`List space: LIST_ROW_GAP_VP = 1` |
+
+> **关于「1mm」**：ArkUI 只有 `vp` / `px`，没有 `mm` 单位。这里把两行之间的缝表达为
+> `List space = 1vp` + 行上下 padding 各 `1vp`，在 2in1 高密度屏上视觉就是约 1mm 的一线。
+> 实机觉得宽 / 窄只改 `LIST_ROW_GAP_VP` 一个常量即可，不必动每一行。
+
+`common/ViewPlan.ts` 的 `fullscreenStepsOf(false)` 同步补全：退出步骤表新增
+`exit-immersive` / `decor-on` / `title-dock-hover-on`（`recover` 与 `exit-immersive` 实机
+二选一），hilog 打印的步骤串能与实机对照到「到底跑到哪一步」。
+
+验证：`544 → 556/556 通过`（新增 12 例源码静态契约：全屏快照 / `fitToWindow` / 无条件兜底
+重解 / 右页重解 / ESC 逐项还原 / 窗口形态恢复 / 步骤表 / 右页画质 / hover 无档案名 /
+列表交替色与 1vp），`git diff --check` 干净，`Index.ets` / `ViewPlan.ts` 括号计数与 HEAD
+完全一致。按约定**未编译 HAP / 未放桌面 / 未升版本（仍 1.0.7）/ 未 push**，
+DevEco Studio 编译由用户侧完成。
+
 ## 真全屏 + 最高画质 resample + ICC / HDR / EXIF（2026-11-11）
 
 用户三项要求与对应实现：
@@ -532,7 +558,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | 要求 | 实现 |
 |---|---|
 | 真全屏、无标题列、隐藏 taskbar | `maximize(ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)` + 沉浸式布局 + 关三类系统栏；`SHOW_FULLSCREEN_CHROME = false` 去掉应用内工具顶栏 / 退出按钮 |
-| 全屏跟随尺寸适配 + 最高画质 resample | `ViewPlan.viewEdgeOf / preloadEdgeOf` 按全屏画布放大解码档位（主视图 ×2.0、预载上限 2560）；尺寸变化走 `refreshForCanvasResize()` **0 延迟**重解当前张 + 按新档位补预载；显示层 `ImageInterpolation.High`（SDK 注明的 Cubic 最高画质）+ `autoResize(false)` |
+| 全屏跟随尺寸适配 + 最高画质 resample | `ViewPlan.viewEdgeOf / preloadEdgeOf` 按全屏画布放大解码档位（主视图 ×2.0、预载上限 2560）；尺寸变化走 `refreshForCanvasResize()` **0 延迟**重解当前张 + 按新档位补预载；显示层 `ImageInterpolation.High`（SDK 注明的 Cubic 最高画质）+ `autoResize(false)`。**第二轮起并排右页同此配置、进出全屏还会 `fitToWindow()` 且兜底无条件重解，见上节** |
 | ICC 内嵌色彩 / HDR / EXIF 旋转 | 见下表，全部集中在 `decodePx()` 的一个 `DecodingOptions` |
 
 ### 解码选项（全部集中在 `decodePx()`）
@@ -542,7 +568,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | EXIF 旋转 | `ImageSource.getImageProperty(image.PropertyKey.ORIENTATION)` → `ViewPlan.exifTransformOf()` → `DecodingOptions.rotate` / `PixelMap.rotate` / `PixelMap.flip` | 8 种 Orientation 全覆盖（含 4 种镜像）；在解码阶段旋转，少一次重采样；`EXIF_CACHE` 按 uri 缓存，201 张预载不会逐张跨进程读元数据 |
 | 内嵌 ICC 色彩 | `PixelMap.getColorSpace()` + `DecodingOptions.desiredColorSpace` | 系统 codec 识别内嵌 ICC 并映射成标准空间（sRGB / Display P3 / BT.2020…），默认**原样保留**；`COLOR_MANAGE_MODE` 可切 `1` = sRGB / `2` = Display P3 在解码时转换；信息浮层显示识别结果 |
 | HDR | `DecodingOptions.desiredDynamicRange = DecodingDynamicRange.AUTO` + `Image.dynamicRangeMode(HIGH / STANDARD)` | HDR 图按 HDR 解码，显示端按 `viewHdrWanted` 开 HIGH；平台不支持 HDR 时 SDK 自动降级 SDR |
-| 最高画质缩放 | `.interpolation(ImageInterpolation.High)` + `.autoResize(false)` | SDK 明确 `High` = Cubic「highest possible quality」；`autoResize(false)` 不让组件在解码阶段再降采样损信息 |
+| 最高画质缩放 | `.interpolation(ImageInterpolation.High)` + `.autoResize(false)` | SDK 明确 `High` = Cubic「highest possible quality」；`autoResize(false)` 不让组件在解码阶段再降采样损信息。**第二轮起主视图 / URI 兜底 / 并排右页三处齐配**（原来右页缺此二项而带锯齿） |
 
 全屏前后档位对比（`ViewPlan` 纯函数，已进回归测试）：
 
@@ -553,7 +579,8 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 
 旧实现 `onAreaChange` 只调 `showPreviewOf()`，命中缓存时会被 `showNeed()` 判成「够用」而
 沿用旧档位图，等于把小图拉大；现在改为 `curToken++` 后直接 `loadViewNow(uri, token)`（0 延迟）
-并 `schedulePreload()`，窗口 API 没产生尺寸回调时还有 800ms 兜底重解。
+并 `schedulePreload()`，窗口 API 没产生尺寸回调时还有 800ms 兜底重解。**第二轮起该兜底
+改为到点无条件按最终画布重解，且连带重解并排右页，见上节**。
 
 **⚠️ ICC 平台边界（如实说明）**：HarmonyOS 26 的 `@ohos.graphics.colorSpaceManager`
 只有 `create(ColorSpace)` 与 `create(primaries, gamma)`，**没有「从 ICC profile 字节流构造

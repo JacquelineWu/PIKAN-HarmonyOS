@@ -140,11 +140,17 @@ export function viewHintOf(colorSpaceName: string, isHdr: boolean, exifDegrees: 
   return s;
 }
 
-/** 窗口级真全屏的步骤名（只喂 hilog 与静态契约测试，方便实机对照跑到哪一步）。 */
+/** 窗口级真全屏的步骤名（只喂 hilog 与静态契约测试，方便实机对照跑到哪一步）。
+ *
+ *  2026-11-11 ESC 修复：退出时不只要「恢复系统栏」，还得**撤销进入时设下的沉浸最大化形态**，
+ *  否则窗口本就最大化时（PC 最常见）标题栏 / dock / 任务栏永远回不来。
+ *  `recover` 与 `exit-immersive` 实机二选一：进入前是浮动窗口走 `recover()`，
+ *  进入前已最大化则 `maximize(EXIT_IMMERSIVE)`；`decor-on` / `title-dock-hover-on` 是双保险。 */
 export function fullscreenStepsOf(on: boolean): Array<string> {
   return on
     ? ['maximize-no-title-dock', 'immersive-mode-on', 'layout-fullscreen-on',
       'system-bars-off', 'status-off', 'navigation-off', 'indicator-off']
     : ['system-bars-on', 'status-on', 'navigation-on', 'indicator-on',
-      'layout-fullscreen-off', 'immersive-mode-off', 'recover'];
+      'layout-fullscreen-off', 'immersive-mode-off', 'recover',
+      'exit-immersive', 'decor-on', 'title-dock-hover-on'];
 }

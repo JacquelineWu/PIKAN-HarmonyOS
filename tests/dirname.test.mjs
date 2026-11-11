@@ -11,7 +11,8 @@
  * 2026-11-11 的「退出记住位置 / 启动自动显示上次相片」，
  * 以及同日澄清的「往上层按钮永不 grey out / 永不禁用、点了要有反应」，
  * 同日末的「预览右下角只显示缓存数量 + 缩放百分比」，
- * 以及「真全屏 / 最高画质 resample / ICC·HDR·EXIF 旋转」。
+ * 以及「真全屏 / 最高画质 resample / ICC·HDR·EXIF 旋转」，
+ * 以及同日第二轮 5 项实机修正（全屏放大 / ESC 还原 / 右页锯齿 / hover 无档案名 / 梅花间竹列表）。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -178,8 +179,16 @@ check('左栏宽度改用自适应 listW',
 check('applyItems 重算 listW', /this\.listW = listWidthForNames\(/.test(INDEX), true);
 check('档案名列有 minWidth 兜底', /constraintSize\(\{ minWidth: textWidthVp/.test(INDEX), true);
 check('行首图标高度压到 26', /\.height\(26\)/.test(INDEX), true);
-check('行上下 padding 压到 2', /top: 2, bottom: 2/.test(INDEX), true);
-check('List 行间距压到 2', /space: 2/.test(INDEX), true);
+check('行上下 padding 继续压到 1（配合 List 缝约 1mm）', /top: 1, bottom: 1/.test(INDEX), true);
+check('List 行间距改用 LIST_ROW_GAP_VP 常量且为 1',
+  /space: LIST_ROW_GAP_VP/.test(INDEX) &&
+  /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX), true);
+check('档案列表「梅花间竹」交替色格子：奇偶两色 + 选中色优先',
+  /const ROW_STRIPE_EVEN: string = '#1e242e';/.test(INDEX) &&
+  /const ROW_STRIPE_ODD: string = '#161a21';/.test(INDEX) &&
+  /const ROW_SELECTED_BG: string = '#1f2730';/.test(INDEX) &&
+  /private rowBgColor\(\): string \{[\s\S]{0,160}if \(this\.selected\)[\s\S]{0,160}return ROW_SELECTED_BG;[\s\S]{0,160}\(this\.idx % 2\) === 0 \? ROW_STRIPE_EVEN : ROW_STRIPE_ODD/.test(INDEX) &&
+  /\.backgroundColor\(this\.rowBgColor\(\)\)/.test(INDEX), true);
 
 console.log('--- sameEntryNames(): 重扫时判断目录内容是否真的变了 ---');
 check('空目录一致', sameEntryNames([], []), true);
@@ -192,6 +201,8 @@ check('中文 + 空格现场路径一致',
 
 console.log('--- 源码静态契约：hover 缩略图纯预览、退出不切回上次 ---');
 const HOVER_FN = INDEX.slice(INDEX.indexOf('private onHoverChange('), INDEX.indexOf('hoverThumb()'));
+const HOVER_THUMB_START = INDEX.indexOf('hoverThumb()');
+const HOVER_THUMB_FN = INDEX.slice(HOVER_THUMB_START, INDEX.indexOf('  build() {', HOVER_THUMB_START));
 const APPLY_FN = INDEX.slice(INDEX.indexOf('private applyItems('), INDEX.indexOf('后台分批补测体积'));
 check('hover 关闭有去抖常量', /const HOVER_CLOSE_DELAY_MS: number = 120;/.test(INDEX), true);
 check('onHover(false) 改延迟关闭（hoverSeq 代号）', /const seq: number = \+\+this\.hoverSeq;/.test(HOVER_FN), true);
@@ -206,6 +217,9 @@ check('aboutToDisappear 清理 hover 计时器',
   /aboutToDisappear\(\): void \{[\s\S]{0,400}cancelCloseTimer/.test(INDEX), true);
 check('点击行时作废 hover 计时器',
   /\.onClick\(\(\) => \{[\s\S]{0,300}this\.hoverSeq\+\+/.test(INDEX), true);
+check('hover 缩略图浮层只放相片、不显示档案名（2026-11-11）',
+  /Image\(this\.hoverPx!\)/.test(HOVER_THUMB_FN) &&
+  !/Text\(this\.name\)/.test(HOVER_THUMB_FN), true);
 
 check('openFolder 支持 isRescan', /isRescan\?: boolean/.test(INDEX), true);
 check('重扫内容未变则跳过列表重建', /isRescan === true && this\.sameDirEntries\(names\)/.test(INDEX), true);
@@ -1231,27 +1245,89 @@ check('decodePx 读 EXIF Orientation 并在解码阶段旋转 / 镜像',
 check('EXIF 元数据有缓存（避免 201 张预载逐张跨进程读）',
   /const EXIF_CACHE: Map<string, ExifTransform> = new Map\(\)/.test(INDEX) &&
   /const cached: ExifTransform \| undefined = EXIF_CACHE\.get\(uri\)/.test(INDEX), true);
-check('HDR：解码 AUTO + 显示端 HIGH / STANDARD 按图切换',
+check('HDR：解码 AUTO + 显示端 HIGH / STANDARD 按图切换（主视图 / 兜底 / 右页三处）',
   /opts\.desiredDynamicRange = image\.DecodingDynamicRange\.AUTO;/.test(INDEX) &&
-  (INDEX.match(/\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/g) || []).length === 2, true);
+  (INDEX.match(/\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/g) || []).length === 3, true);
 check('色彩：保留内嵌 ICC 或转换到 sRGB / Display P3，并读回 PixelMap 色彩空间',
   /const COLOR_MANAGE_MODE: number = 0;/.test(INDEX) &&
   /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.SRGB\)/.test(INDEX) &&
   /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.DISPLAY_P3\)/.test(INDEX) &&
   /px\.getColorSpace\(\)\.getColorSpaceName\(\)/.test(INDEX), true);
-check('最高画质 resample：主视图与兜底均 Cubic(High) + autoResize(false)',
-  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 2 &&
-  (INDEX.match(/\.interpolation\(ImageInterpolation\.High\)/g) || []).length >= 2, true);
+check('最高画质 resample：主视图 / 兜底 / 并排右页均 Cubic(High) + autoResize(false)',
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
+  (INDEX.match(/\.interpolation\(ImageInterpolation\.High\)/g) || []).length >= 3, true);
 check('全屏退出提示写在信息浮层（不新增标题列 / 按钮）',
   /Text\('全屏 · Esc \/ F11 \/ 双击退出'\)/.test(INDEX), true);
 check('退出全屏仍恢复系统栏并清理兜底计时器',
-  /this\.applyWindowFullScreen\(false, 0\);/.test(INDEX) &&
+  /this\.applyWindowFullScreen\(on, 0\);/.test(INDEX) &&
   /this\.clearCanvasReloadFallback\(\);/.test(INDEX), true);
 check('回归：预算常量 / 防冻结闸门 / 按钮 / 版本不动',
   /const PRELOAD_COUNT: number = 216;/.test(INDEX) &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8 &&
   /\.enabled\(/.test(CODE_LINES) === false &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+
+console.log('--- 源码静态契约：5 项实机修正（全屏放大 / ESC 还原 / 右页锯齿 / hover / 列表）---');
+const SF0 = INDEX.indexOf('private setFull(on: boolean): void {');
+const SET_FULL_FN = INDEX.slice(SF0, INDEX.indexOf('fullscreenStepsOf(on)', SF0));
+const FB0 = INDEX.indexOf('private armCanvasReloadFallback(): void {');
+const FALLBACK_FN = INDEX.slice(FB0, FB0 + 600);
+const RP0 = INDEX.indexOf('rightPageImage(uri: string, w: number)');
+const RIGHT_IMAGE_FN = INDEX.slice(RP0, RP0 + 900);
+
+check('① 双击进全屏：先存完整界面快照，再 fitToWindow 复位缩放平移',
+  /private fitToWindow\(\): void \{[\s\S]{0,160}this\.zoom = 1;[\s\S]{0,80}this\.tx = 0;[\s\S]{0,80}this\.ty = 0;/.test(INDEX) &&
+  /this\.hasFullSnapshot = true;/.test(SET_FULL_FN) &&
+  /this\.preFullZoom = this\.zoom;/.test(SET_FULL_FN) &&
+  /this\.preFullTx = this\.tx;/.test(SET_FULL_FN) &&
+  /this\.preFullRot = this\.rot;/.test(SET_FULL_FN) &&
+  /this\.preFullStatus = this\.status;/.test(SET_FULL_FN) &&
+  /this\.preFullTopbar = this\.topbarVisible;/.test(SET_FULL_FN) &&
+  /this\.fitToWindow\(\);/.test(SET_FULL_FN), true);
+check('① 进出全屏统一按 on 驱动窗口 API，且保留画布重解兜底',
+  /this\.applyWindowFullScreen\(on, 0\);/.test(SET_FULL_FN) &&
+  /this\.armCanvasReloadFallback\(\);/.test(SET_FULL_FN) &&
+  /this\.pendingReload = true;/.test(SET_FULL_FN), true);
+check('① 收口兜底无条件按最终画布重解（不再被早到的 onAreaChange 吃掉）',
+  /this\.canvasReloadTimer = setTimeout/.test(FALLBACK_FN) &&
+  /this\.pendingReload = false;\s*this\.refreshForCanvasResize\(\);/.test(FALLBACK_FN) &&
+  !/if \(!this\.pendingReload\)/.test(FALLBACK_FN), true);
+check('① 画布重解连并排右页一起按新档位重解',
+  /this\.schedulePreload\(\);[\s\S]{0,320}this\.loadRightPage\(this\.items\[this\.spreadB\]\.uri\);/.test(RESIZE_FN), true);
+check('② ESC 退出：还原进全屏前的缩放 / 平移 / 旋转 / 镜像 / 状态栏 / 顶栏',
+  /if \(this\.hasFullSnapshot\) \{/.test(SET_FULL_FN) &&
+  /this\.zoom = this\.preFullZoom;/.test(SET_FULL_FN) &&
+  /this\.tx = this\.preFullTx;/.test(SET_FULL_FN) &&
+  /this\.ty = this\.preFullTy;/.test(SET_FULL_FN) &&
+  /this\.rot = this\.preFullRot;/.test(SET_FULL_FN) &&
+  /this\.flipH = this\.preFullFlipH;/.test(SET_FULL_FN) &&
+  /this\.flipV = this\.preFullFlipV;/.test(SET_FULL_FN) &&
+  /this\.status = this\.preFullStatus;/.test(SET_FULL_FN) &&
+  /this\.topbarVisible = this\.preFullTopbar;/.test(SET_FULL_FN) &&
+  /this\.hasFullSnapshot = false;/.test(SET_FULL_FN), true);
+check('② ESC 退出：撤销沉浸最大化形态（EXIT_IMMERSIVE / decor / title-dock hover）',
+  /win\.maximize\(window\.MaximizePresentation\.EXIT_IMMERSIVE\)/.test(INDEX) &&
+  /win\.setWindowDecorVisible\(true\)/.test(INDEX) &&
+  /win\.setTitleAndDockHoverShown\(true, true\)/.test(INDEX) &&
+  /await win\.recover\(\)/.test(INDEX), true);
+check('② 退出步骤表含新增的窗口形态恢复步骤',
+  fullscreenStepsOf(false).includes('exit-immersive') &&
+  fullscreenStepsOf(false).includes('decor-on') &&
+  fullscreenStepsOf(false).includes('title-dock-hover-on') &&
+  fullscreenStepsOf(false).includes('recover'), true);
+check('③ 并排右页与左页同画质：viewEdge 档位 + autoResize(false) + HDR 模式',
+  /const need: number = this\.viewEdge\(\);/.test(INDEX) &&
+  /hit\.edge >= need/.test(INDEX) &&
+  /this\.decodeTo\(uri, need\)/.test(INDEX) &&
+  /\.interpolation\(ImageInterpolation\.High\)/.test(RIGHT_IMAGE_FN) &&
+  /\.autoResize\(false\)/.test(RIGHT_IMAGE_FN) &&
+  /\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/.test(RIGHT_IMAGE_FN), true);
+check('④ hover 浮层已无档案名 Text（全文件只剩左栏那一处）',
+  (INDEX.match(/Text\(this\.name\)/g) || []).length === 1, true);
+check('⑤ 列表两行缝压到 1vp + 交替色格子（回归护栏）',
+  /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX) &&
+  /top: 1, bottom: 1/.test(INDEX) &&
+  /\.backgroundColor\(this\.rowBgColor\(\)\)/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

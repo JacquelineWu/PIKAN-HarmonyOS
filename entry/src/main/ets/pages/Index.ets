@@ -319,6 +319,15 @@ const ROW_UP: number = 1;
 const ROW_FOLDER: number = 2;
 const ROW_OTHER: number = 3;
 
+/** 「梅花间竹」交替色格子（2026-11-11 用户要求）：档案列表奇偶行两种底色，
+ *  形成一格一格的棋盘条纹；选中行用独立高亮色，优先级最高（见 ArchiveRow.rowBgColor）。
+ *  两行之间的垂直缝按「继续压缩到约 1mm」取 1vp —— ArkUI 只有 vp / px，没有 mm 单位，
+ *  1vp 在 2in1 高密度屏上就是极细的一线缝；实机觉得宽/窄只改 LIST_ROW_GAP_VP 一个常量即可。 */
+const ROW_STRIPE_EVEN: string = '#1e242e';
+const ROW_STRIPE_ODD: string = '#161a21';
+const ROW_SELECTED_BG: string = '#1f2730';
+const LIST_ROW_GAP_VP: number = 1;
+
 /** 解码结果：uri + 已解码的 PixelMap + 显示宽高 + 解码档位 + 色彩/HDR/EXIF 元数据 */
 interface PreviewEntry {
   uri: string;
@@ -1044,6 +1053,14 @@ struct ArchiveRow {
     return '#e2a8cf';
   }
 
+  /** 「梅花间竹」交替底色：选中态优先，其余按 idx 奇偶两色成格（2026-11-11）。 */
+  private rowBgColor(): string {
+    if (this.selected) {
+      return ROW_SELECTED_BG;
+    }
+    return (this.idx % 2) === 0 ? ROW_STRIPE_EVEN : ROW_STRIPE_ODD;
+  }
+
   aboutToAppear(): void {
     this.alive = true;
     // 刻意不在这里解码任何缩略图：只有 onHover 才触发（见 onHoverChange）
@@ -1135,13 +1152,8 @@ struct ArchiveRow {
         .borderRadius(4)
         .backgroundColor('#262b34')
       }
-      Text(this.name)
-        .fontSize(11)
-        .fontColor('#dfe5ef')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width(220)
-        .margin({ top: 6 })
+      // 2026-11-11 用户要求：hover 缩略图里只放相片，不显示档案名。
+      // 档案名本来就在左栏那一行上，浮层再写一遍既占空间又挡图。
     }
     .padding(8)
     .backgroundColor('#1a1d23')
@@ -1190,10 +1202,11 @@ struct ArchiveRow {
       }
     }
     .width('100%')
-    // 11-10 起压缩每一横行的垂直占用：上下 6 → 2，字号保持不变以维持可读性
-    .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-    .borderRadius(6)
-    .backgroundColor(this.selected ? '#1f2730' : 'transparent')
+    // 11-11 起继续压缩：上下 padding 2 → 1，配合 List space=1 把两行缝压到约 1mm。
+    // 行背景改为「梅花间竹」交替色格子（奇偶两色），选中行仍是高亮色。
+    .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+    .borderRadius(3)
+    .backgroundColor(this.rowBgColor())
     // hover 绑在整行而不是档案名 Text 上：鼠标划过图标 / 字节 / 日期列也能出图，
     // 触发面积大得多，PC 上更好按（用户反馈「要 mouse over 才显示」）。
     .onHover((isHover: boolean) => {
@@ -1398,6 +1411,17 @@ struct Index {
   private canvasReloadTimer: number = -1;
   /** 全屏时是否由我们主动最大化过窗口 —— 退出时才知道要不要 recover 回自由窗口 */
   private maximizedByUs: boolean = false;
+  /** 进入全屏前的视图 / 界面状态快照：ESC 退出时要「切回之前的完整界面」，
+   *  包含缩放平移、手动旋转、状态栏文案、顶栏可见性，不能只翻 fullscreen 一个布尔。 */
+  private hasFullSnapshot: boolean = false;
+  private preFullZoom: number = 1;
+  private preFullTx: number = 0;
+  private preFullTy: number = 0;
+  private preFullRot: number = 0;
+  private preFullFlipH: boolean = false;
+  private preFullFlipV: boolean = false;
+  private preFullStatus: string = '';
+  private preFullTopbar: boolean = true;
 
   // ---- 滚轮翻页：去抖 + 合并（见 onWheel / flushWheel 注释）----
   private lastAxisMs: number = 0;     // 最近一次轴事件（滚轮/触控板）的时刻，用于屏蔽「被当成拖拽」的伪平移
@@ -2319,18 +2343,22 @@ struct Index {
   }
 
   /** 载入对开右页：优先命中预载缓存（同步、零等待），否则后台解一张可显示清晰度。
-   *  代号校验：切图后旧回调一律作废，避免右页显示成上一对的图。 */
+   *  代号校验：切图后旧回调一律作废，避免右页显示成上一对的图。
+   *
+   *  2026-11-11：解码档位从 preloadEdge() 提到与左页相同的 viewEdge()；
+   *  命中的预载缓存若档位不足也继续重解，避免「低清图被拉成半屏」的锯齿/发虚。 */
   private loadRightPage(uri: string): void {
     this.rightToken++;
     const token: number = this.rightToken;
     this.releaseRightOwned();   // 上一张右页若是自解码的，先释放
+    const need: number = this.viewEdge();
     const hit: PreviewEntry | undefined = this.previewEntry(uri);
-    if (hit !== undefined) {
+    if (hit !== undefined && hit.edge >= need) {
       this.rightOwned = undefined;
       this.rightPixelMap = hit.px;
       return;
     }
-    this.decodeTo(uri, this.preloadEdge())
+    this.decodeTo(uri, need)
       .then((e: PreviewEntry | undefined) => {
         if (token !== this.rightToken || e === undefined) {
           if (e !== undefined) {
@@ -2677,6 +2705,15 @@ struct Index {
     this.rot = 0;
     this.flipH = false;
     this.flipV = false;
+  }
+
+  /** 全屏切换：把缩放 / 平移复位到「适应窗口」，让 objectFit(Contain) 按放大后的
+   *  画布把图片铺满放大。刻意不动 rot / flip —— 用户手动旋转不该因切全屏而丢失。
+   *  配合 refreshForCanvasResize() 按新画布重解码，图片就是「跟窗口一齐适配放大」而不是拉大旧图。 */
+  private fitToWindow(): void {
+    this.zoom = 1;
+    this.tx = 0;
+    this.ty = 0;
   }
 
   /** 对外显示的缩放百分比（Win64 a1d7bca / 38f2093 口径）。
@@ -3721,16 +3758,23 @@ struct Index {
     const token: number = this.curToken;
     this.loadViewNow(uri, token);
     this.schedulePreload();
+    // 并排对开时右页也要按新画布档位重解：否则左页跟着窗口放大了，右页仍是
+    // 旧的小图被拉成半屏（发虚 / 锯齿）。用户要求「预览图案跟窗口一齐适配放大」含两页。
+    if (this.spreadB >= 0 && this.spreadB < this.items.length) {
+      this.loadRightPage(this.items[this.spreadB].uri);
+    }
   }
 
-  /** pendingReload 兜底：800ms 内没等到 onAreaChange（窗口 API 静默失败 / 尺寸未变）也重解一次。 */
+  /** 进出全屏后的收口重解：无条件按「最终」画布尺寸再解一次。
+   *  真全屏的 maximize / layout 是一连串异步 await：应用内三块栏隐藏会先触发一次
+   *  onAreaChange 把 pendingReload 消费掉（那时窗口还是旧尺寸），等 maximize 真正完成、
+   *  窗口变大了，pendingReload 已是 false，第二次尺寸变化就不会再重解 —— 图片停在旧档位。
+   *  所以这里不去判断 pendingReload，到点总按最新 canvasW/H 重解一次（左右页都算），
+   *  配合 setFull 里的 fitToWindow() 保证「预览图跟窗口大小一齐适配放大」。 */
   private armCanvasReloadFallback(): void {
     this.clearCanvasReloadFallback();
     this.canvasReloadTimer = setTimeout(() => {
       this.canvasReloadTimer = -1;
-      if (!this.pendingReload) {
-        return;
-      }
       this.pendingReload = false;
       this.refreshForCanvasResize();
     }, CANVAS_RELOAD_FALLBACK_MS);
@@ -4666,12 +4710,43 @@ struct Index {
     }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
-    // 真全屏（2026-11-11）：应用内顶栏浮层 / 退出按钮一律不画，画面只剩图片。
-    // 退出靠 Esc / F11 / 双击画布，左上角信息浮层会写一行提示。
     this.clearTopbarTimer();
-    this.topbarVisible = false;
-    this.status = on ? '全屏 · Esc / F11 / 双击退出' : '已退出全屏 · Esc 关闭应用';
-    this.applyWindowFullScreen(on, 0); // 标题栏 / dock / 状态栏 / 导航栏一起处理
+    if (on) {
+      // 进全屏：先把「之前的完整界面」逐项存档，ESC 退出时才能原样还原
+      this.hasFullSnapshot = true;
+      this.preFullZoom = this.zoom;
+      this.preFullTx = this.tx;
+      this.preFullTy = this.ty;
+      this.preFullRot = this.rot;
+      this.preFullFlipH = this.flipH;
+      this.preFullFlipV = this.flipV;
+      this.preFullStatus = this.status;
+      this.preFullTopbar = this.topbarVisible;
+      // 双击 / F11 进全屏：复位缩放与平移，objectFit(Contain) 会按放大后的画布
+      // 把预览图铺满放大 —— 这就是「预览图案跟窗口大小一齐适配放大」。
+      // 同时 refreshForCanvasResize() 按新画布重解（左右页都算），不发虚。
+      this.fitToWindow();
+      this.topbarVisible = false;
+      this.status = '全屏 · Esc / F11 / 双击退出';
+    } else {
+      // ESC 退出：把进全屏前的视图状态、状态栏文案、顶栏可见性全部还原，
+      // 应用内三块栏本就由 if (!this.fullscreen) 恢复，窗口形态由 applyWindowFullScreen 还原。
+      if (this.hasFullSnapshot) {
+        this.zoom = this.preFullZoom;
+        this.tx = this.preFullTx;
+        this.ty = this.preFullTy;
+        this.rot = this.preFullRot;
+        this.flipH = this.preFullFlipH;
+        this.flipV = this.preFullFlipV;
+        this.status = this.preFullStatus;
+        this.topbarVisible = this.preFullTopbar;
+        this.hasFullSnapshot = false;
+      } else {
+        this.topbarVisible = true;
+        this.status = '已退出全屏 · Esc 关闭应用';
+      }
+    }
+    this.applyWindowFullScreen(on, 0); // 标题栏 / dock / 状态栏 / 导航栏一起处理与还原
     this.armCanvasReloadFallback();    // 窗口 API 静默失败时也能按当前画布重解
   }
 
@@ -4812,13 +4887,38 @@ struct Index {
       } catch (e) {
         hilog.warn(DOMAIN, TAG, 'fullscreen: immersive mode restore failed');
       }
+      // ★ 2026-11-11 ESC 修复：撤销「隐藏标题栏 / dock」的沉浸最大化形态。
+      //   进入时 maximize(ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER) 是**持久形态设置**，
+      //   上面恢复系统栏 / layout / immersiveMode 都管不到它；而旧版 recover() 只在
+      //   「进入前是浮动窗口」才调用 —— 窗口本就最大化时（PC 最常见），ESC 后标题栏、
+      //   dock、任务栏永远回不来，界面看着就是「没切回之前的完整界面」。
       if (this.maximizedByUs) {
         this.maximizedByUs = false;
         try {
-          await win.recover(); // 还原成进入前的自由窗口大小与位置
+          await win.recover(); // 还原成进入前的自由窗口（自带标题栏 / dock）
         } catch (e) {
           hilog.warn(DOMAIN, TAG, 'fullscreen: recover failed');
         }
+      } else {
+        try {
+          // 进入前已是最大化 / 全屏：保持最大化但退出沉浸形态，标题栏 / dock 回来
+          await win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE);
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'fullscreen: exit immersive failed');
+        }
+      }
+      // 双保险：显式恢复窗口装饰（标题栏）与 title / dock 热区悬停显示。
+      // SDK 说明 setTitleAndDockHoverShown 与 maximize 同时调用时「最后一次生效」，
+      // 这一步能把进入时设下的「dock 悬停也不显示」彻底覆盖掉。
+      try {
+        win.setWindowDecorVisible(true);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: decor restore failed');
+      }
+      try {
+        await win.setTitleAndDockHoverShown(true, true);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: title/dock hover restore failed');
       }
     }
   }
@@ -4998,7 +5098,12 @@ struct Index {
 
   /** 对开右页：优先用命中缓存的 PixelMap；未就绪时留中灰占位，不阻塞左页。
    *  刻意不用 Image(uri) 兜底 —— 那会让系统按原图尺寸再解一遍大图（HEIC 尤其慢），
-   *  与左页「解码期间不画原图」是同一条约束（见 previewImage 的 viewFailed 分支）。 */
+   *  与左页「解码期间不画原图」是同一条约束（见 previewImage 的 viewFailed 分支）。
+   *
+   *  2026-11-11 用户反馈「右页明显带锯齿」：旧版这里只有 interpolation(High)，
+   *  缺左页的 autoResize(false) / dynamicRangeMode，且解码档位是较低的 preloadEdge()。
+   *  autoResize 默认为 true 时组件会按显示尺寸重新采样放大低分辨率图，正是锯齿来源。
+   *  现在右页与左页用完全同一套画质属性 + 同一 viewEdge() 档位。 */
   @Builder
   rightPageImage(uri: string, w: number) {
     Stack() {
@@ -5006,6 +5111,8 @@ struct Index {
         Image(this.rightPixelMap!)
           .objectFit(ImageFit.Contain)
           .interpolation(ImageInterpolation.High)
+          .autoResize(false)
+          .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
           .width(w)
           .height(this.frameH())
@@ -5153,7 +5260,7 @@ struct Index {
               // LazyForEach + cachedCount：只为「屏幕上这几行 + 少量缓存」创建节点。
               // 用 ForEach 的话会为数组中每一项都建组件，几百张图就是几百个 ListItem，
               // 内存与节点数随图片数线性增长 —— 这是图片一多就崩的原因之一。
-              List({ scroller: this.scroller, space: 2 }) {
+              List({ scroller: this.scroller, space: LIST_ROW_GAP_VP }) {
                 LazyForEach(this.dataSource, (item: ImageItem, idx: number) => {
                   ListItem() {
                     ArchiveRow({
