@@ -50,6 +50,7 @@ import abilityAccessCtrl from '@ohos.abilityAccessCtrl';
 import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
+import colorSpaceManager from '@ohos.graphics.colorSpaceManager';
 import util from '@ohos.util';
 import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
@@ -64,6 +65,8 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
   readonlyHint, readonlyTapHint, readonlyUpHint, restoreUpEnabled, restoreUpHint } from '../common/ResumePlan';
 import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
+import { ExifTransform, Size2, exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
+  colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -223,6 +226,37 @@ const PRELOAD_MAX_BYTES: number = 1024 * 1024 * 1024;
 const VIEW_EDGE_FACTOR: number = 1.5;
 const VIEW_EDGE_MIN: number = 1200;
 const VIEW_EDGE_MAX: number = 4096;
+/** 全屏时主视图解码倍率：画布变大后按新尺寸解到位，绝不把旧分辨率的 PixelMap 拉大。
+ *  全屏用 2.0（普通态 1.5），上限仍是 VIEW_EDGE_MAX = 4096 控内存。 */
+const FULLSCREEN_VIEW_EDGE_FACTOR: number = 2.0;
+/** 全屏时预载档位上限：普通态封顶 1536，全屏大画布放宽到 2560，
+ *  避免前后 100 张仍是旧的小档位。字节预算 PRELOAD_MAX_BYTES 仍是最终闸门。 */
+const FULLSCREEN_PRELOAD_MAX_EDGE: number = 2560;
+/** 色彩管理：0 = 保留源色彩空间（系统 codec 识别内嵌 ICC，原样交给渲染合成，默认）；
+ *  1 = 解码时统一转换到 sRGB（兼容不支持广色域的显示器，颜色最稳）；
+ *  2 = 转换到 Display P3（广色域优先，sRGB 屏可能偏色）。
+ *  ⚠️ HarmonyOS 26 的 colorSpaceManager 只有 create(ColorSpace) / create(primaries,gamma)，
+ *     **没有「从 ICC profile 字节流构造 ColorSpaceManager」的 API**，做不了完整 ICC CMS；
+ *     这里做的是识别内嵌 ICC 映射到的标准空间 + 可选的标准空间转换。 */
+const COLOR_MANAGE_MODE: number = 0;
+/** 是否按 EXIF Orientation 自动摆正（含镜像）。
+ *  若某机型系统 codec 已经自动摆正，实机会看到多转一次 —— 把本开关改 false 即可。 */
+const EXIF_AUTO_ROTATE: boolean = true;
+/** EXIF 旋转放在解码阶段（rotate 选项，少一次重采样、画质最好）。
+ *  若某机型 codec 报「rotate 与 desiredSize 不能同时用」，改 false 走 PixelMap.rotate()。 */
+const EXIF_ROTATE_AT_DECODE: boolean = true;
+/** 是否让系统按图片格式自动选 HDR / SDR 解码（平台不支持 HDR 时 SDK 会自动降级 SDR）。 */
+const HDR_AUTO_DECODE: boolean = true;
+/** 全屏时是否仍画应用内的顶栏浮层 / 退出按钮。
+ *  2026-11-11 用户要求「真正全屏、不会有标题列」→ false，全屏画面只剩图片；
+ *  退出用 Esc / F11 / 双击画布，左上角信息浮层会写一行提示。 */
+const SHOW_FULLSCREEN_CHROME: boolean = false;
+/** 窗口实例可能还没被 EntryAbility 缓存好（getMainWindow 是异步的）：延时重试次数 / 间隔 */
+const FULLSCREEN_WINDOW_RETRY_MAX: number = 2;
+const FULLSCREEN_WINDOW_RETRY_MS: number = 120;
+/** 画布尺寸变化后 pendingReload 的兜底超时（ms）：
+ *  窗口 API 若不产生 onAreaChange，也要按当前画布重解一次，别让标志永远留着。 */
+const CANVAS_RELOAD_FALLBACK_MS: number = 800;
 /** 预载命中后，停手多久才补一张全清（ms）。
  *  连续翻页时这一步会被下一切图作废，所以延迟执行能省掉大量无用解码。 */
 const UPGRADE_DELAY_MS: number = 250;
@@ -285,14 +319,17 @@ const ROW_UP: number = 1;
 const ROW_FOLDER: number = 2;
 const ROW_OTHER: number = 3;
 
-/** 解码结果：uri + 已解码的 PixelMap + 原图宽高 + 解码档位 + 估算占用字节 */
+/** 解码结果：uri + 已解码的 PixelMap + 显示宽高 + 解码档位 + 色彩/HDR/EXIF 元数据 */
 interface PreviewEntry {
   uri: string;
   px: image.PixelMap;
   bytes: number;
-  w: number;    // 原图宽（用于 1:1 与信息栏，非 PixelMap 宽）
-  h: number;    // 原图高
+  w: number;    // 按 EXIF 摆正后的显示宽（用于 1:1 与信息栏，非 PixelMap 宽）
+  h: number;    // 按 EXIF 摆正后的显示高
   edge: number; // 解码时的长边档位 —— 用来判断「这张够不够直接上主视图」
+  colorSpace: number; // 系统 codec 识别出的内嵌色彩空间（colorSpaceManager.ColorSpace 数值）
+  isHdr: boolean;     // 源图是否 HDR（ImageInfo.isHdr）
+  exifDegrees: number;// 本张按 EXIF 摆正的角度（0/90/180/270）
 }
 
 /** 受支持的图片后缀 */
@@ -703,9 +740,39 @@ interface ThumbTask {
   cb: (p: image.PixelMap | undefined) => void;
 }
 
+/** EXIF 变换缓存：同一张图在预载 / 主视图 / 悬停缩略图之间只读一次元数据。
+ *  getImageProperty 是跨进程调用，201 张窗口里逐张读会明显拖慢预载链。 */
+const EXIF_CACHE: Map<string, ExifTransform> = new Map();
+const EXIF_CACHE_MAX: number = 512;
+
+async function readExifTransform(src: image.ImageSource, uri: string): Promise<ExifTransform> {
+  const cached: ExifTransform | undefined = EXIF_CACHE.get(uri);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let t: ExifTransform = { degrees: 0, flipH: false, flipV: false };
+  try {
+    // 没有 EXIF / 该格式不支持时 SDK 会抛；一律当成「不旋转」，绝不因此丢掉整张图。
+    const raw: string = await src.getImageProperty(image.PropertyKey.ORIENTATION);
+    t = exifTransformOf(raw);
+  } catch (e) {
+    // 元数据读取失败不影响解码主流程
+  }
+  if (EXIF_CACHE.size >= EXIF_CACHE_MAX) {
+    EXIF_CACHE.clear();
+  }
+  EXIF_CACHE.set(uri, t);
+  return t;
+}
+
 /** 按给定长边上限解码一张图。失败返回 undefined（不影响正常显示路径）。
- *  edge = QUICK_EDGE 得到低清占位；edge = preloadEdge() 得到「可显示清晰度」的预载；
- *  edge = viewEdge() 得到全清图；edge = HOVER_EDGE 得到悬停缩略图。共用同一套系统 codec。 */
+ *  edge = QUICK_EDGE 低清占位 / preloadEdge() 预载 / viewEdge() 全清 / HOVER_EDGE 悬停缩略图。
+ *
+ *  2026-11-11 增加三件事（共用一个 DecodingOptions，不再只有 desiredSize）：
+ *    ① EXIF Orientation → 解码阶段旋转 + 镜像（`ViewPlan.exifTransformOf`）；
+ *    ② desiredDynamicRange = AUTO → HDR 图按 HDR 解码，平台不支持时 SDK 自动降 SDR；
+ *    ③ 内嵌 ICC 色彩空间：COLOR_MANAGE_MODE=0 保留源空间，1/2 才在解码时转换到 sRGB / Display P3；
+ *       解码后读 PixelMap.getColorSpace() 记录系统识别到的空间，用于信息浮层。 */
 async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
@@ -725,8 +792,44 @@ async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undef
     if (dw <= 0 || dh <= 0) {
       return undefined;
     }
-    const px: image.PixelMap = await src.createPixelMap({ desiredSize: { width: dw, height: dh } });
-    const entry: PreviewEntry = { uri: uri, px: px, bytes: dw * dh * 4, w: w, h: h, edge: edge };
+
+    let exif: ExifTransform = { degrees: 0, flipH: false, flipV: false };
+    if (EXIF_AUTO_ROTATE) {
+      exif = await readExifTransform(src, uri);
+    }
+
+    const opts: image.DecodingOptions = { desiredSize: { width: dw, height: dh } };
+    if (EXIF_AUTO_ROTATE && exif.degrees !== 0 && EXIF_ROTATE_AT_DECODE) {
+      opts.rotate = exif.degrees;
+    }
+    if (HDR_AUTO_DECODE) {
+      opts.desiredDynamicRange = image.DecodingDynamicRange.AUTO;
+    }
+    if (COLOR_MANAGE_MODE === 1) {
+      opts.desiredColorSpace = colorSpaceManager.create(colorSpaceManager.ColorSpace.SRGB);
+    } else if (COLOR_MANAGE_MODE === 2) {
+      opts.desiredColorSpace = colorSpaceManager.create(colorSpaceManager.ColorSpace.DISPLAY_P3);
+    }
+
+    const px: image.PixelMap = await src.createPixelMap(opts);
+    if (EXIF_AUTO_ROTATE && exif.degrees !== 0 && !EXIF_ROTATE_AT_DECODE) {
+      await px.rotate(exif.degrees);
+    }
+    if (exif.flipH || exif.flipV) {
+      await px.flip(exif.flipH, exif.flipV);
+    }
+    let cs: number = 0;
+    try {
+      cs = Number(px.getColorSpace().getColorSpaceName());
+    } catch (e) {
+      // 某些机型 / 格式不支持 getColorSpace：按「未标注」处理，不影响显示
+    }
+    const shown: Size2 = exifSizeOf(w, h, exif.degrees);
+    const entry: PreviewEntry = {
+      uri: uri, px: px, bytes: dw * dh * 4,
+      w: shown.w, h: shown.h, edge: edge,
+      colorSpace: cs, isHdr: info.isHdr === true, exifDegrees: exif.degrees
+    };
     return entry;
   } catch (e) {
     // ⚠️ 以前这里静默吞掉：图打不开时屏幕全白、日志全无，排查只能靠猜。
@@ -1260,6 +1363,11 @@ struct Index {
   @State imgW: number = 0;
   @State imgH: number = 0;
   @State bytes: number = 0;
+  // 当前显示那张的色彩 / HDR / EXIF 元数据（来自 PreviewEntry，用于信息浮层与 HDR 显示模式）
+  @State viewColorSpace: number = 0;
+  @State viewIsHdr: boolean = false;
+  @State viewExifDegrees: number = 0;
+  @State viewHdrWanted: boolean = false;
 
   // ---- 画布尺寸（onAreaChange 得到）----
   @State canvasW: number = 800;
@@ -1268,8 +1376,8 @@ struct Index {
   // ---- 交互 ----
   @State playing: boolean = false;
   @State status: string = '点左栏「选择文件夹」浏览目录';
-  /** 全屏（沉浸）模式：隐藏顶栏 / 左侧档案栏 / 状态栏，画布铺满整个窗口。
-   *  做的是「应用内隐藏 UI」，不调 window 全屏接口 —— 不依赖窗口权限，也不会踩系统 API 差异。 */
+  /** 真全屏：应用内三块栏 + 系统标题栏 / dock / 状态栏 / 导航栏全部不显示，画面只剩图片。
+   *  2026-11-11 起 applyWindowFullScreen() 会调 window 最大化沉浸接口，详见该方法注释。 */
   @State fullscreen: boolean = false;
 
   private timerId: number = -1;
@@ -1286,6 +1394,8 @@ struct Index {
 
   /** 进出全屏后画布尺寸会变，需要在尺寸落地后按新尺寸重解一次大图，否则只是把旧分辨率拉大（发虚） */
   private pendingReload: boolean = false;
+  /** pendingReload 的兜底计时器：窗口 API 没产生 onAreaChange 时也要重解一次 */
+  private canvasReloadTimer: number = -1;
   /** 全屏时是否由我们主动最大化过窗口 —— 退出时才知道要不要 recover 回自由窗口 */
   private maximizedByUs: boolean = false;
 
@@ -1447,9 +1557,10 @@ struct Index {
     }
     this.flushPosSync(); // 退出前把最后一次位置**同步**落盘（进程被杀也不丢）
     if (this.fullscreen) {
-      // 页面销毁时若还在全屏，把系统状态栏 / 导航栏还回去，别把窗口状态留在隐藏态
-      this.applyWindowFullScreen(false);
+      // 页面销毁时若还在全屏，把标题栏 / dock / 系统状态栏 / 导航栏都还回去
+      this.applyWindowFullScreen(false, 0);
     }
+    this.clearCanvasReloadFallback();
   }
 
   // ------------------------------------------------------------------
@@ -3350,6 +3461,11 @@ struct Index {
     this.viewPixelMap = undefined;
     this.imgW = 0;
     this.imgH = 0;
+    // 新张还没解码出来前，别把上一张的色彩 / HDR / EXIF 元数据挂在信息浮层上
+    this.viewColorSpace = 0;
+    this.viewIsHdr = false;
+    this.viewExifDegrees = 0;
+    this.viewHdrWanted = false;
     // 只读名单态：不解码，也不让 viewFailed 变 true —— 否则 previewImage 会画
     // Image(uri) 交给系统对死 uri 反复重试。画面留中灰，由预览区指引卡接管。
     if (!bulkIoAllowed(this.restoreMode)) {
@@ -3388,7 +3504,16 @@ struct Index {
     this.viewPixelMap = e.px;
     this.imgW = e.w;
     this.imgH = e.h;
+    this.setViewMeta(e);
     this.clearBlur();      // FOCUS_BLUR 关掉后不再有过渡层，这里只是把状态归零
+  }
+
+  /** 把解码结果里的色彩 / HDR / EXIF 元数据同步给信息浮层与 HDR 显示模式。 */
+  private setViewMeta(e: PreviewEntry): void {
+    this.viewColorSpace = e.colorSpace;
+    this.viewIsHdr = e.isHdr;
+    this.viewExifDegrees = e.exifDegrees;
+    this.viewHdrWanted = e.isHdr || isWideGamutOf(e.colorSpace);
   }
 
   /** 这张图按当前 zoom 实际要占多少像素（长边），再留 5% 余量。
@@ -3565,6 +3690,7 @@ struct Index {
     this.viewPixelMap = ret.px;
     this.imgW = ret.w;
     this.imgH = ret.h;
+    this.setViewMeta(ret);
     if (FOCUS_BLUR) {
       this.finishFocus(); // 清晰图到位 → 低清模糊层淡出（这才是「动态模糊」的收尾）
     } else {
@@ -3572,26 +3698,58 @@ struct Index {
     }
   }
 
-  /** 主视图解码的长边：画布长边 × VIEW_EDGE_FACTOR，并夹在 [1200, 4096] 内控制内存。
-   *  系数从 2 降到 1.5：×2 时一张大图能解 1 秒多，而屏幕实际只需要约 1 倍像素。 */
+  /** 主视图解码的长边：画布长边 × 系数，夹在 [1200, 4096] 内控内存。
+   *  全屏用更大的系数（FULLSCREEN_VIEW_EDGE_FACTOR = 2.0）：画布变大必须按新尺寸解到位，
+   *  不能沿用旧分辨率的 PixelMap 让 GPU 拉大 —— 那是「发虚」与 resample 掉画质的根源。 */
   private viewEdge(): number {
-    const base: number = Math.max(this.canvasW, this.canvasH);
-    const e: number = Math.round(base * VIEW_EDGE_FACTOR);
-    return Math.max(VIEW_EDGE_MIN, Math.min(VIEW_EDGE_MAX, e));
+    return viewEdgeOf(this.canvasW, this.canvasH, this.fullscreen,
+      VIEW_EDGE_FACTOR, FULLSCREEN_VIEW_EDGE_FACTOR, VIEW_EDGE_MIN, VIEW_EDGE_MAX);
+  }
+
+  /** 画布尺寸变了（多半是进出全屏）：按新尺寸「立刻」重解当前这张，不走 UPGRADE_DELAY_MS。
+   *  旧实现只调 showPreviewOf()，命中缓存时会被 showNeed() 判成「够用」而沿用旧档位图，
+   *  等于把小图拉大。这里直接 curToken++ 后 loadViewNow(0 延迟) + 按新档位补预载。 */
+  private refreshForCanvasResize(): void {
+    if (this.cur < 0 || this.cur >= this.items.length) {
+      return;
+    }
+    if (!bulkIoAllowed(this.restoreMode)) {
+      return;
+    }
+    const uri: string = this.items[this.cur].uri;
+    this.curToken++;
+    const token: number = this.curToken;
+    this.loadViewNow(uri, token);
+    this.schedulePreload();
+  }
+
+  /** pendingReload 兜底：800ms 内没等到 onAreaChange（窗口 API 静默失败 / 尺寸未变）也重解一次。 */
+  private armCanvasReloadFallback(): void {
+    this.clearCanvasReloadFallback();
+    this.canvasReloadTimer = setTimeout(() => {
+      this.canvasReloadTimer = -1;
+      if (!this.pendingReload) {
+        return;
+      }
+      this.pendingReload = false;
+      this.refreshForCanvasResize();
+    }, CANVAS_RELOAD_FALLBACK_MS);
+  }
+
+  private clearCanvasReloadFallback(): void {
+    if (this.canvasReloadTimer !== -1) {
+      clearTimeout(this.canvasReloadTimer);
+      this.canvasReloadTimer = -1;
+    }
   }
 
   /** 预载档位：按画布尺寸动态取，向上量化到 PRELOAD_QUANT 的倍数。
-   *
-   *  ⚠️ 必须是 ceil 不是 floor：向下量化会让档位小于屏幕实际要显示的像素，
-   *  于是每张命中缓存的图都还要再解一次全清 —— 那正是切图卡顿的真正来源。
-   *  缓存存的是「可直接显示」的清晰度，命中即上屏（见 showPreviewOf）。 */
+   *  全屏时上限放宽到 FULLSCREEN_PRELOAD_MAX_EDGE（普通态 1536），让前后 100 张也跟着画布放大。
+   *  ⚠️ 必须是 ceil 不是 floor：向下量化会让档位小于屏幕实际像素，命中缓存还得再解一次全清。 */
   private preloadEdge(): number {
-    const base: number = Math.max(this.canvasW, this.canvasH);
-    if (base <= 0) {
-      return PRELOAD_MIN_EDGE;
-    }
-    const v: number = Math.ceil(base * PRELOAD_EDGE_FACTOR / PRELOAD_QUANT) * PRELOAD_QUANT;
-    return Math.max(PRELOAD_MIN_EDGE, Math.min(PRELOAD_MAX_EDGE, Math.round(v)));
+    return preloadEdgeOf(this.canvasW, this.canvasH, this.fullscreen,
+      PRELOAD_EDGE_FACTOR, PRELOAD_QUANT, PRELOAD_MIN_EDGE, PRELOAD_MAX_EDGE,
+      FULLSCREEN_PRELOAD_MAX_EDGE);
   }
 
   /** 启动后台预载。已在跑就只自增代号，让现有链自动跟到最新位置，避免并发多条链。 */
@@ -4508,17 +4666,20 @@ struct Index {
     }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
-    // 进全屏顶栏立即收起，只有鼠标贴到窗口顶端才浮出；退全屏恢复常驻并撤掉兜底计时
+    // 真全屏（2026-11-11）：应用内顶栏浮层 / 退出按钮一律不画，画面只剩图片。
+    // 退出靠 Esc / F11 / 双击画布，左上角信息浮层会写一行提示。
     this.clearTopbarTimer();
-    this.topbarVisible = !on;
-    this.status = on ? '全屏模式 · 鼠标移到顶端唤出顶栏 · Esc 退出全屏' : '已退出全屏 · Esc 关闭应用';
-    this.applyWindowFullScreen(on); // 连系统状态栏 / 导航栏一起处理（失败静默降级）
+    this.topbarVisible = false;
+    this.status = on ? '全屏 · Esc / F11 / 双击退出' : '已退出全屏 · Esc 关闭应用';
+    this.applyWindowFullScreen(on, 0); // 标题栏 / dock / 状态栏 / 导航栏一起处理
+    this.armCanvasReloadFallback();    // 窗口 API 静默失败时也能按当前画布重解
   }
 
-  /** 根容器收到鼠标移动：只有全屏态才需要判断顶栏浮出。
+  /** 根容器收到鼠标移动：真全屏下不再有「贴顶唤出工具顶栏」（2026-11-11 用户要求「不会有标题列」）。
+   *  留着 SHOW_FULLSCREEN_CHROME 开关：改回 true 就能恢复旧的唤出式工具条，不用重新写代码。
    *  y 是相对根 Stack 的坐标；非全屏时顶栏常驻，不必算。 */
   private onRootMouse(event: MouseEvent): void {
-    if (!this.fullscreen) {
+    if (!SHOW_FULLSCREEN_CHROME || !this.fullscreen) {
       return;
     }
     const y: number = Number(event.y);
@@ -4556,36 +4717,109 @@ struct Index {
     }
   }
 
-  /** 窗口级沉浸：这才是「上方那条边」消失的关键 —— 应用内隐藏 UI 只管得到自己的三块栏，
-   *  管不到系统状态栏。三步有依赖顺序：
-   *    ① maximize()       自由窗口 → 最大化 + 沉浸式布局（maximize 默认 ENTER_IMMERSIVE）
-   *    ② setWindowLayoutFullScreen(true)  布局不避让系统栏
-   *    ③ setWindowSystemBarEnable([])     隐藏状态栏 / 导航栏（**只有已进入全屏才生效**）
-   *  任一步失败都只记日志：退化成「仅隐藏应用内 UI」，按钮与快捷键照常可用。 */
-  private async applyWindowFullScreen(on: boolean): Promise<void> {
+  /** 窗口级真全屏（2026-11-11）：隐藏系统标题栏与 dock（PC 任务栏）、状态栏、导航栏。
+   *
+   *  关键一步：maximize(MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)。
+   *  SDK 26 `@ohos.window.d.ts` L3025 明确写着「window title bar and dock bar are NOT
+   *  displayed when the cursor hovers over the hot zone」（since 14）。
+   *  旧的 maximize() 无参 = FOLLOW_APP_IMMERSIVE_SETTING，鼠标一碰热区标题栏 / dock 就回来，
+   *  那不是真全屏。即使窗口已经是最大化态也要再调一次，确保沉浸形态被设置上。
+   *
+   *  每步独立 try/catch：某一步在该机型不支持时只记日志，不把后续步骤全带走。
+   *  AppStorage 里窗口还没就绪（getMainWindow 是异步）则短延时重试，不弹任何 UI。 */
+  private async applyWindowFullScreen(on: boolean, retry: number): Promise<void> {
     const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
     if (!win) {
+      if (retry < FULLSCREEN_WINDOW_RETRY_MAX) {
+        setTimeout(() => {
+          this.applyWindowFullScreen(on, retry + 1);
+        }, FULLSCREEN_WINDOW_RETRY_MS);
+      }
       return;
     }
-    try {
-      const bars: Array<'status' | 'navigation'> = on ? [] : ['status', 'navigation'];
-      if (on) {
+    hilog.info(DOMAIN, TAG, 'fullscreen: %{public}s plan=%{public}s',
+      on ? 'enter' : 'exit', fullscreenStepsOf(on).join(','));
+    if (on) {
+      try {
         if (win.getWindowStatus() === window.WindowStatusType.FLOATING) {
-          await win.maximize();
           this.maximizedByUs = true;
         }
-        await win.setWindowLayoutFullScreen(true);
+        await win.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: maximize failed: %{public}s', JSON.stringify(e));
       }
-      await win.setWindowSystemBarEnable(bars);
-      if (!on) {
+      try {
+        win.setImmersiveModeEnabledState(true);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: immersive mode failed');
+      }
+      try {
+        await win.setWindowLayoutFullScreen(true);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: layout failed');
+      }
+      const noBars: Array<'status' | 'navigation'> = [];
+      try {
+        await win.setWindowSystemBarEnable(noBars);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: system bar failed');
+      }
+      // 显式三次调用：不用 for-of 传联合字面量，避开 ArkTS 严格类型推断的坑。
+      try {
+        await win.setSpecificSystemBarEnabled('status', false);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: status off failed');
+      }
+      try {
+        await win.setSpecificSystemBarEnabled('navigation', false);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: navigation off failed');
+      }
+      try {
+        await win.setSpecificSystemBarEnabled('navigationIndicator', false);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: indicator off failed');
+      }
+    } else {
+      const allBars: Array<'status' | 'navigation'> = ['status', 'navigation'];
+      try {
+        await win.setWindowSystemBarEnable(allBars);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: system bar restore failed');
+      }
+      try {
+        await win.setSpecificSystemBarEnabled('status', true);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: status on failed');
+      }
+      try {
+        await win.setSpecificSystemBarEnabled('navigation', true);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: navigation on failed');
+      }
+      try {
+        await win.setSpecificSystemBarEnabled('navigationIndicator', true);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: indicator on failed');
+      }
+      try {
         await win.setWindowLayoutFullScreen(false);
-        if (this.maximizedByUs) {
-          this.maximizedByUs = false;
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: layout restore failed');
+      }
+      try {
+        win.setImmersiveModeEnabledState(false);
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'fullscreen: immersive mode restore failed');
+      }
+      if (this.maximizedByUs) {
+        this.maximizedByUs = false;
+        try {
           await win.recover(); // 还原成进入前的自由窗口大小与位置
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'fullscreen: recover failed');
         }
       }
-    } catch (e) {
-      hilog.warn(DOMAIN, TAG, 'window fullscreen failed: %{public}s', JSON.stringify(e));
     }
   }
 
@@ -4706,7 +4940,12 @@ struct Index {
       if (this.viewPixelMap !== undefined) {
         Image(this.viewPixelMap!)          // 自解码结果：清晰，且一定是当前这张
           .objectFit(ImageFit.Contain)
+          // ImageInterpolation.High = Cubic，SDK 明确写「highest possible quality」——
+          // 这是平台上最高画质的 resample 档；autoResize(false) 不让组件解码时再降采样损信息。
+          // 配合全屏后按新画布尺寸重解码，全程不把小图拉大。
           .interpolation(ImageInterpolation.High)
+          .autoResize(false)
+          .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
           .width(w)
           .height(this.frameH())
@@ -4717,6 +4956,8 @@ struct Index {
         Image(uri)
           .objectFit(ImageFit.Contain)
           .interpolation(ImageInterpolation.High)
+          .autoResize(false)
+          .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
           .width(w)
           .height(this.frameH())
@@ -5090,6 +5331,21 @@ struct Index {
                 .margin({ top: 2 })
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
+              // 内嵌 ICC 识别出来的色彩空间 / HDR / EXIF 摆正角度（ViewPlan.viewHintOf）
+              Text(viewHintOf(colorSpaceNameOf(this.viewColorSpace), this.viewIsHdr, this.viewExifDegrees) +
+                (isWideGamutOf(this.viewColorSpace) ? ' · 广色域' : ''))
+                .fontSize(10)
+                .fontColor('#8b95a8')
+                .margin({ top: 2 })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              // 全屏没有任何标题列 / 按钮，只能在这里告诉用户怎么退出
+              if (this.fullscreen) {
+                Text('全屏 · Esc / F11 / 双击退出')
+                  .fontSize(10)
+                  .fontColor('#8b95a8')
+                  .margin({ top: 2 })
+              }
             }
             .alignItems(HorizontalAlign.Start)
             .padding(8)
@@ -5147,8 +5403,9 @@ struct Index {
           .padding(12)
           .hitTestBehavior(HitTestMode.Transparent)
 
-          // 全屏时右上角浮出「退出」按钮：顶栏被隐藏了，必须留一个鼠标可点的出口（键盘还有 Esc / F11）
-          if (this.fullscreen) {
+          // 真全屏下不画任何按钮（SHOW_FULLSCREEN_CHROME=false）；
+          // 把开关改回 true 可恢复旧的「右上角退出」入口，退出仍可用 Esc / F11 / 双击画布。
+          if (SHOW_FULLSCREEN_CHROME && this.fullscreen) {
             Row() {
               Button('退出全屏')
                 .type(ButtonType.Normal)
@@ -5179,10 +5436,12 @@ struct Index {
             const changed: boolean = (w !== this.canvasW) || (h !== this.canvasH);
             this.canvasW = w;
             this.canvasH = h;
-            // 进出全屏后画布尺寸变了：按新尺寸重解一次大图，否则只是把旧分辨率拉大（发虚）
-            if (changed && this.pendingReload && this.cur >= 0) {
+            // 进出全屏后画布尺寸变了：按新尺寸立刻重解（不走升级延迟），
+            // 否则沿用旧档位的 PixelMap 只是把小图拉大 —— 全屏画质会明显发虚。
+            if (changed && this.pendingReload) {
               this.pendingReload = false;
-              this.showPreviewOf(this.cur);
+              this.clearCanvasReloadFallback();
+              this.refreshForCanvasResize();
             }
           }
         })
@@ -5278,9 +5537,9 @@ struct Index {
       .defaultFocus(true)
       .onKeyEvent((event: KeyEvent) => this.onKey(event))
 
-      // 全屏时顶栏浮在画布之上（Win64 0cfabb2）：绝对定位、不占布局，
-      // 鼠标贴到窗口顶端才出现，出现/消失都不会把预览区挤一下。
-      if (this.fullscreen && this.topbarVisible) {
+      // 真全屏下不画工具顶栏（SHOW_FULLSCREEN_CHROME=false）：用户要求「不会有标题列」。
+      // 开关改回 true 才恢复旧的「鼠标贴顶浮出、绝对定位不占布局」行为。
+      if (SHOW_FULLSCREEN_CHROME && this.fullscreen && this.topbarVisible) {
         Column() {
           this.topBar();
         }

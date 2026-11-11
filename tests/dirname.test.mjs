@@ -10,7 +10,8 @@
  * 「往上层」按目录层级逐级上行（不按浏览历史、不越级、不循环、到卷根停止），
  * 2026-11-11 的「退出记住位置 / 启动自动显示上次相片」，
  * 以及同日澄清的「往上层按钮永不 grey out / 永不禁用、点了要有反应」，
- * 同日末的「预览右下角只显示缓存数量 + 缩放百分比」。
+ * 同日末的「预览右下角只显示缓存数量 + 缩放百分比」，
+ * 以及「真全屏 / 最高画质 resample / ICC·HDR·EXIF 旋转」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -24,6 +25,8 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, F
   restoreUpEnabled, restoreUpHint } from '../entry/src/main/ets/common/ResumePlan.ts';
 import { PERSIST_SKIP, PERSIST_ACTIVATE, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../entry/src/main/ets/common/PersistPlan.ts';
+import { exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
+  colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../entry/src/main/ets/common/ViewPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -1104,8 +1107,9 @@ check('按钮永不禁用（非注释行无 .enabled）', /\.enabled\(/.test(COD
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log('--- 源码静态契约：预览右下角只显示「缓存数量 + 缩放百分比」两项 ---');
+// 结束锚点用代码（onAreaChange），不用注释文字 —— 注释改文案不该让契约失效。
 const BADGE = INDEX.slice(INDEX.indexOf('// 右下角角标：只显示'),
-  INDEX.indexOf('// 全屏时右上角浮出'));
+  INDEX.indexOf('.onAreaChange((oldV: Area, newV: Area)'));
 const BADGE_ALWAYS = BADGE.slice(BADGE.indexOf('// 缓存：只显示'));
 const BADGE_CODE = BADGE_ALWAYS.split('\n')
   .filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
@@ -1135,6 +1139,119 @@ check('按钮永不禁用 / 版本号未升 / 防冻结闸门不减',
   /\.enabled\(/.test(CODE_LINES) === false &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8, true);
+
+console.log('--- ViewPlan 纯函数：EXIF 摆正 / 全屏档位 / 色彩空间 ---');
+const exifCases = [
+  ['1 不转', '1', 0, false, false],
+  ['2 水平镜像', '2', 0, true, false],
+  ['3 转 180', '3', 180, false, false],
+  ['4 垂直镜像', '4', 0, false, true],
+  ['5 镜像 + 顺时针 270', '5', 270, true, false],
+  ['6 顺时针 90（竖拍常见）', '6', 90, false, false],
+  ['7 镜像 + 顺时针 90', '7', 90, false, true],
+  ['8 顺时针 270', '8', 270, false, false],
+  ['空串当作不转', '', 0, false, false],
+  ['非法值当作不转', 'abc', 0, false, false],
+  ['未知值当作不转', '99', 0, false, false]
+];
+for (const [label, raw, deg, fh, fv] of exifCases) {
+  const t = exifTransformOf(raw);
+  check('EXIF Orientation ' + label,
+    JSON.stringify([t.degrees, t.flipH, t.flipV]), JSON.stringify([deg, fh, fv]));
+}
+check('exifSizeOf 90 度交换宽高', JSON.stringify(exifSizeOf(4000, 3000, 90)),
+  JSON.stringify({ w: 3000, h: 4000 }));
+check('exifSizeOf 270 度交换宽高', JSON.stringify(exifSizeOf(4000, 3000, 270)),
+  JSON.stringify({ w: 3000, h: 4000 }));
+check('exifSizeOf 0 / 180 不换', JSON.stringify([exifSizeOf(4000, 3000, 0), exifSizeOf(4000, 3000, 180)]),
+  JSON.stringify([{ w: 4000, h: 3000 }, { w: 4000, h: 3000 }]));
+check('viewEdgeOf 普通态 1.5 倍', viewEdgeOf(1200, 800, false, 1.5, 2.0, 1200, 4096), 1800);
+check('viewEdgeOf 全屏 2.0 倍（跟随画布变大）', viewEdgeOf(1920, 1080, true, 1.5, 2.0, 1200, 4096), 3840);
+check('viewEdgeOf 夹在 4096 上限', viewEdgeOf(3840, 2160, true, 1.5, 2.0, 1200, 4096), 4096);
+check('viewEdgeOf 夹在 1200 下限', viewEdgeOf(320, 240, false, 1.5, 2.0, 1200, 4096), 1200);
+check('preloadEdgeOf 普通态封顶 1536',
+  preloadEdgeOf(1920, 1080, false, 1.15, 256, 1024, 1536, 2560), 1536);
+check('preloadEdgeOf 全屏放宽到 2304（ceil 量化）',
+  preloadEdgeOf(1920, 1080, true, 1.15, 256, 1024, 1536, 2560), 2304);
+check('preloadEdgeOf 零画布回退 minEdge',
+  preloadEdgeOf(0, 0, true, 1.15, 256, 1024, 1536, 2560), 1024);
+check('colorSpaceNameOf 标准空间',
+  JSON.stringify([colorSpaceNameOf(0), colorSpaceNameOf(3), colorSpaceNameOf(4),
+    colorSpaceNameOf(9), colorSpaceNameOf(10)]),
+  JSON.stringify(['未标注色彩空间', 'Display P3', 'sRGB', 'BT.2020 HLG', 'BT.2020 PQ']));
+check('isWideGamutOf 广色域 / HDR 空间',
+  JSON.stringify([isWideGamutOf(3), isWideGamutOf(10), isWideGamutOf(4)]),
+  JSON.stringify([true, true, false]));
+check('viewHintOf HDR + EXIF', viewHintOf('Display P3', true, 90), 'Display P3 · HDR · EXIF 90°');
+check('viewHintOf 普通 sRGB 不加多余字样', viewHintOf('sRGB', false, 0), 'sRGB');
+check('fullscreenStepsOf 进入含「无标题栏 / dock」步骤',
+  fullscreenStepsOf(true).includes('maximize-no-title-dock'), true);
+check('fullscreenStepsOf 退出含 recover', fullscreenStepsOf(false).includes('recover'), true);
+
+console.log('--- 源码静态契约：真全屏 / 最高画质 resample / ICC·HDR·EXIF ---');
+const RESIZE_FN = INDEX.slice(INDEX.indexOf('private refreshForCanvasResize('),
+  INDEX.indexOf('private armCanvasReloadFallback('));
+check('SHOW_FULLSCREEN_CHROME 默认 false（全屏无标题列 / 无退出按钮）',
+  /const SHOW_FULLSCREEN_CHROME: boolean = false;/.test(INDEX) &&
+  /if \(SHOW_FULLSCREEN_CHROME && this\.fullscreen\)/.test(INDEX) &&
+  /if \(SHOW_FULLSCREEN_CHROME && this\.fullscreen && this\.topbarVisible\)/.test(INDEX) &&
+  /if \(!SHOW_FULLSCREEN_CHROME \|\| !this\.fullscreen\)/.test(INDEX), true);
+check('窗口最大化用「标题栏与 dock 悬停都不显示」的沉浸形态',
+  /win\.maximize\(window\.MaximizePresentation\.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER\)/.test(INDEX), true);
+check('沉浸式布局 + 系统栏全隐藏 + 三类 system bar 逐个关/开',
+  /win\.setImmersiveModeEnabledState\(true\)/.test(INDEX) &&
+  /win\.setImmersiveModeEnabledState\(false\)/.test(INDEX) &&
+  /await win\.setWindowLayoutFullScreen\(true\)/.test(INDEX) &&
+  /win\.setWindowSystemBarEnable\(noBars\)/.test(INDEX) &&
+  (INDEX.match(/win\.setSpecificSystemBarEnabled\('(?:status|navigation|navigationIndicator)', false\)/g) || []).length === 3 &&
+  (INDEX.match(/win\.setSpecificSystemBarEnabled\('(?:status|navigation|navigationIndicator)', true\)/g) || []).length === 3, true);
+check('窗口实例未就绪短延时重试（getMainWindow 异步竞态）',
+  /if \(retry < FULLSCREEN_WINDOW_RETRY_MAX\)/.test(INDEX) &&
+  /this\.applyWindowFullScreen\(on, retry \+ 1\)/.test(INDEX), true);
+check('全屏尺寸变化立即重解当前张（不走 showPreviewOf 升级延迟）',
+  /if \(changed && this\.pendingReload\) \{[\s\S]{0,220}this\.refreshForCanvasResize\(\);/.test(INDEX) &&
+  /this\.curToken\+\+;/.test(RESIZE_FN) &&
+  /this\.loadViewNow\(uri, token\);/.test(RESIZE_FN) &&
+  /this\.schedulePreload\(\);/.test(RESIZE_FN) &&
+  /bulkIoAllowed\(this\.restoreMode\)/.test(RESIZE_FN), true);
+check('pendingReload 有兜底超时（窗口 API 不产生 onAreaChange 也重解）',
+  /CANVAS_RELOAD_FALLBACK_MS/.test(INDEX) &&
+  /private armCanvasReloadFallback\(\): void \{/.test(INDEX) &&
+  /this\.clearCanvasReloadFallback\(\);/.test(INDEX), true);
+check('viewEdge / preloadEdge 交给 ViewPlan 且带全屏参数',
+  /return viewEdgeOf\(this\.canvasW, this\.canvasH, this\.fullscreen,/.test(INDEX) &&
+  /return preloadEdgeOf\(this\.canvasW, this\.canvasH, this\.fullscreen,/.test(INDEX) &&
+  /FULLSCREEN_VIEW_EDGE_FACTOR, VIEW_EDGE_MIN, VIEW_EDGE_MAX\)/.test(INDEX) &&
+  /FULLSCREEN_PRELOAD_MAX_EDGE\);/.test(INDEX), true);
+check('decodePx 读 EXIF Orientation 并在解码阶段旋转 / 镜像',
+  /src\.getImageProperty\(image\.PropertyKey\.ORIENTATION\)/.test(INDEX) &&
+  /opts\.rotate = exif\.degrees;/.test(INDEX) &&
+  /await px\.rotate\(exif\.degrees\)/.test(INDEX) &&
+  /await px\.flip\(exif\.flipH, exif\.flipV\)/.test(INDEX), true);
+check('EXIF 元数据有缓存（避免 201 张预载逐张跨进程读）',
+  /const EXIF_CACHE: Map<string, ExifTransform> = new Map\(\)/.test(INDEX) &&
+  /const cached: ExifTransform \| undefined = EXIF_CACHE\.get\(uri\)/.test(INDEX), true);
+check('HDR：解码 AUTO + 显示端 HIGH / STANDARD 按图切换',
+  /opts\.desiredDynamicRange = image\.DecodingDynamicRange\.AUTO;/.test(INDEX) &&
+  (INDEX.match(/\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/g) || []).length === 2, true);
+check('色彩：保留内嵌 ICC 或转换到 sRGB / Display P3，并读回 PixelMap 色彩空间',
+  /const COLOR_MANAGE_MODE: number = 0;/.test(INDEX) &&
+  /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.SRGB\)/.test(INDEX) &&
+  /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.DISPLAY_P3\)/.test(INDEX) &&
+  /px\.getColorSpace\(\)\.getColorSpaceName\(\)/.test(INDEX), true);
+check('最高画质 resample：主视图与兜底均 Cubic(High) + autoResize(false)',
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 2 &&
+  (INDEX.match(/\.interpolation\(ImageInterpolation\.High\)/g) || []).length >= 2, true);
+check('全屏退出提示写在信息浮层（不新增标题列 / 按钮）',
+  /Text\('全屏 · Esc \/ F11 \/ 双击退出'\)/.test(INDEX), true);
+check('退出全屏仍恢复系统栏并清理兜底计时器',
+  /this\.applyWindowFullScreen\(false, 0\);/.test(INDEX) &&
+  /this\.clearCanvasReloadFallback\(\);/.test(INDEX), true);
+check('回归：预算常量 / 防冻结闸门 / 按钮 / 版本不动',
+  /const PRELOAD_COUNT: number = 216;/.test(INDEX) &&
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8 &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

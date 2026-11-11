@@ -38,13 +38,14 @@
 | 幻灯片 | `幻灯片` 按钮 / 空格键，默认 3 秒切换 |
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
-| 顶栏自动隐藏 | 全屏时顶栏浮在画布上（不占布局），鼠标贴到窗口顶端才出现，停手 2s 自动收起 |
+| 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
 | 关闭应用 | **`Esc`**（非全屏时；全屏下 `Esc` 先退全屏，再按一次才关闭） |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
-| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` 退出；隐藏应用三块栏与系统状态栏 / 导航栏，左栏整列收起 |
+| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
+| 色彩 / HDR / EXIF | 解码时按 EXIF Orientation 自动摆正（含 4 种镜像）；识别内嵌 ICC 映射到的标准色彩空间（sRGB / Display P3 / BT.2020…）并显示；HDR 图按 HDR 解码 + 显示端 HIGH 动态范围，平台不支持时自动降 SDR。**平台边界**：HarmonyOS 26 没有「从 ICC profile 字节流构造色彩空间」API，详见专章 |
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
 
@@ -94,7 +95,7 @@
 
 当前基线（2026-10-17）：`BUILD SUCCESSFUL`，**0 ERROR / 7 WARN** ——
 WARN 分别是 `preferences` 调用需处理异常（5 条）、`getAssets` 需受限权限（预期保留）、
-`setWindowSystemBarEnable` 标注 2in1 不可用（已用 try/catch 兜底，不影响功能）。
+`setWindowSystemBarEnable` 的 2in1 兼容性告警（SDK 原文是「非全屏 / 非最大化窗口态不生效」；2in1 上明确不生效的是 `setWindowSystemBarProperties`，均已用 try/catch 兜底，见全屏章节）。
 
 ## 工程结构
 
@@ -138,41 +139,43 @@ PIKAN-HarmonyOS/
 > 左栏抬头下的 `排序 ↑/↓`、`往上层`、`选择文件夹` 与分隔条 « / » **均保留**。
 > 原 8 个按钮的 act 名为 `fit / one / zout / zin / rotl / rotr / fliph / flipv`（供恢复时对照）。
 
-### 全屏（沉浸）模式
+### 全屏（真全屏，2026-11-11 重写）
 
-两层一起做，缺一层都去不掉「上方那条边」：
+用户要求「真正全屏，不会有标题列，隐藏 windows 的 taskbar」。分两层：
 
-| 层 | 做什么 | 怎么做的 |
-|---|---|---|
-| 应用内 | 顶栏 / 左侧档案栏 / 状态栏整体不进入布局 | `@State fullscreen` + `if (!this.fullscreen) {}` |
-| 窗口级 | 最大化 + 沉浸式布局 + **隐藏系统状态栏 / 导航栏** | `window` 接口（见下） |
+| 层 | 做什么 |
+|---|---|
+| 应用内 | 顶栏 / 左栏 / 状态栏不进布局；全屏时**连唤出式工具顶栏与右上角「退出全屏」按钮也不画**（`SHOW_FULLSCREEN_CHROME = false`），画面只剩图片与左上角信息浮层 |
+| 窗口级 | 隐藏系统标题栏、dock（PC 任务栏）、状态栏、导航栏、导航指示条 |
 
-窗口级三步**有依赖顺序**，顺序错了不生效：
+窗口级核心是**带参数的 `maximize`**（SDK 26 `@ohos.window.d.ts` L3025，since 14）：
 
 ```ts
-win.maximize();                       // ① 自由窗口 → 最大化（默认 ENTER_IMMERSIVE 沉浸式布局）
-win.setWindowLayoutFullScreen(true);  // ② 布局不避让系统栏
-win.setWindowSystemBarEnable([]);     // ③ 隐藏状态栏/导航栏 —— 只有已进入全屏才生效
+await win.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
+win.setImmersiveModeEnabledState(true);
+await win.setWindowLayoutFullScreen(true);
+await win.setWindowSystemBarEnable([]);                    // status / navigation
+await win.setSpecificSystemBarEnabled('status', false);
+await win.setSpecificSystemBarEnabled('navigation', false);
+await win.setSpecificSystemBarEnabled('navigationIndicator', false);
 ```
 
-窗口实例页面侧拿不到（`windowStage` 只在 Ability 里），故 `EntryAbility.onWindowStageCreate()`
-里 `getMainWindow()` 后存进 `AppStorage`，页面用 `AppStorage.get<window.Window>('mainWindow')` 取。
-**三步全部包在 try/catch 里**：拿不到窗口或某步失败就静默降级成「只隐藏应用内 UI」，
-按钮与快捷键照常可用，不会卡在全屏里出不来。退出时按反序恢复，并且只在我们主动
-`maximize()` 过时才 `recover()`（避免把用户原本的最大化状态一起还原掉）。
+无参 `maximize()` = `FOLLOW_APP_IMMERSIVE_SETTING`，鼠标一碰热区标题栏 / dock 就回来，
+不是真全屏；`ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER` 才明确「热区悬停也不显示
+title bar / dock bar」。**即使窗口已经是最大化态也要再调一次**，否则沉浸形态没被设置上。
+退出时按反序恢复，只在本次确实从浮动窗口 `maximize()` 过时才 `recover()`。
 
-另三个容易漏的点：
+三个容易漏的点：
 
-1. **必须留退出出口**：顶栏被隐藏后，`全屏` 按钮也一起没了。所以全屏时右上角浮出一个
-   「退出全屏」按钮，键盘另给 `Esc` / `F11`；`aboutToDisappear` 里兜底恢复系统栏。
-2. **画布变大后要重解码**：主视图是按「画布长边 ×2」解码的，进入全屏后画布变大，
-   若沿用旧分辨率就只是把小图拉大（发虚）。故 `setFull()` 置 `pendingReload`，
-   等 `onAreaChange` 把新尺寸报上来再 `showPreviewOf(this.cur)` 重解一次。
-3. **双击不用于全屏**：曾把双击接成进出全屏，但双击与「单击以光标为锚点放大」天然冲突 ——
-   要让单击立即生效，一次双击就会先放大两次（×1.5 × ×1.5 = 2.25）再全屏，画面直接歪掉；
-   唯一解是给单击加 ~220ms 延迟消歧，而单击放大是最高频操作，发滞感很明显。
-   权衡后**取消双击全屏**，双击回到「复位视图」，单击放大保持零延迟。
-   全屏改由顶栏按钮 / `F11` / `Esc` 承担，均不与单击冲突。
+1. **每步独立 try/catch**：某步在该机型不支持时只记日志，不把后续步骤全带走；
+   窗口实例还没被 `EntryAbility.getMainWindow()` 缓存好时短延时重试（2 次 × 120ms）。
+2. **退出出口**：全屏没有任何按钮，靠 `Esc` / `F11` / 双击画布；左上角信息浮层写一行
+   `全屏 · Esc / F11 / 双击退出`。`aboutToDisappear` 兜底把标题栏 / dock / 系统栏全部还回去。
+3. **改回旧行为**：把 `SHOW_FULLSCREEN_CHROME` 改成 `true` 即可恢复「鼠标贴顶唤出工具顶栏 +
+   右上角退出按钮」，代码都在，不用重写。
+
+> 旧文档「取消双击全屏、双击回到复位视图」「主视图按画布长边 ×2 解码」两处与代码不符，
+> 已按实现校正：双击画布仍是切全屏，主视图普通态 ×1.5 / 全屏 ×2.0，夹在 `[1200, 4096]`。
 
 ### 关闭应用：Esc
 
@@ -290,7 +293,7 @@ ArkUI 同一组件叠加 `rotate`/`scale`/`translate` 时合成顺序不直观�
 改为**自己解码成 `PixelMap` 再整体替换**：
 
 - `showPreviewOf()` 先 `curToken++` 作废所有在途回调，命中缓存就先把那张低清图顶上；
-- `loadView()` 按 **画布长边 × 2**（夹在 `[1600, 4096]`）解码清晰图，**回来时校验代号**才替换；
+- `loadView()` 按 **画布长边 × 1.5**（全屏 ×2.0，夹在 `[1200, 4096]`）解码清晰图，**回来时校验代号**才替换；
 - `loadQuick()` 在没命中缓存时并行解一张低清占位，避免解码期间空屏。
 
 显示哪张、什么时候换，完全由代号原子控制 → **不会串图、最终一定是清晰图**。
@@ -473,7 +476,7 @@ HiLog 上看：`warm: ready in N ms` → `warm: adopted on current`（命中当�
 | A | 预载 20 → **前后各 50**（`PRELOAD_COUNT = 112` / `PRELOAD_MAX_BYTES = 512MB`）；`100% = 1:1` 缩放口径；中灰底 `#5F5F5F`；顶栏 `PIKAN 1.0.4` + 完整路径（中间省略）；状态栏缓存账目；乱码文件名修复；自然序排序；隐藏 `.` 文件；`app.json5` 版本 1.0.4 | `BUILD SUCCESSFUL in 14 s 559 ms` |
 | B | 右键还原 / 双击全屏（撤销单击放大）/ `Ctrl+B` / `Shift+R,H,V` / 退格往上层；左栏改文件浏览器数据结构与三栏行；`选择文件夹` / `往上层` / `排序` 按钮；目录 `mtime` 轮询自检；竖图对开配对逻辑 | `BUILD SUCCESSFUL in 10 s 106 ms` |
 | C | 对开双页显示：右页解码（`rightToken` 代号校验）、两页各占半宽、信息浮层双名、缓存淘汰保护右页；`clearPreviews()` 同步撤右页引用；右页未就绪用占位而非 `Image(uri)` | `BUILD SUCCESSFUL in 10 s 789 ms` |
-| D | 全屏时顶栏自动隐藏（贴顶端浮出 / 停手 2s 收起，`Stack + position` 不占布局）；`Ctrl+B` 收起窄条 224 + 分隔条 « 按钮；体积补测在翻页 / 换目录 / 幻灯片期间让路 | `BUILD SUCCESSFUL in 34 s 698 ms` |
+| D | 全屏时顶栏自动隐藏（贴顶端浮出 / 停手 2s 收起，`Stack + position` 不占布局）；`Ctrl+B` 收起窄条 224 + 分隔条 « 按钮；体积补测在翻页 / 换目录 / 幻灯片期间让路。**注：2026-11-11 起真全屏默认不画工具顶栏，见全屏章节** | `BUILD SUCCESSFUL in 34 s 698 ms` |
 | E | 悬停缩略图（独立 `ThumbLoader` 实例：384px 档 / 24 张 LRU / 并发 1）；启动自检日志 | `BUILD SUCCESSFUL in 41 s 703 ms` |
 
 ### 对开双页的两条硬约束
@@ -521,6 +524,52 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 真全屏 + 最高画质 resample + ICC / HDR / EXIF（2026-11-11）
+
+用户三项要求与对应实现：
+
+| 要求 | 实现 |
+|---|---|
+| 真全屏、无标题列、隐藏 taskbar | `maximize(ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)` + 沉浸式布局 + 关三类系统栏；`SHOW_FULLSCREEN_CHROME = false` 去掉应用内工具顶栏 / 退出按钮 |
+| 全屏跟随尺寸适配 + 最高画质 resample | `ViewPlan.viewEdgeOf / preloadEdgeOf` 按全屏画布放大解码档位（主视图 ×2.0、预载上限 2560）；尺寸变化走 `refreshForCanvasResize()` **0 延迟**重解当前张 + 按新档位补预载；显示层 `ImageInterpolation.High`（SDK 注明的 Cubic 最高画质）+ `autoResize(false)` |
+| ICC 内嵌色彩 / HDR / EXIF 旋转 | 见下表，全部集中在 `decodePx()` 的一个 `DecodingOptions` |
+
+### 解码选项（全部集中在 `decodePx()`）
+
+| 能力 | SDK 26 接口 | 说明 |
+|---|---|---|
+| EXIF 旋转 | `ImageSource.getImageProperty(image.PropertyKey.ORIENTATION)` → `ViewPlan.exifTransformOf()` → `DecodingOptions.rotate` / `PixelMap.rotate` / `PixelMap.flip` | 8 种 Orientation 全覆盖（含 4 种镜像）；在解码阶段旋转，少一次重采样；`EXIF_CACHE` 按 uri 缓存，201 张预载不会逐张跨进程读元数据 |
+| 内嵌 ICC 色彩 | `PixelMap.getColorSpace()` + `DecodingOptions.desiredColorSpace` | 系统 codec 识别内嵌 ICC 并映射成标准空间（sRGB / Display P3 / BT.2020…），默认**原样保留**；`COLOR_MANAGE_MODE` 可切 `1` = sRGB / `2` = Display P3 在解码时转换；信息浮层显示识别结果 |
+| HDR | `DecodingOptions.desiredDynamicRange = DecodingDynamicRange.AUTO` + `Image.dynamicRangeMode(HIGH / STANDARD)` | HDR 图按 HDR 解码，显示端按 `viewHdrWanted` 开 HIGH；平台不支持 HDR 时 SDK 自动降级 SDR |
+| 最高画质缩放 | `.interpolation(ImageInterpolation.High)` + `.autoResize(false)` | SDK 明确 `High` = Cubic「highest possible quality」；`autoResize(false)` 不让组件在解码阶段再降采样损信息 |
+
+全屏前后档位对比（`ViewPlan` 纯函数，已进回归测试）：
+
+| 场景 | 主视图 `viewEdge()` | 预载 `preloadEdge()` |
+|---|---|---|
+| 普通窗口 1200×800 | `1200 × 1.5 = 1800` | 按画布 ceil 量化，封顶 1536 |
+| 全屏 1920×1080 | `1920 × 2.0 = 3840` | 同一算法放宽到 2304（上限 2560） |
+
+旧实现 `onAreaChange` 只调 `showPreviewOf()`，命中缓存时会被 `showNeed()` 判成「够用」而
+沿用旧档位图，等于把小图拉大；现在改为 `curToken++` 后直接 `loadViewNow(uri, token)`（0 延迟）
+并 `schedulePreload()`，窗口 API 没产生尺寸回调时还有 800ms 兜底重解。
+
+**⚠️ ICC 平台边界（如实说明）**：HarmonyOS 26 的 `@ohos.graphics.colorSpaceManager`
+只有 `create(ColorSpace)` 与 `create(primaries, gamma)`，**没有「从 ICC profile 字节流构造
+ColorSpaceManager」的 API**，因此做不到 Photoshop / Win64 版那种完整 ICC CMS（读取任意
+profile 的 TRC / 矩阵做精确转换）。本工程做的是：让系统 codec 识别内嵌 ICC → 映射到标准
+色彩空间 → 原样保留或按常量转换到 sRGB / Display P3 → 把识别结果显示出来。广色域屏上
+颜色正确，任意自定义 ICC 的精确转换不在平台能力内。
+
+**⚠️ 两个实机回退开关**：若竖拍图被多转 90°，说明该机型系统 codec 已自动应用 EXIF
+Orientation，把 `EXIF_AUTO_ROTATE` 改 `false`；若 `rotate` 与 `desiredSize` 组合在该 codec
+上不支持，把 `EXIF_ROTATE_AT_DECODE` 改 `false` 走 `PixelMap.rotate()`。都不改业务流程。
+
+验证：`502 → 544/544 通过`（新增 42 例：`ViewPlan` 纯函数 8 种 EXIF / 档位 / 色彩空间 / 提示，
+源码静态契约覆盖窗口沉浸 API、三类系统栏、0 延迟重解、解码选项、Cubic / autoResize 与回归护栏），
+`git diff --check` 干净。按约定**未编译 HAP / 未放桌面 / 未升版本（仍 1.0.7）/ 未 push**，
+DevEco Studio 编译由用户侧完成。
 
 ## 预览右下角角标精简：只显示缓存数量 + 缩放百分比（2026-11-11）
 
