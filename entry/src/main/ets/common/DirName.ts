@@ -88,18 +88,91 @@ export function dirDisplayName(base: string, raw: string, candidates: string[]):
   return '目录';
 }
 
-/** 把 `file://docs/...` 这类文档 URI 还原成真实文件系统路径。
- *  与 Index.ets 的 dirCandidates() 手工兜底同一口径：
- *  `file://docs/storage/a/b` → `/storage/a/b`；非 file:// 原样返回（已去尾斜杠 / query）。 */
+/** 一段 authority / 首级目录名是否是「网络主机」，而不是普通目录名或文档 URI 伪 authority。
+ *
+ *  2026-11-12 第八轮（NAS 回上层显示错误目录表）：`file://192.168.100.61/图片档案/...`
+ *  的 authority 是 NAS 主机，旧 realPathOf() 把它当成 `file://docs` 之类的文档 provider 名
+ *  一并吞掉，于是 `/192.168.100.61/图片档案/...` 被归一成 `/图片档案/...` —— 卷根、父级、
+ *  APP 内清单三层全错。这里只认**明确的网络地址形态**，绝不把 `docs` / `content` /
+ *  中文目录名 / 带空格的目录名误判成主机：
+ *    · IPv4：192.168.100.61、10.0.0.1；
+ *    · IPv6 字面量：fe80::1（可带方括号 [fe80::1]）；
+ *    · 域名：nas.local、synology.me（至少两段，末段以字母开头，排除纯数字段）。 */
+export function isNetworkHost(seg: string): boolean {
+  if (seg.length === 0) {
+    return false;
+  }
+  const s: string = seg.charAt(0) === '[' && seg.charAt(seg.length - 1) === ']'
+    ? seg.substring(1, seg.length - 1) : seg;
+  if (s.length === 0) {
+    return false;
+  }
+  if (/^[0-9]{1,3}(\.[0-9]{1,3}){3}$/.test(s)) {
+    return true;                       // IPv4
+  }
+  if (s.indexOf(':') >= 0 && /^[0-9A-Fa-f:.]+$/.test(s)) {
+    return true;                       // IPv6
+  }
+  if (s.indexOf('.') >= 0 && /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(s)) {
+    const last: string = s.substring(s.lastIndexOf('.') + 1);
+    if (/^[A-Za-z]/.test(last)) {
+      return true;                     // 域名（TLD 以字母开头）
+    }
+  }
+  return false;
+}
+
+/** 从 NAS 路径 / URI 里抽出网络主机段（不含斜杠）；非 NAS 返回 ''。
+ *  覆盖 `/192.168.100.61/图片档案/...`、`file://192.../...`、`smb://...`、
+ *  UNC `\\192.168.100.61\图片档案\...`、`//192.168.100.61/图片档案/...`。 */
+export function nasHostOf(p: string): string {
+  const s: string = stripTrailingSlash(p);
+  const schemeAt: number = s.indexOf('://');
+  let rest: string = '';
+  if (schemeAt >= 0) {
+    rest = s.substring(schemeAt + 3);
+  } else {
+    const t: string = s.split('\\').join('/');
+    rest = t.indexOf('//') === 0 ? t.substring(2) : (t.charAt(0) === '/' ? t.substring(1) : t);
+  }
+  const slash: number = rest.indexOf('/');
+  const first: string = slash >= 0 ? rest.substring(0, slash) : rest;
+  return isNetworkHost(first) ? first : '';
+}
+
+/** 把 `file://docs/...` 文档 URI、NAS URI / UNC 还原成「层级计算用」的真实路径。
+ *
+ *  · `file://docs/storage/a/b` → `/storage/a/b`（docs 是文档 provider 伪 authority，丢掉）；
+ *  · `file://192.168.100.61/图片档案/a` → `/192.168.100.61/图片档案/a`（**保留 NAS 主机段**，
+ *    它是网络卷的第一级真实目录，丢掉会让 whole 目录层级错位）；
+ *  · `smb://nas.local/share/a`、`\\192.168.100.61\share\a` 同样折成 `/<host>/share/a`；
+ *  · 其余原样返回（已去尾斜杠 / query）。
+ *  与 Index.ets 的 dirCandidates() 兜底同一口径 —— 那边直接复用本函数。 */
 export function realPathOf(p: string): string {
   let s: string = stripTrailingSlash(p);
-  if (s.indexOf('file://') === 0) {
-    const rest: string = s.substring('file://'.length);
+  const isFileUri: boolean = s.indexOf('file://') === 0;
+  const isNasScheme: boolean = s.indexOf('smb://') === 0 || s.indexOf('nfs://') === 0;
+  if (isFileUri || isNasScheme) {
+    const rest: string = s.substring(s.indexOf('://') + 3);
     const slash: number = rest.indexOf('/');
     if (slash < 0) {
       return '';         // `file://docs` 这种碎片不是路径，别拿它算父级
     }
-    s = rest.substring(slash);
+    const authority: string = rest.substring(0, slash);
+    const tail: string = rest.substring(slash);
+    s = isNetworkHost(authority) ? '/' + authority + tail : tail;
+  } else {
+    // UNC / 双斜杠网络路径：折叠成单斜杠的 /<host>/<share>/...
+    const t: string = s.split('\\').join('/');
+    if (t.indexOf('//') === 0) {
+      const rest: string = t.substring(2);
+      const slash: number = rest.indexOf('/');
+      const host: string = slash >= 0 ? rest.substring(0, slash) : rest;
+      const tail: string = slash >= 0 ? rest.substring(slash) : '';
+      if (isNetworkHost(host)) {
+        s = '/' + host + tail;
+      }
+    }
   }
   return safeDecode(s);
 }
@@ -242,6 +315,11 @@ export function hierPathOf(path: string): string {
  *  · 鸿蒙用户卷 `/storage/(Users|media|emulated)/<id>/...` → `/storage/<bucket>/<id>`，
  *    这是文件管理器里「内部存储 / 用户卷」的顶，上面 `/storage`、`/` 是系统目录，
  *    既没有逐 URI 授权也没有可浏览内容，不应作为「往上层」的一级；
+ *  · NAS 网络卷 `/192.168.100.61/图片档案/...` → `/192.168.100.61`（设备根即卷根）。
+ *    2026-11-12 第八轮：旧实现把 NAS 当普通 POSIX 路径返回 `/`，于是 pathChainOf()
+ *    凭空冒出一行文件系统根 `/`、把 `192.168.100.61` 当成普通子目录列进清单 ——
+ *    这就是「选 NAS 路径后回上层显示错误目录表」的直接成因。设备根再往上同样是
+ *    系统目录，不该作为可浏览的一级，故与用户卷同级处理；
  *  · 其它绝对路径 → `/`（文件系统根）；
  *  · 解析不出真实路径（如 `file://docs` 碎片）→ `''`，表示无法判定层级。 */
 export function volumeRootOf(path: string): string {
@@ -262,6 +340,10 @@ export function volumeRootOf(path: string): string {
   if (parts.length >= 4 && parts[1] === 'storage' &&
       (parts[2] === 'Users' || parts[2] === 'media' || parts[2] === 'emulated')) {
     return '/' + parts[1] + '/' + parts[2] + '/' + parts[3];
+  }
+  // parts[1] 是 NAS 主机段（含卷根自身 `/192.168.100.61` 的 parts.length===2）
+  if (parts.length >= 2 && parts[0] === '' && isNetworkHost(parts[1])) {
+    return '/' + parts[1];
   }
   return '/';
 }

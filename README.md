@@ -525,6 +525,100 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第八轮：原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复（2026-11-12）
+
+### 用户诉求（两项，一次落地）
+
+1. 缓存逻辑：**档案数据完全载入内存同时解码**，以提高图片档案载入速度；
+2. 选择 NAS 路径（例如 `/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2023`）
+   后按「往上层」会显示错误目录表。
+
+完成后仍须满足：滚轮切换图片、窗口状态恢复、双击全屏正常；「往上层」恒可点、
+不弹系统目录选择器、在 APP 内显示上层清单；不编译 / 不升版本 / 不 push。
+
+### ① 档案数据完全载入内存 + 载入时同时解码
+
+第七轮只缓存了**解码后**的 `PixelMap`，`decodePx()` 仍对每张图做
+`fs.openSync(uri)` + `image.createImageSource(fd)`。NAS / 网络目录上这两步是跨进程 /
+跨网络往返，整库载入时被放大；全屏放大、resize 重解、EXIF/HDR/ICC 重解还要再读一遍文件。
+
+新增 `common/RawCache.ts`（纯函数，Node 可直接回归）：
+
+| 函数 | 作用 |
+|---|---|
+| `rawFitOf(sizes, incoming, maxBytes, maxCount)` | 插入前算 LRU 淘汰条数；张数 / 字节双预算，全淘汰后必然放得下，不会「解→淘汰→再解」死循环 |
+| `rawSingleAllowed(size, maxSingle)` | 超大单文件不进内存（避免一张 4K RAW 吃光预算），仍走 fd 兜底 |
+| `rawReadComplete(readBytes, size)` | 一次 `readSync` 没读满绝不把截断数据交给 `ImageSource` |
+| `rawCacheTargetOf(total, cap)` | 全量预取目标张数 |
+| `rawPrefetchWanted(ioAllowed, total, cap)` | **守住 ro1 只读名单态闸门**，死 uri 绝不批量 openSync / readSync |
+
+`Index.ets` 侧新增模块级 `RawStore`（`Map<string, ArrayBuffer>` + LRU 顺序 + 字节账目 +
+在途读取合并 + 换源 `gen`）：
+
+- `pumpAll()` 每批先用 `preloadOne()` → `rawStore.ensure(uri)` 把这一批文件的完整 bytes
+  读进内存（`fs.statSync` → `new ArrayBuffer(size)` → `fs.readSync(fd, buf)` → `closeSync`），
+  再 `decodeTo(uri, edge)` 解码；**读与解走同一条受控并发链**（`PRELOAD_CONCURRENCY=4`），
+  保证「刚读进来的立刻被解」的局部性 —— 另起一条预取链反而会先把预算占满、
+  解码链要回网络重读，得不偿失。
+- `decodePx()` 优先 `image.createImageSource(ArrayBuffer)` 从内存解码；`ensure` 返回
+  undefined（超预算 / 单文件过大 / 读不满 / 无权限）时**降级回原来的 fd 路径**，
+  图照样能显示 —— 缓存是加速，不是前置条件。EXIF / HDR / ICC 三件事在两种
+  `ImageSource` 上完全一致。
+- `probeOne()` 的元数据探测、`ThumbLoader` 的悬停缩略图、`showPreviewOf` 的主视图解码
+  全部自动复用同一份内存数据；`clearPreviews()` 在换源 / 退出时 `rawStore.clear()` 一并释放，
+  `gen` 自增让在途读取的结果只用于本次解码、不污染新图库。
+- 整条链仍由 `applyItems() → schedulePreload()` 在**载入时**启动，
+  **滚轮 / 翻页路径本身不含任何读取或解码启动动作**；`decodeTo()` 的 `PixelMap` 复用与
+  `decodeInflight` 在途合并、`bulkIoAllowed()` 防冻结闸门一律原样保留。
+
+预算：`RAW_CACHE_MAX_BYTES=768MB`、`RAW_SINGLE_MAX_BYTES=64MB`、`RAW_CACHE_MAX_COUNT=20000`，
+与解码后 `PRELOAD_MAX_BYTES=1GB` **分开计账**（峰值约 1.75GB）。这是「尽力全量」的
+防 OOM 硬闸，不是容量承诺；触顶按 LRU 淘汰最久没用的原始 bytes（那些图早已解码成
+PixelMap，不需要原文件）。内存吃紧可把 `RAW_CACHE_MAX_BYTES` 调回 256MB。
+
+### ② NAS 路径「往上层」显示错误目录表
+
+根因：旧 `realPathOf()` 把 `file://` 后的第一段一律当成文档 URI 的伪 authority（`docs`）
+吞掉，于是 NAS 主机段丢失，卷根、父级、APP 内清单三层全错：
+
+| 输入 | 旧结果 | 后果 |
+|---|---|---|
+| `file://192.168.100.61/图片档案/...` | `/图片档案/...` | 主机段被吞 |
+| `volumeRootOf('/192.168.100.61/图片档案/...')` | `/` | NAS 卷没被识别为卷根 |
+| `pathChainOf(target)` | `["/", "/192.168.100.61", ...]` | 清单里冒出伪造的文件系统根 `/` |
+| `upParentCandidates(base, raw)` | 只剩 1 条真实路径兜底 | 保留授权的 `file://<host>/<parent>` 被 `sameDirPath` 全部剔除，父目录列不出来 |
+
+修法（`common/DirName.ts` 纯函数 + `Index.ets` 兜底同口径）：
+
+- 新增 `isNetworkHost(seg)`：只认明确的网络地址形态（IPv4 / IPv6 / 域名 TLD 以字母开头），
+  `docs` / `content` / 中文目录 / 带空格目录一律不误判；
+- 新增 `nasHostOf(p)`：从 `file://<host>/…`、`smb://…`、UNC `\\<host>\…`、`/<host>/…` 抽主机；
+- `realPathOf()` 对网络主机 authority **保留主机段**（`file://192.168.100.61/…` →
+  `/192.168.100.61/…`），对 UNC 折叠分隔符；`file://docs/...` 行为完全不变；
+- `volumeRootOf()` 把 `/<host>` 判为 NAS 网络卷根（与鸿蒙用户卷 `/storage/Users/<id>` 同级），
+  到卷根即停，不再越级到 `/`；
+- `Index.ets` 的 `dirCandidates()` 手工兜底改走 `realPathOf()` / `hierPathOf()`，
+  往上层生成的 `file://<host>/<parent>` 也能列出真实路径候选。
+
+修复后 `pathChainOf()` 首行是 `/192.168.100.61`、不再有伪造的 `/`；
+`upParentCandidates()` 恢复为 2 条（含带授权形态的父 URI），往上层既能 `openFolder()`
+成功，失败时 APP 内清单也是正确层级。「往上层」恒亮可点、不弹系统选择器、
+APP 内显示清单等既有行为全部保留。
+
+### 回归护栏
+
+- 「往上层」按钮仍**永不 grey out / 永不禁用**，不弹系统目录选择器；
+  `applyItems` 的 `bulkIoAllowed` 闸门、`schedulePreload` 的 ro1 短路、
+  `decodeTo` 的解码总闸门、`showUpListInApp` 的零 IO 纯清单一律未动。
+- 滚轮 `onAxisEvent → onWheel`、窗口最大化状态恢复、双击全屏、最高画质三处
+  `autoResize(false)`、版本号 `1.0.7` / `versionCode 7` 全部未动。
+- `node --experimental-strip-types tests/dirname.test.mjs` → **813 / 813 PASS**
+  （本轮新增 80 条：NAS 路径层级、RawCache 纯函数、第八轮源码静态契约）。
+- `git diff --check` 干净；10 个源码文件括号计数与 HEAD 增量全为 0；
+  `node --check tests/dirname.test.mjs` 语法通过。
+- 按长期约束：本轮只改源码 / 文档 / 纯函数测试并本地 commit；**不编译 HAP、不放桌面、
+  不跑 build.sh、不升版本、不 push**，DevEco Studio 编译由用户侧完成。
+
 ## 第七轮：最大化状态重启保持 / 解码数据缓存复用 / 圆点·缓存张数·左键放大精简（2026-11-12）
 
 ### 用户诉求（五项，一次落地）

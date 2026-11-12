@@ -17,11 +17,13 @@
  * 以及第四轮「ESC 对齐双击 / resize 实时适配 / 全量缓存并发预解码加速滚轮」，
  * 以及第五轮「resize 实机仍不生效 → @Builder 参数 / 累积阈值 / 节流 / 根容器兜底」，
  * 以及第六轮「重启后档案日期不丢失 / 窗口大小与位置恢复 / 界面状态一致」，
- * 以及第七轮「最大化状态重启保持 / 解码数据缓存复用 / 移圆点 / 去缓存张数 / 取消左键放大」。
+ * 以及第七轮「最大化状态重启保持 / 解码数据缓存复用 / 移圆点 / 去缓存张数 / 取消左键放大」、
+ * 第八轮「原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf, upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint } from '../entry/src/main/ets/common/DirName.ts';
+import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf, upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
+  isNetworkHost, nasHostOf } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -42,6 +44,8 @@ import { metaLineOf, parseMetaLine, encodeMeta, decodeMeta, metaForUri,
   shouldRestoreMaximized, shouldScheduleWindowRestore } from '../entry/src/main/ets/common/SessionState.ts';
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../entry/src/main/ets/common/DecodeCache.ts';
+import { rawFitOf, rawSingleAllowed, rawReadComplete,
+  rawCacheTargetOf, rawPrefetchWanted } from '../entry/src/main/ets/common/RawCache.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -1822,6 +1826,152 @@ check('⑥ 回归护栏：滚轮切图 / 窗口 API / 最高画质 / 版本 / �
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
   (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
   /\.enabled\(/.test(CODE_LINES) === false, true);
+
+console.log('--- 第八轮 ①：NAS 网络卷路径层级（往上层错误目录表，2026-11-12）---');
+const NAS_IP = '192.168.100.61';
+const NAS_ROOT = '/192.168.100.61';
+const NAS_BASE = '/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2023';
+const NAS_RAW = 'file://192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2023';
+const NAS_TARGET = '/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography';
+const NAS_UNC = '\\\\192.168.100.61\\图片档案\\2023';
+
+check('NAS：IPv4 主机被识别', isNetworkHost(NAS_IP), true);
+check('NAS：域名主机被识别', isNetworkHost('nas.local'), true);
+check('NAS：IPv6 字面量被识别', isNetworkHost('[fe80::1]'), true);
+check('NAS：文档 provider 伪 authority 不是主机', isNetworkHost('docs'), false);
+check('NAS：content / storage 不是主机', isNetworkHost('content') || isNetworkHost('storage'), false);
+check('NAS：中文 / 带空格目录名不是主机', isNetworkHost('4 中'), false);
+check('NAS：空串不是主机', isNetworkHost(''), false);
+check('NAS：nasHostOf 从 file:// URI 抽主机', nasHostOf(NAS_RAW), NAS_IP);
+check('NAS：nasHostOf 从纯路径抽主机', nasHostOf(NAS_BASE), NAS_IP);
+check('NAS：nasHostOf 从 smb:// 抽主机', nasHostOf('smb://nas.local/share/a'), 'nas.local');
+check('NAS：nasHostOf 从 UNC 抽主机', nasHostOf(NAS_UNC), NAS_IP);
+check('NAS：file://docs 不是 NAS', nasHostOf('file://docs/storage/Users/100/a'), '');
+check('NAS：普通绝对路径不是 NAS', nasHostOf('/storage/Users/100/a'), '');
+
+check('NAS：file://<host> 保留主机段（旧版会当 authority 吞掉）', realPathOf(NAS_RAW), NAS_BASE);
+check('NAS：hierPathOf(file://<host>) 保留主机段', hierPathOf(NAS_RAW), NAS_BASE);
+check('NAS：smb:// 归一到 /<host>/share', realPathOf('smb://nas.local/share/a'), '/nas.local/share/a');
+check('NAS：UNC 折叠为 /<host>/share', realPathOf(NAS_UNC), '/192.168.100.61/图片档案/2023');
+check('回归：file://docs 仍还原为真实路径', realPathOf('file://docs/storage/Users/100/a'), '/storage/Users/100/a');
+check('回归：file://docs 碎片仍判不出路径', realPathOf('file://docs'), '');
+
+check('NAS 卷根 = /<host>（不再是 /）', volumeRootOf(NAS_BASE), NAS_ROOT);
+check('NAS 卷根（file:// 形态）', volumeRootOf(NAS_RAW), NAS_ROOT);
+check('NAS 卷根自身仍是卷根（到顶不判空）', volumeRootOf(NAS_ROOT), NAS_ROOT);
+check('NAS UNC 卷根', volumeRootOf(NAS_UNC), NAS_ROOT);
+check('回归：通用 POSIX 卷根仍是 /', volumeRootOf('/a/b/c'), '/');
+check('回归：鸿蒙用户卷根仍是 /storage/Users/<id>', volumeRootOf(DEEP), VOLROOT);
+
+check('NAS：往上层目标保留主机段', upLevelOf(NAS_BASE), NAS_TARGET);
+check('NAS：到 NAS 卷根就停（不越级到 /）', upLevelOf(NAS_ROOT), '');
+check('NAS：深层目录层级', dirLevelOf(NAS_BASE), 5);
+check('NAS：状态为 GO（不是 UNKNOWN / TOP）', upNavStateOf(NAS_BASE), UP_NAV_GO);
+check('NAS：canGoUpFrom 为真（按钮恒可点）', canGoUpFrom(NAS_BASE), true);
+check('NAS：upContextBaseOf 能从持久目录 URI 重建层级', upContextBaseOf(NAS_RAW), NAS_BASE);
+check('NAS：upContextRawOf 保留 scheme 形态', upContextRawOf(NAS_RAW), NAS_RAW);
+
+const nasChain = pathChainOf(NAS_TARGET);
+check('NAS 清单：首行是 NAS 卷根', nasChain[0], NAS_ROOT);
+check('NAS 清单：不再出现伪造的文件系统根 / 行', nasChain.includes('/'), false);
+check('NAS 清单：末行是目标父级', nasChain.slice(-1)[0], NAS_TARGET);
+check('NAS 清单：每一级都带主机段', nasChain.every((p) => p.startsWith(NAS_ROOT)), true);
+check('NAS 清单：层级数', nasChain.length, 5);
+
+const nasUps = upParentCandidates(NAS_BASE, NAS_RAW);
+check('NAS 父候选：保留带授权的 file://<host> 形态',
+  nasUps.some((u) => u.indexOf('file://192.168.100.61/') === 0), true);
+check('NAS 父候选：全部落在同一父层', nasUps.every((u) => sameDirPath(u, NAS_TARGET)), true);
+check('NAS 父候选：含真实路径目标（fs.listFile 兜底）', nasUps.includes(NAS_TARGET), true);
+check('NAS 父候选：不再只剩 1 条兜底', nasUps.length >= 2, true);
+check('NAS 父候选：不含丢掉主机的错误路径',
+  nasUps.some((u) => sameDirPath(u, '/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography')), false);
+
+console.log('--- 第八轮 ②：原始档案数据缓存纯函数（RawCache.ts）---');
+check('rawFitOf：空缓存直接准入、无需淘汰',
+  JSON.stringify(rawFitOf([], 100, 1000, 3)), JSON.stringify({ keep: true, evict: 0 }));
+check('rawFitOf：张数超上限淘汰 1 条', rawFitOf([100, 100, 100], 100, 350, 3).evict, 1);
+check('rawFitOf：字节超上限淘汰 2 条', rawFitOf([100, 100, 100], 100, 250, 10).evict, 2);
+check('rawFitOf：张数上限 2 时淘汰 2 条', rawFitOf([100, 100, 100], 100, 1000, 2).evict, 2);
+check('rawFitOf：准入时 keep 为真', rawFitOf([100], 50, 1000, 10).keep, true);
+check('rawFitOf：单条超过总预算拒绝驻留', rawFitOf([100], 2000, 1000, 10).keep, false);
+check('rawFitOf：张数上限 0 拒绝', rawFitOf([100], 50, 1000, 0).keep, false);
+check('rawFitOf：字节预算 0 拒绝', rawFitOf([100], 50, 0, 10).keep, false);
+check('rawFitOf：incoming 为 0 拒绝', rawFitOf([100], 0, 1000, 10).keep, false);
+check('rawFitOf：非有限数按 0 处理，不产生 NaN 淘汰', rawFitOf([0, NaN], 50, 1000, 10).evict, 0);
+check('rawSingleAllowed：正常图片可入内存', rawSingleAllowed(1024, 64 * 1024 * 1024), true);
+check('rawSingleAllowed：超大单文件拒绝', rawSingleAllowed(100 * 1024 * 1024, 64 * 1024 * 1024), false);
+check('rawSingleAllowed：size 为 0 拒绝', rawSingleAllowed(0, 64 * 1024 * 1024), false);
+check('rawSingleAllowed：上限 0 = 不限制', rawSingleAllowed(100, 0), true);
+check('rawSingleAllowed：NaN 拒绝', rawSingleAllowed(NaN, 0), false);
+check('rawReadComplete：读满才允许交给 ImageSource', rawReadComplete(100, 100), true);
+check('rawReadComplete：少读一字节也拒绝（半截图绝不解）', rawReadComplete(99, 100), false);
+check('rawReadComplete：多读也拒绝', rawReadComplete(101, 100), false);
+check('rawReadComplete：size 为 0 拒绝', rawReadComplete(100, 0), false);
+check('rawCacheTargetOf：整库超过上限夹到 cap', rawCacheTargetOf(25000, 20000), 20000);
+check('rawCacheTargetOf：小图库取全量', rawCacheTargetOf(3, 20000), 3);
+check('rawCacheTargetOf：空库为 0', rawCacheTargetOf(0, 20000), 0);
+check('rawCacheTargetOf：cap 为 0 视为不限制', rawCacheTargetOf(5, 0), 5);
+check('rawCacheTargetOf：NaN 为 0', rawCacheTargetOf(NaN, 20000), 0);
+check('rawPrefetchWanted：ro1 只读名单态绝不启动批量读取', rawPrefetchWanted(false, 10, 100), false);
+check('rawPrefetchWanted：空库不启动', rawPrefetchWanted(true, 0, 100), false);
+check('rawPrefetchWanted：正常载入启动', rawPrefetchWanted(true, 10, 100), true);
+
+console.log('--- 源码静态契约：第八轮（原始档案数据内存缓存 + NAS 层级）---');
+const RAW_SRC = readFileSync(new URL('../entry/src/main/ets/common/RawCache.ts', import.meta.url), 'utf8');
+check('RawCache.ts 是纯函数模块（不 import 鸿蒙 SDK）', /@ohos\./.test(RAW_SRC), false);
+check('RawStore：ArrayBuffer LRU + 在途合并 + 换源 gen + 单例',
+  /class RawStore \{/.test(INDEX) &&
+  /private data: Map<string, ArrayBuffer> = new Map\(\);/.test(INDEX) &&
+  /private inflight: Map<string, Promise<ArrayBuffer \| undefined>> = new Map\(\);/.test(INDEX) &&
+  /private gen: number = 0;/.test(INDEX) &&
+  /const rawStore: RawStore = new RawStore\(\);/.test(INDEX), true);
+check('原始档案数据预算与 PixelMap 缓存分开计（防 OOM）',
+  /const RAW_CACHE_MAX_BYTES: number = 768 \* 1024 \* 1024;/.test(INDEX) &&
+  /const RAW_SINGLE_MAX_BYTES: number = 64 \* 1024 \* 1024;/.test(INDEX) &&
+  /const RAW_CACHE_MAX_COUNT: number = 20000;/.test(INDEX) &&
+  /const PRELOAD_MAX_BYTES: number = 1024 \* 1024 \* 1024;/.test(INDEX), true);
+check('decodePx 优先从内存 ArrayBuffer 建 ImageSource，失败降级 fd',
+  /const raw: ArrayBuffer \| undefined = await rawStore\.ensure\(uri\);/.test(INDEX) &&
+  /src = image\.createImageSource\(raw\);/.test(INDEX) &&
+  /file = fs\.openSync\(uri, fs\.OpenMode\.READ_ONLY\);/.test(INDEX) &&
+  /src = image\.createImageSource\(file\.fd\);/.test(INDEX), true);
+check('RawStore.read 一次读满并校验完整性 + LRU 准入',
+  /const got: number = fs\.readSync\(file\.fd, buf\);/.test(INDEX) &&
+  /if \(!rawReadComplete\(got, size\)\)/.test(INDEX) &&
+  /const fit: RawFit = rawFitOf\(this\.sizesOf\(\), size,/.test(INDEX) &&
+  /for \(let i = 0; i < fit\.evict; i\+\+\)/.test(INDEX), true);
+check('载入时同批「读进内存 → 立即解码」，不等滚轮切换',
+  /private preloadOne\(seq: number, idx: number, uri: string, edge: number,/.test(INDEX) &&
+  /const wantRaw: boolean = rawPrefetchWanted\(bulkIoAllowed\(this\.restoreMode\),/.test(INDEX) &&
+  /rawStore\.ensure\(uri\)/.test(INDEX) &&
+  /this\.preloadOne\(seq, idx, u, edge, wantRaw\);/.test(INDEX) &&
+  /this\.schedulePreload\(\);/.test(APPLY_FN) &&
+  /shouldReuseDecoded\(hit\.edge, edge\)/.test(INDEX), true);
+check('换数据源 / 退出时释放原始 bytes（不泄漏）',
+  /rawStore\.clear\(\);/.test(INDEX) &&
+  /private clearPreviews\(\): void \{[\s\S]{0,900}rawStore\.clear\(\);/.test(INDEX), true);
+check('probeOne 元数据探测优先用内存数据',
+  /const raw: ArrayBuffer \| undefined = rawStore\.get\(uri\);/.test(INDEX) &&
+  /\? image\.createImageSource\(raw\) : image\.createImageSource\(uri\)/.test(INDEX), true);
+check('NAS：dirCandidates 兜底改用 realPathOf / hierPathOf 纯函数',
+  /const real: string = realPathOf\(raw\);/.test(INDEX) &&
+  /add\(hierPathOf\(raw\)\);/.test(INDEX) &&
+  /保留 NAS 主机段/.test(INDEX) &&
+  /raw\.substring\('file:\/\/'\.length\)/.test(INDEX) === false, true);
+check('DirName 有 NAS 主机识别与网络卷根判定',
+  /export function isNetworkHost\(seg: string\): boolean/.test(DIRNAME_SRC) &&
+  /export function nasHostOf\(p: string\): string/.test(DIRNAME_SRC) &&
+  /isNetworkHost\(parts\[1\]\)/.test(DIRNAME_SRC) &&
+  /isNetworkHost\(authority\) \? '\/' \+ authority \+ tail : tail/.test(DIRNAME_SRC), true);
+check('回归护栏：ro1 闸门 / 版本 / 按钮 / 最高画质 / 滚轮 / 全量链都未动',
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
+  /this\.onWheel\(v < 0 \? -1 : 1\);/.test(INDEX) &&
+  /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
+  /this\.allActive <= 0/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

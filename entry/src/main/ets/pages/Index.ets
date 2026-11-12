@@ -57,7 +57,8 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
   upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
-  textWidthVp, listWidthForNames, sameEntryNames } from '../common/DirName';
+  realPathOf, hierPathOf, textWidthVp, listWidthForNames,
+  sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -77,6 +78,8 @@ import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
   shouldRestoreMaximized, shouldScheduleWindowRestore } from '../common/SessionState';
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../common/DecodeCache';
+import { RawFit, rawFitOf, rawSingleAllowed, rawReadComplete,
+  rawCacheTargetOf, rawPrefetchWanted } from '../common/RawCache';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -254,6 +257,22 @@ const PRELOAD_ALL_CAP: number = 20000;
 const PRELOAD_CONCURRENCY: number = 4;
 /** 全量预载每批之间让出主线程的间隔（ms）。0 = 尽快但不堆叠同步 openSync。 */
 const PRELOAD_ALL_YIELD_MS: number = 0;
+// ---- 第八轮（2026-11-12）：原始档案数据（未解码 bytes）的内存缓存 ----
+/** 用户要求「档案数据完全载入内存同时解码」：载入链把每个图片文件的完整 bytes 读进
+ *  RawStore（ArrayBuffer LRU），decodePx 直接 image.createImageSource(ArrayBuffer) 解码。
+ *  NAS / 网络目录不再为每张图各做一次 openSync + codec 逐段读文件，重解全清 / 全屏放大
+ *  也不必再回网络读一遍。
+ *
+ *  ⚠️ 与解码后 PixelMap 缓存（PRELOAD_MAX_BYTES=1GB）**分开计账**：两者相加是进程峰值，
+ *     默认 768MB + 1GB ≈ 1.75GB。这是「尽力全量」的防 OOM 硬闸，不是容量承诺 ——
+ *     触顶即按 LRU 淘汰最久没用的原始 bytes（那些图早已解码成 PixelMap，不需要原文件）。
+ *     内存吃紧的机器把这里调回 256MB；想让超大图库更彻底地常驻内存可上调到 1GB。 */
+const RAW_CACHE_MAX_BYTES: number = 768 * 1024 * 1024;
+/** 单张原始档案数据的上限：超过就不进内存缓存，避免一张 4K RAW 把预算吃光。
+ *  超大的仍走 decodePx 的 fd 兜底路径，功能完全不受影响。0 = 不限制单文件。 */
+const RAW_SINGLE_MAX_BYTES: number = 64 * 1024 * 1024;
+/** 原始档案数据缓存的张数上限（与 PRELOAD_ALL_CAP 同量级）。 */
+const RAW_CACHE_MAX_COUNT: number = 20000;
 /** 主视图解码：长边 = 画布长边 × 该系数，并夹在 [VIEW_EDGE_MIN, VIEW_EDGE_MAX] 内。
  *  系数取 1.5 而不是 2（Win64 版实测）：×2 时一张大图能解到 1.5 秒，
  *  而屏幕实际只需要约 1.0 倍像素 —— 多出来的既不显示又拖慢切图。 */
@@ -481,19 +500,16 @@ function dirCandidates(raw: string): string[] {
   } catch (e) {
     hilog.warn(DOMAIN, TAG, 'FileUri parse failed: %{public}s', JSON.stringify(e));
   }
-  // 手工兜底：file://docs/storage/... → /storage/...
-  if (raw.indexOf('file://') === 0) {
-    const rest: string = raw.substring('file://'.length);
-    const slash: number = rest.indexOf('/');
-    if (slash >= 0) {
-      const p: string = rest.substring(slash);
-      add(p);
-      try {
-        add(decodeURIComponent(p));
-      } catch (e) {
-        // ignore
-      }
-    }
+  // 手工兜底（第八轮改走 DirName 纯函数，与 realPathOf / volumeRootOf 同一口径）：
+  //   file://docs/storage/...          → /storage/...（文档 provider 伪 authority 丢掉）
+  //   file://192.168.100.61/图片档案/… → /192.168.100.61/图片档案/…（**保留 NAS 主机段**）
+  //   \\192.168.100.61\图片档案\…      → /192.168.100.61/图片档案/…（UNC 折叠分隔符）
+  // 旧写法把 file:// 后的第一段一律当 authority 吞掉，NAS 目录因此被列成错误目录表；
+  // 往上层生成的父 URI 也走这里，所以修正必须落在 dirCandidates 而不能只改 DirName。
+  const real: string = realPathOf(raw);
+  if (real.length > 0) {
+    add(real);
+    add(hierPathOf(raw));
   }
   return out;
 }
@@ -850,6 +866,156 @@ async function readExifTransform(src: image.ImageSource, uri: string): Promise<E
   return t;
 }
 
+// --------------------------------------------------------------------
+// 原始档案数据（未解码 bytes）的内存缓存（2026-11-12 第八轮）
+//
+// 用户要求：「档案数据完全载入内存同时解码以提高图片档案载入速度」。
+// 载入链 pumpAll 每批先把这一批文件的完整 bytes 读进这里，decodePx 再直接从
+// ArrayBuffer 建 ImageSource —— NAS / 网络目录只读一次，解码、重解全清、全屏放大
+// 都不必再跨网络读一遍原文件。
+//
+// 三条硬约束（沿用历史 appfreeze 教训）：
+//  · 受控并发：调用方 pumpAll 一批最多 PRELOAD_CONCURRENCY 路，绝不堆叠同步 openSync；
+//  · 在途合并：同一 uri 并发请求共用一个 Promise，绝不重复读同一文件；
+//  · 防 OOM：LRU + rawFitOf 张数/字节预算；读不到 / 超预算时 decodePx 自动降级回 fd，
+//    功能绝不因缓存未命中而受损。
+// 换数据源时 clear() 自增 gen：旧批次读回来的 bytes 只用于本次解码，不再污染新图库。
+// --------------------------------------------------------------------
+class RawStore {
+  private data: Map<string, ArrayBuffer> = new Map();
+  private order: string[] = [];                 // LRU：队头最旧
+  private bytes: number = 0;
+  private inflight: Map<string, Promise<ArrayBuffer | undefined>> = new Map();
+  private denied: Set<string> = new Set();     // 不适合内存缓存的 uri：别反复 statSync/readSync
+  private gen: number = 0;
+
+  /** 同步查内存；命中刷新 LRU 位置。probeOne() 用它零 IO 探元数据。 */
+  get(uri: string): ArrayBuffer | undefined {
+    const buf: ArrayBuffer | undefined = this.data.get(uri);
+    if (buf === undefined) {
+      return undefined;
+    }
+    const i: number = this.order.indexOf(uri);
+    if (i >= 0) {
+      this.order.splice(i, 1);
+      this.order.push(uri);
+    }
+    return buf;
+  }
+
+  /** 确保该 uri 的完整 bytes 已在内存（或已在途）。返回 undefined 表示「本次不缓存」，
+   *  调用方 decodePx 会降级回 fd 解码 —— 功能绝不因缓存未命中而受损。 */
+  ensure(uri: string): Promise<ArrayBuffer | undefined> {
+    const hit: ArrayBuffer | undefined = this.get(uri);
+    if (hit !== undefined) {
+      return Promise.resolve<ArrayBuffer | undefined>(hit);
+    }
+    if (this.denied.has(uri)) {
+      return Promise.resolve<ArrayBuffer | undefined>(undefined);
+    }
+    const running: Promise<ArrayBuffer | undefined> | undefined = this.inflight.get(uri);
+    if (running !== undefined) {
+      return running;
+    }
+    const gen: number = this.gen;
+    const job: Promise<ArrayBuffer | undefined> =
+      Promise.resolve<ArrayBuffer | undefined>(this.read(uri, gen))
+        .then((buf: ArrayBuffer | undefined): ArrayBuffer | undefined => {
+          this.inflight.delete(uri);
+          return buf;
+        })
+        .catch((): ArrayBuffer | undefined => {
+          this.inflight.delete(uri);
+          return undefined;
+        });
+    this.inflight.set(uri, job);
+    return job;
+  }
+
+  /** 真正的一次性读取。函数体内全是同步调用、无 await —— 预算计算与插入是原子的，
+   *  不会被同批其它读取插队。 */
+  private read(uri: string, gen: number): ArrayBuffer | undefined {
+    let file: fs.File | undefined = undefined;
+    try {
+      const size: number = fs.statSync(uri).size;
+      if (!rawSingleAllowed(size, RAW_SINGLE_MAX_BYTES)) {
+        this.denied.add(uri);
+        return undefined;
+      }
+      file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      const buf: ArrayBuffer = new ArrayBuffer(size);
+      // 两参重载：刚 open 的文件指针在 0，一次读满整个 buffer。刻意不传 options，
+      // 避开各 SDK 版本 ReadOptions.offset 语义差异；没读满就绝不交给 ImageSource。
+      const got: number = fs.readSync(file.fd, buf);
+      if (!rawReadComplete(got, size)) {
+        // 网络 / 大文件一次读不满：别每次解码都重读一遍，直接降级 fd 路径更稳。
+        this.denied.add(uri);
+        return undefined;
+      }
+      if (gen !== this.gen) {
+        return buf;         // 换源了：本次解码仍可用，但不入新图库的缓存
+      }
+      const fit: RawFit = rawFitOf(this.sizesOf(), size,
+        RAW_CACHE_MAX_BYTES, RAW_CACHE_MAX_COUNT);
+      if (!fit.keep) {
+        return buf;         // 预算装不下：仍用内存解这一次，只是不驻留
+      }
+      for (let i = 0; i < fit.evict; i++) {
+        const oldest: string = this.order[0];
+        this.order.splice(0, 1);
+        const victim: ArrayBuffer | undefined = this.data.get(oldest);
+        this.data.delete(oldest);
+        if (victim !== undefined) {
+          this.bytes -= victim.byteLength;
+        }
+      }
+      this.data.set(uri, buf);
+      this.order.push(uri);
+      this.bytes += size;
+      return buf;
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'rawCache read FAIL uri=%{public}s err=%{public}s',
+        uri, JSON.stringify(e));
+      return undefined;
+    } finally {
+      if (file !== undefined) {
+        try {
+          fs.closeSync(file);
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'rawCache close skipped');
+        }
+      }
+    }
+  }
+
+  /** 队头→队尾各条字节数，喂给 rawFitOf 算淘汰条数。 */
+  private sizesOf(): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < this.order.length; i++) {
+      const b: ArrayBuffer | undefined = this.data.get(this.order[i]);
+      out.push(b !== undefined ? b.byteLength : 0);
+    }
+    return out;
+  }
+
+  /** 换数据源 / 退出时清空。gen 自增让在途读取的结果不再入缓存。 */
+  clear(): void {
+    this.gen++;
+    this.data.clear();
+    this.order = [];
+    this.bytes = 0;
+    this.inflight.clear();
+    this.denied.clear();
+  }
+
+  /** 排查用账目（hilog / 诊断串），不参与任何逻辑判断。 */
+  stat(): string {
+    return this.data.size + '/' + Math.round(this.bytes / (1024 * 1024)) + 'MB';
+  }
+}
+
+const rawStore: RawStore = new RawStore();
+
 /** 按给定长边上限解码一张图。失败返回 undefined（不影响正常显示路径）。
  *  edge = QUICK_EDGE 低清占位 / preloadEdge() 预载 / viewEdge() 全清 / HOVER_EDGE 悬停缩略图。
  *
@@ -857,13 +1023,22 @@ async function readExifTransform(src: image.ImageSource, uri: string): Promise<E
  *    ① EXIF Orientation → 解码阶段旋转 + 镜像（`ViewPlan.exifTransformOf`）；
  *    ② desiredDynamicRange = AUTO → HDR 图按 HDR 解码，平台不支持时 SDK 自动降 SDR；
  *    ③ 内嵌 ICC 色彩空间：COLOR_MANAGE_MODE=0 保留源空间，1/2 才在解码时转换到 sRGB / Display P3；
- *       解码后读 PixelMap.getColorSpace() 记录系统识别到的空间，用于信息浮层。 */
+ *       解码后读 PixelMap.getColorSpace() 记录系统识别到的空间，用于信息浮层。
+ *  2026-11-12 第八轮 ④：优先用 RawStore 里已载入内存的**完整原始档案数据**建
+ *  ImageSource（ArrayBuffer 重载），不再为每张图 openSync + 让 codec 逐段读文件。
+ *  ensure 返回 undefined（超预算 / 单文件过大 / 读不满 / 无权限）时降级回 fd 路径，
+ *  功能绝不受缓存影响。EXIF / HDR / ICC 三件事在两种 ImageSource 上完全一致。 */
 async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
   try {
-    file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-    src = image.createImageSource(file.fd);
+    const raw: ArrayBuffer | undefined = await rawStore.ensure(uri);
+    if (raw !== undefined) {
+      src = image.createImageSource(raw);
+    } else {
+      file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      src = image.createImageSource(file.fd);
+    }
     const info: image.ImageInfo = await src.getImageInfo();
     const w: number = info.size.width;
     const h: number = info.size.height;
@@ -3989,6 +4164,9 @@ struct Index {
     this.previews = [];
     this.preloadBytes = 0;
     this.decodeInflight.clear(); // 换源：旧批次在途解码的合并键一并作废
+    // 第八轮：原始档案数据也一并释放，否则换一次图库就漏一批 bytes 常驻内存。
+    // gen 自增让在途读取的结果只用于本次解码，不再入新图库的缓存。
+    rawStore.clear();
     this.syncCacheStat();
     // 缓存被清空后，当前显示的若正是缓存里的那张，就不能再指向它
     this.viewPixelMap = undefined;
@@ -4467,17 +4645,38 @@ struct Index {
     }
     this.allActive = batch.picks.length;
     const edge: number = this.preloadEdge();
+    // 第八轮：解码前先把这一批的原始档案数据读进内存（rawPrefetchWanted 仍守 ro1 闸门）。
+    // 读与解走同一条受控并发链，保证「刚读进来的立刻被解」的局部性；另起一条预取链
+    // 会先把预算占满，解码链反而要回网络重读，得不偿失。
+    const wantRaw: boolean = rawPrefetchWanted(bulkIoAllowed(this.restoreMode),
+      n, RAW_CACHE_MAX_COUNT);
     for (let i = 0; i < batch.picks.length; i++) {
       const idx: number = batch.picks[i];
       const u: string = this.items[idx].uri;
-      this.decodeTo(u, edge)
-        .then((entry: PreviewEntry | undefined) => {
-          this.onAllDecoded(seq, idx, u, entry);
-        })
-        .catch(() => {
-          this.onAllDecoded(seq, idx, u, undefined);
-        });
+      this.preloadOne(seq, idx, u, edge, wantRaw);
     }
+  }
+
+  /** 单张全量预载：档案数据载入内存 → 立即解码 → 入已解码 PixelMap 缓存。
+   *
+   *  · 已解码缓存命中且档位够 → 直接复用，既不读文件也不再解码（滚轮切图零解码）；
+   *  · 否则先 ensure 把完整 bytes 读进内存，decodePx 再从 ArrayBuffer 解码；
+   *  · ensure 失败也照常 decodeTo（内部降级 fd），绝不因缓存问题丢图；
+   *  · 整条链由 applyItems() → schedulePreload() 在**载入时**启动，绝不等滚轮切换才开始。 */
+  private preloadOne(seq: number, idx: number, uri: string, edge: number,
+    wantRaw: boolean): void {
+    const hit: PreviewEntry | undefined = this.previewEntry(uri);
+    const needRaw: boolean = wantRaw &&
+      (hit === undefined || !shouldReuseDecoded(hit.edge, edge));
+    const job: Promise<PreviewEntry | undefined> = needRaw
+      ? rawStore.ensure(uri)
+        .then((): Promise<PreviewEntry | undefined> => this.decodeTo(uri, edge))
+      : this.decodeTo(uri, edge);
+    job.then((entry: PreviewEntry | undefined) => {
+      this.onAllDecoded(seq, idx, uri, entry);
+    }).catch(() => {
+      this.onAllDecoded(seq, idx, uri, undefined);
+    });
   }
 
   /** 全量链单张解码落地：入缓存 / 记黑名单，整批收齐后让出主线程继续下一批。 */
@@ -4666,7 +4865,10 @@ struct Index {
       return;
     }
     try {
-      const src: image.ImageSource = image.createImageSource(uri);
+      // 第八轮：原始档案数据已在内存就直接用它探元数据，NAS 上少一次跨网络建源。
+      const raw: ArrayBuffer | undefined = rawStore.get(uri);
+      const src: image.ImageSource = raw !== undefined
+        ? image.createImageSource(raw) : image.createImageSource(uri);
       src.getImageInfo(0)
         .then((info: image.ImageInfo) => {
           const portrait: boolean = info.size.height > info.size.width;
