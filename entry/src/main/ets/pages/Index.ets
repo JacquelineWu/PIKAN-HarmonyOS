@@ -83,6 +83,9 @@ import { RawFit, rawFitOf, rawSingleAllowed, rawReadComplete,
 import { ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
   enterTimeoutSafe, enterWatchdogWanted, enterSettledOk,
   enterTimeoutAction, enterTimeoutHint } from '../common/RestoreTimeout';
+import { FF_GIVEUP, deadTagOf, deadMemoryMatches,
+  failFastAction, restoreIoHeld, probeTakeOf, elapsedSince,
+  failFastHint } from '../common/FailFast';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -126,6 +129,8 @@ const PERSIST_TIMEOUT_MAX_MS: number = 3000;
 const RESTORE_ENTER_TIMEOUT_MS: number = 3000;
 /** 上述预算的诊断标记：状态栏/诊断串出现 et1 即表示装的是带超时收口的新包。 */
 const ENTER_TAG: string = 'et1';
+/** 第十轮诊断标记：状态栏 / 诊断串出现 ff1 即表示「遇到问题立即放弃」已生效。 */
+const FF_TAG: string = 'ff1';
 /** 一次 persist / activate 最多带几个 policy。**恒为 1**：只授权 picker 返回的原始
  *  目录 URI，绝不把快照里几百条拼出来的子文件 uri 塞进去（批量跨进程调用 = 冻结源）。 */
 const PERSIST_POLICY_LIMIT: number = 1;
@@ -757,6 +762,10 @@ const POS_KEY_OK: string = 'lastOkUri';
  *  重开时先 fileShare.activatePermission(它)，再恢复快照 → 直接出图。
  *  老版本没有这个 key → 没有持久授权，退回「探测 + 只读名单态」。 */
 const POS_KEY_DIR: string = 'lastDirUri';
+/** 第十轮：上次恢复以失败告终的目录标记（小 key，只存一个短 uri）。
+ *  重开时若与本次要恢复的目录吻合，说明又是同一个死路径 —— 零 IO、零等待直接放弃。
+ *  用户重新选到目录后立即清空，绝不误伤正常恢复。 */
+const POS_KEY_DEAD: string = 'deadDirUri';
 /** 写盘防抖间隔：滚轮连翻时没必要每张都落盘，停手后再存 */
 const POS_SAVE_MS: number = 500;
 /** 启动预热推迟多少毫秒再开始解码。首帧渲染 + 窗口初始化那几十毫秒最金贵，
@@ -1741,6 +1750,10 @@ struct Index {
   private restoreCancelled: boolean = false; // 超时作废：在飞的恢复链回来后不许再改视图
   private restoreSettled: boolean = false;   // 恢复链是否已收口（成功或失败）
   private restoreEntered: boolean = false;   // 是否真正「进入上次的目录」
+  /** 第十轮 ff1：上次以失败告终的目录标记（preferences 小 key，命中即零 IO 立即放弃）。 */
+  private deadMemory: string = '';
+  /** 立即放弃只做一次：超时收口与错误收口可能几乎同时到达，绝不弹第二次选择器。 */
+  private giveUpDone: boolean = false;
   /** 恢复模式（见 ResumePlan）：默认 RESTORE_FULL（正常使用），
    *  只有启动恢复探测到「快照 uri 一个都打不开」才降为 RESTORE_READONLY。
    *  只读态只列名单，禁止一切批量同步磁盘 IO，保证主线程空闲、按钮与列表可操作。 */
@@ -1892,6 +1905,7 @@ struct Index {
       this.resumeTimer = -1;
     }
     this.clearEnterWatchdog(); // 页面已销毁，超时也不该再弹选择文件夹
+    this.giveUpDone = true;    // 页面已销毁：warm 回调也不许再对死路径发起同步 IO
     if (this.persistTimer !== -1) {
       clearTimeout(this.persistTimer); // activate 超时兜底也别在页面销毁后触发恢复
       this.persistTimer = -1;
@@ -1950,12 +1964,14 @@ struct Index {
       const rawUri = await p.get(POS_KEY_URI, '');
       const rawOk = await p.get(POS_KEY_OK, '');
       const rawDir = await p.get(POS_KEY_DIR, '');
+      const rawDead = await p.get(POS_KEY_DEAD, '');
       const idx: number = typeof rawIdx === 'number' ? rawIdx : -1;
       const uri: string = typeof rawUri === 'string' ? rawUri : '';
       const ok: string = typeof rawOk === 'string' ? rawOk : '';
       // 必须在 scheduleShowLast() / 可能的提前 return 之前读到：恢复前要先激活它。
       this.savedDirUri = typeof rawDir === 'string' ? rawDir : '';
       this.okUri = ok;
+      this.deadMemory = typeof rawDead === 'string' ? rawDead : '';
       // 有「上次会话」记忆才给恢复链挂 3 秒看门狗；首次启动没有任何记忆，绝不弹选择器。
       this.hasRestoreMemory = idx >= 0 || uri.length > 0 || ok.length > 0 ||
         this.savedDirUri.length > 0;
@@ -1970,6 +1986,14 @@ struct Index {
       // 排程放在所有提前 return 之前：即使没有完整 LastPos，窗口也要恢复。
       // 第七轮：只最大化过、从未存下自由窗口 rect 的用户也要排程（不能因 rect 为空短路）。
       this.scheduleRestoreWindowRect();
+      // 第十轮 ff1：上次就栽在同一个死路径上 —— 连 900ms 恢复定时器和 3 秒看门狗都不排，
+      // 更不预热 / 不探测 / 不 openSync，零 IO 零等待直接把控制权交回「选择文件夹」。
+      if (failFastAction(
+          deadMemoryMatches(this.deadMemory, this.savedDirUri, ok),
+          this.hasRestoreMemory, this.userActed, this.restoreSettled) === FF_GIVEUP) {
+        this.giveUpNow('same dead dir as last time', 0);
+        return;
+      }
       // 预热「上次成功显示的那张」：后台解 1 张，与下面读位置/恢复完全解耦，
       // 就算它失败也只是少一次缓存命中，不影响任何别的路径。
       if (ok.length > 0) {
@@ -2023,9 +2047,14 @@ struct Index {
    *     **绝不能探整批**（几百次就足以把主线程打满，正是历史 appfreeze 的根因）。
    *     这里最多 3 张、且只在首帧后 900ms 的恢复链里跑一次。
    *  返回 true = 这批 uri 还能读，走完整恢复；false = 授权已失效，落只读名单态。 */
-  private probeRestoreUris(uris: Array<string>, okUri: string, savedUri: string): boolean {
+  private probeRestoreUris(uris: Array<string>, okUri: string, savedUri: string,
+    fastProbe: boolean = false): boolean {
     const cand: Array<string> = restoreProbeUris(uris, okUri, savedUri, RESTORE_PROBE_LIMIT);
-    for (let i: number = 0; i < cand.length; i++) {
+    // 第十轮 ff1：启动恢复期只探第一个候选，打不开就立即判死（不逐个候选重试 ——
+    // 每个失效 uri 的 openSync 在 NAS 上都可能挂十几秒）。用户主动路径传 false 探全部。
+    const fast: boolean = fastProbe && !this.giveUpDone;
+    const take: number = probeTakeOf(fast, cand.length);
+    for (let i: number = 0; i < take; i++) {
       let f: fs.File | undefined = undefined;
       try {
         f = fs.openSync(cand[i], fs.OpenMode.READ_ONLY);
@@ -2191,6 +2220,13 @@ struct Index {
     }
     this.diagLine = 'persist ' + (ok ? 'OK' : 'FAIL') + ' | ' + PERSIST_TAG + ' | v' + APP_VERSION;
     hilog.info(DOMAIN, TAG, 'persist: activate=%{public}d tag=%{public}s', ok ? 1 : 0, PERSIST_TAG);
+    // 第十轮 ff1：授权激活失败 / 超时是明确的「问题信号」—— 不再往下读快照、不再等
+    // 3 秒看门狗，立即停止尝试并打开选择文件夹。
+    if (!ok && failFastAction(true, this.hasRestoreMemory, this.userActed,
+        this.restoreSettled || this.giveUpDone) === FF_GIVEUP) {
+      this.giveUpNow('persist auth lost', elapsedSince(this.restoreStartedAt, Date.now()));
+      return;
+    }
     this.showLastOnStart();
   }
 
@@ -2512,13 +2548,72 @@ struct Index {
       'ms | v' + APP_VERSION;
     hilog.warn(DOMAIN, TAG,
       'restore: enter timeout %{public}d ms, stop and open folder picker', elapsed);
+    // 第十轮 ff1：超时也是一次「栽在死路径上」—— 记下来，下次启动零 IO 立即放弃。
+    this.giveUpDone = true;
+    this.saveDeadTag(deadTagOf(this.savedDirUri, this.okUri));
     this.chooseFolder();
   }
 
+  /** 第十轮 ff1：明确的「问题信号」一到就立即停止尝试并打开选择文件夹。
+   *  与 et1 超时收口做的是同一件事，但不依赖任何定时器 —— 死路径上的同步 IO
+   *  会把 setTimeout 回调饿死，所以「立即」必须由错误 / 失败信号直接驱动。
+   *  ⚠️ 只跑一次：giveUpDone 挡住超时收口与错误收口几乎同时到达，绝不弹第二次选择器。 */
+  private giveUpNow(reason: string, elapsed: number): void {
+    if (this.giveUpDone || this.userActed || this.restoreEntered) {
+      return;
+    }
+    this.giveUpDone = true;
+    this.restoreCancelled = true;
+    this.restoreEntered = false;
+    this.restoreSettled = true;
+    this.resumeDone = true;
+    this.persistSettled = true;
+    if (this.resumeTimer !== -1) {
+      clearTimeout(this.resumeTimer);
+      this.resumeTimer = -1;
+    }
+    if (this.persistTimer !== -1) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = -1;
+    }
+    this.clearEnterWatchdog();
+    // 作废启动恢复可能已经拉起的全量预载链：后台不再读这个（多半已不可达的）目录。
+    this.allSeq++;
+    this.allBusy = false;
+    this.allActive = 0;
+    this.status = failFastHint(reason);
+    this.diagLine = 'restore GIVEUP | ' + FF_TAG + ' | ' + reason +
+      ' | ' + elapsed + 'ms | v' + APP_VERSION;
+    this.saveDeadTag(deadTagOf(this.savedDirUri, this.okUri));
+    hilog.warn(DOMAIN, TAG,
+      'restore: give up immediately (%{public}s) %{public}d ms, open folder picker',
+      reason, elapsed);
+    this.chooseFolder();
+  }
+
+  /** 记住 / 清掉「上次栽在哪个目录」。只写一个小 key，同步落盘（进程被杀也不丢）。
+   *  ⚠️ 用 this.prefs 而不是 await posStore()：giveUpNow 是同步方法，绝不能引入等待。
+   *     readLastPos 已经建好 prefs；极端早退时 store 为 undefined，本次不记即可。 */
+  private saveDeadTag(tag: string): void {
+    this.deadMemory = tag;
+    const store: preferences.Preferences | undefined = this.prefs;
+    if (store === undefined) {
+      return;
+    }
+    try {
+      store.putSync(POS_KEY_DEAD, tag);
+      store.flushSync();
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'save dead tag failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
   /** 首帧之后真正执行恢复。只读「1 个小 key（snapCount）+ 分块 uri 快照」，
-   *  绝不重扫图库、绝不弹权限框、绝不弹选择器 —— 无交互、无 ANR。
-   *  ⚠️ 唯一的例外在恢复链之外：et1 看门狗 3 秒到期仍未进入上次目录时，
-   *    由 abortRestoreForPicker() 停止本次尝试并打开选择文件夹；本函数体不碰选择器。
+   *  绝不重扫图库、绝不弹权限框 —— 无交互、无 ANR。
+   *  ⚠️ 第十轮 ff1 起，恢复链里一旦出现明确的问题信号（授权失效 / 快照读不出 /
+   *    只读名单态 / 单张兜底）就由 giveUpNow() 立即停止尝试并打开选择文件夹，
+   *    不再等 et1 看门狗的 3 秒；本函数体不直接调用选择器。
+   *    et1 只保留为「完全没有任何信号」时的兜底。
    *
    *  两条路径最终都会经过 applyItems() → showPreviewOf()，所以
    *  「当前路径 / 目录展示 / 往上层按钮状态」与正常载入完全一致：
@@ -2561,11 +2656,17 @@ struct Index {
         return; // 看门狗已作废这次尝试；绝不再碰状态栏 / 视图
       }
       if (ok) {
-        // 只有真正「进入上次的目录」（非只读名单态、列表有图）才撤掉看门狗；
-        // 只读名单态留给 3 秒收口，直接打开选择文件夹让用户重新授权。
+        // 只有真正「进入上次的目录」（非只读名单态、列表有图）才撤掉看门狗。
+        // 第十轮 ff1：只读名单态 / 空列表是明确的「问题信号」—— 不再留给 3 秒收口，
+        // 立即停止尝试并打开选择文件夹让用户重新授权（名单仍在，取消选择器也看得到）。
         if (enterSettledOk(this.restoreMode !== RESTORE_READONLY &&
             this.restoreHintText.length === 0, this.items.length, this.restoreCancelled)) {
           this.markRestoreEntered();
+        } else if (failFastAction(true, this.hasRestoreMemory, this.userActed,
+            this.restoreSettled || this.giveUpDone) === FF_GIVEUP) {
+          this.giveUpNow('readonly list or empty snapshot',
+            elapsedSince(this.restoreStartedAt, Date.now()));
+          return;
         }
         this.restoreSettled = true;
         // 只读名单态（授权失效）时不说「已恢复图片」：名单在、图打不开，给明确指引。
@@ -2580,15 +2681,23 @@ struct Index {
           this.items.length, this.cur, this.restoreHintText.length > 0 ? 1 : 0);
         return;
       }
-      hilog.warn(DOMAIN, TAG, 'resume: snapshot empty/unreadable → fall back to single');
+      // 第十轮 ff1：快照读不出 / 整批恢复失败是明确的「问题信号」—— 不再降级到
+      // 单张兜底再等 3 秒看门狗，立即停止尝试并打开选择文件夹。
+      hilog.warn(DOMAIN, TAG, 'resume: snapshot empty/unreadable → give up now (ff1)');
+      if (failFastAction(true, this.hasRestoreMemory, this.userActed,
+          this.restoreSettled || this.giveUpDone) === FF_GIVEUP) {
+        this.giveUpNow('snapshot unreadable', elapsedSince(this.restoreStartedAt, Date.now()));
+        return;
+      }
     }
-    // 最轻兜底：只显示上次那一张。列表只有 1 张也没关系，画面不会空白；
-    // warmLast() 已把它预解好，applyItems 会 adopt 进缓存 → 首屏立即命中。
-    // act 走到这里只可能是 RESUME_SINGLE，或 RESUME_SNAPSHOT 读不出可用快照后的降级。
+    // 最轻兜底：只显示上次那一张。列表只有 1 张也没关系，画面不会空白。
+    // 第十轮 ff1：启动恢复期 warmLast 被按住（零文件 IO），首图由 applyItems 的
+    // showPreviewOf 解码；act 走到这里只可能是 RESUME_SINGLE，或问题信号未触发
+    // 立即放弃后的降级路径。
     if ((act === RESUME_SINGLE || act === RESUME_SNAPSHOT) && single.length > 0) {
       const src: string = saved !== undefined && saved.src.length > 0 ? saved.src : '上次会话';
       // 单张兜底同样先探授权：只有 1 张，探一次即可，不让 Image(uri) 兜底反复重试死 uri。
-      const readable: boolean = this.probeRestoreUris([single], this.okUri, savedUri);
+      const readable: boolean = this.probeRestoreUris([single], this.okUri, savedUri, true);
       this.pendingRestoreReadonly = !readable;
       this.pendingRestoreCount = 1;
       this.pendingRestoreSrc = src;
@@ -2621,11 +2730,15 @@ struct Index {
           '」· ' + RESUME_TAG + '（用「选择文件夹」可重新打开整批图片）' +
           (this.browseBase.length > 0
             ? ' · ' + restoreUpHint(baseName(this.browseBase), UP_CTX_TAG) : '');
-      // 单张兜底只是临时画面，没有进入上次的目录 —— 不撤看门狗，
-      // 让 3 秒收口直接打开选择文件夹，用户可重新打开整批图片。
-      this.restoreSettled = true;
+      // 单张兜底只是临时画面，没有进入上次的目录 —— 第十轮 ff1 改为立即放弃：
+      // 不再等 3 秒看门狗，直接打开选择文件夹，用户可重新打开整批图片。
       hilog.info(DOMAIN, TAG, 'resume: single shown, snapshot preserved, ro=%{public}d',
         this.restoreHintText.length > 0 ? 1 : 0);
+      if (failFastAction(true, this.hasRestoreMemory, this.userActed,
+          this.restoreSettled || this.giveUpDone) === FF_GIVEUP) {
+        this.giveUpNow('single fallback only',
+          elapsedSince(this.restoreStartedAt, Date.now()));
+      }
     }
   }
 
@@ -2638,6 +2751,14 @@ struct Index {
    *  不必再等一次低清解码（这是打开大图库时「先黑一下」的主要来源）。 */
   private warmLast(uri: string): void {
     setTimeout(() => {
+      // 第十轮 ff1：启动恢复期绝不碰文件。这里原本在 300ms 就 decodePx →
+      // rawStore.ensure（statSync / openSync / readSync），死 NAS 路径一次能挂 20 秒，
+      // 把 900ms 恢复定时器和 3 秒看门狗一起饿死。恢复链判定完再决定是否出图。
+      if (this.giveUpDone || this.restoreCancelled ||
+          restoreIoHeld(this.restoreEntered, this.userActed, this.hasRestoreMemory)) {
+        hilog.info(DOMAIN, TAG, 'warm held: restore decides first, zero file IO (ff1)');
+        return;
+      }
       const t0: number = Date.now();
       // allowReuse=false：warm 必须自有一张 PixelMap（aboutToDisappear 会 release），
       // 绝不能拿缓存里那张共用，否则换源 / 退出时会把缓存的图释放掉。
@@ -2929,7 +3050,7 @@ struct Index {
         return false;
       }
       const readable: boolean = this.probeRestoreUris(uris, this.okUri,
-        p !== undefined ? p.uri : '');
+        p !== undefined ? p.uri : '', startupGuard);
       if (startupGuard && this.restoreCancelled) {
         return false;
       }
@@ -5098,6 +5219,9 @@ struct Index {
             return;
           }
           hilog.info(DOMAIN, TAG, 'chooseFolder picked uri=%{public}s', uris[0]);
+          // 第十轮 ff1：用户已经重新选到目录 → 死路径记忆立刻作废，
+          // 下次启动正常恢复，绝不因为这个标记一直被动弹选择器。
+          this.saveDeadTag('');
           // 这是 picker 授予的**原始目录 URI**：立刻建立持久授权，
           // 下次重开就能直接出图，不必再选一次文件夹。fire-and-forget，不挡列目录。
           this.persistFolderUri(uris[0]);
@@ -5289,6 +5413,11 @@ struct Index {
         this.lastUpNames = cacheNames;
       }
       this.inAppUpList = false;   // 这次是真列出来的目录态，不是 APP 内自建清单
+      // 第十轮 ff1：任何一次「真的列目录成功」都证明路径可达 —— 死路径记忆作废。
+      // 只在标记非空时写，自动重扫（每 1.5s）不会因此多写盘。
+      if (this.deadMemory.length > 0) {
+        this.saveDeadTag('');
+      }
       this.browseDir = dirUri;
       this.browseBase = base;
       this.dirMtime = this.tryMtime(base);

@@ -19,7 +19,8 @@
  * 以及第六轮「重启后档案日期不丢失 / 窗口大小与位置恢复 / 界面状态一致」，
  * 以及第七轮「最大化状态重启保持 / 解码数据缓存复用 / 移圆点 / 去缓存张数 / 取消左键放大」、
  * 第八轮「原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复」、
- * 第九轮「3 秒内未进入上次目录就停止恢复并直接打开选择文件夹」。
+ * 第九轮「3 秒内未进入上次目录就停止恢复并直接打开选择文件夹」、
+ * 第十轮「遇到问题立即放弃：错误驱动 + 死路径记忆 + 恢复期零同步 IO」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -50,6 +51,9 @@ import { rawFitOf, rawSingleAllowed, rawReadComplete,
 import { ENTER_WAIT, ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
   enterTimeoutSafe, enterWatchdogWanted, enterSettledOk,
   enterTimeoutAction, enterTimeoutHint } from '../entry/src/main/ets/common/RestoreTimeout.ts';
+import { FF_WAIT, FF_GIVEUP, DEAD_TAG_MAX, deadTagOf, deadMemoryMatches,
+  failFastAction, restoreIoHeld, probeTakeOf, elapsedSince,
+  failFastHint } from '../entry/src/main/ets/common/FailFast.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -633,7 +637,10 @@ check('旧的静默重扫护栏恒 false（不会在启动时被打开）',
 check('恢复读的只是 snapCount 小 key，且经 resumeSnapCap 限幅',
   /store\.get\(SNAP_KEY_COUNT, 0\)/.test(INDEX) &&
   /resumeSnapCap\(/.test(INDEX), true);
-check('恢复失败退回单张显示', /resume: snapshot empty\/unreadable → fall back to single/.test(INDEX), true);
+// 第十轮 ff1：恢复失败不再退回单张、也不再等 3 秒看门狗，而是立即放弃。
+check('恢复失败立即放弃（ff1），不再退回单张',
+  /resume: snapshot empty\/unreadable → give up now \(ff1\)/.test(INDEX) &&
+  /fall back to single/.test(INDEX) === false, true);
 check('单张兜底撤销落盘副作用（不覆盖快照 / 位置）',
   /this\.posPending = undefined;/.test(INDEX) && /this\.snapDirty = false;/.test(INDEX), true);
 check('用户主动入口置 userActed',
@@ -745,7 +752,7 @@ check('只读态设提示卡 + 诊断串，完整态清空提示',
   /this\.restoreHintText = '';/.test(INDEX), true);
 check('快照恢复与单张兜底两条路径都先探授权',
   /const readable: boolean = this\.probeRestoreUris\(uris, this\.okUri,/.test(INDEX) &&
-  /const readable: boolean = this\.probeRestoreUris\(\[single\], this\.okUri, savedUri\);/.test(INDEX), true);
+  /const readable: boolean = this\.probeRestoreUris\(\[single\], this\.okUri, savedUri, true\);/.test(INDEX), true);
 check('两条恢复路径都写 pendingRestoreReadonly',
   (INDEX.match(/this\.pendingRestoreReadonly = !readable;/g) || []).length, 2);
 check('只读态不启动预载 / 补体积 / 对开探测',
@@ -901,8 +908,12 @@ check('activate 有超时竞速 + 只跑一次的收口',
 check('收口后照常进入原恢复链',
   /this\.showLastOnStart\(\);/.test(PERSIST_FNS) &&
   /this\.beginRestore\(\);/.test(INDEX) && /}, RESUME_DELAY_MS\);/.test(INDEX), true);
-check('finishPersistActivate / aboutToDisappear / et1 超时收口都清 activate 定时器',
-  (INDEX.match(/clearTimeout\(this\.persistTimer\)/g) || []).length, 3);
+check('finishPersistActivate / aboutToDisappear / et1 超时 / ff1 立即放弃都清 activate 定时器',
+  (INDEX.match(/clearTimeout\(this\.persistTimer\)/g) || []).length, 4);
+const GIVEUP_FN = INDEX.slice(INDEX.indexOf('private giveUpNow('),
+  INDEX.indexOf('private saveDeadTag('));
+check('ff1 立即放弃内确实清 activate 定时器',
+  /clearTimeout\(this\.persistTimer\)/.test(GIVEUP_FN), true);
 const DISAPPEAR_FN = INDEX.slice(INDEX.indexOf('aboutToDisappear(): void {'),
   INDEX.indexOf('/** 拿到 preferences 实例'));
 check('aboutToDisappear 内确实清 activate 定时器',
@@ -2032,6 +2043,7 @@ check('超时文案对 NaN 预算有兜底', enterTimeoutHint(NaN).includes('3 �
 
 console.log('--- 第九轮 ②：源码静态契约（3 秒看门狗接线 / 超时弹 picker）---');
 const ENTER_SRC = readFileSync(new URL('../entry/src/main/ets/common/RestoreTimeout.ts', import.meta.url), 'utf8');
+const FF_SRC = readFileSync(new URL('../entry/src/main/ets/common/FailFast.ts', import.meta.url), 'utf8');
 check('RestoreTimeout.ts 是纯函数模块（不 import 鸿蒙 SDK）', /@ohos\./.test(ENTER_SRC), false);
 check('RestoreTimeout.ts 不用 Number.isFinite（ArkTS 兼容）', /Number\.isFinite/.test(ENTER_SRC), false);
 check('Index 引入 RestoreTimeout 纯函数',
@@ -2129,6 +2141,168 @@ check('层级重建仍恰好 2 处、全量链与滚轮零解码未动',
   /this\.onWheel\(v < 0 \? -1 : 1\);/.test(INDEX), true);
 check('3 秒预算合法且覆盖 1500ms 激活超时',
   enterTimeoutSafe(3000, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS) && 3000 > 1500, true);
+
+console.log('--- 第十轮 ①：FailFast.ts 纯函数（死路径立即放弃）---');
+check('FailFast.ts 是纯函数模块（不 import 鸿蒙 SDK）', /@ohos\./.test(FF_SRC), false);
+check('FailFast.ts 不用 Number.isFinite（ArkTS 兼容）', /Number\.isFinite/.test(FF_SRC), false);
+check('FailFast.ts 不引入同步等待原语', /new Promise|Promise\.race|Atomics\.wait/.test(FF_SRC), false);
+check('动作常量 WAIT = 0', FF_WAIT, 0);
+check('动作常量 GIVEUP = 1', FF_GIVEUP, 1);
+check('死路径标记上限 256', DEAD_TAG_MAX, 256);
+check('deadTagOf 优先目录授权根', deadTagOf('file://nas/a', 'file://nas/a/1.jpg'), 'file://nas/a');
+check('deadTagOf 无目录时退到图 uri', deadTagOf('', 'file://x/1.jpg'), 'file://x/1.jpg');
+check('deadTagOf 两者皆空 → 不记', deadTagOf('', ''), '');
+check('deadTagOf 超长截断到 256', deadTagOf('a'.repeat(300), '').length, 256);
+check('deadTagOf 恰好 256 不截断', deadTagOf('b'.repeat(256), '').length, 256);
+check('死路径记忆：同一目录复发 → 命中',
+  deadMemoryMatches('file://nas/a', 'file://nas/a', 'file://nas/a/1.jpg'), true);
+check('死路径记忆：用户换了目录 → 不命中',
+  deadMemoryMatches('file://nas/a', 'file://nas/b', 'file://nas/b/1.jpg'), false);
+check('死路径记忆：标记为空 → 不命中', deadMemoryMatches('', 'file://nas/a', 'x'), false);
+check('死路径记忆：okUri 兜底也命中',
+  deadMemoryMatches('file://x/1.jpg', '', 'file://x/1.jpg'), true);
+check('死路径记忆：okUri 变了不命中',
+  deadMemoryMatches('file://x/1.jpg', '', 'file://x/2.jpg'), false);
+check('立即放弃：问题 + 有记忆 + 未接手 + 未收口',
+  failFastAction(true, true, false, false), FF_GIVEUP);
+check('立即放弃：没问题信号 → 继续等',
+  failFastAction(false, true, false, false), FF_WAIT);
+check('立即放弃：首次启动无记忆 → 不弹',
+  failFastAction(true, false, false, false), FF_WAIT);
+check('立即放弃：用户已接手 → 不干预',
+  failFastAction(true, true, true, false), FF_WAIT);
+check('立即放弃：恢复已收口 → 不弹第二次',
+  failFastAction(true, true, false, true), FF_WAIT);
+check('恢复期 IO 闸门：有记忆未进入未接手 → hold', restoreIoHeld(false, false, true), true);
+check('恢复期 IO 闸门：已进入目录 → 放开', restoreIoHeld(true, false, true), false);
+check('恢复期 IO 闸门：用户已接手 → 放开', restoreIoHeld(false, true, true), false);
+check('恢复期 IO 闸门：首次启动无记忆 → 放开', restoreIoHeld(false, false, false), false);
+check('探测 fail-fast：启动期只探 1 个', probeTakeOf(true, 3), 1);
+check('探测 fail-fast：用户主动路径探全部', probeTakeOf(false, 3), 3);
+check('探测 fail-fast：候选为空 → 0', probeTakeOf(true, 0), 0);
+check('探测 fail-fast：NaN → 0', probeTakeOf(false, NaN), 0);
+check('探测 fail-fast：小数向下取整', probeTakeOf(false, 2.9), 2);
+check('探测 fail-fast：Infinity → 0', probeTakeOf(true, Infinity), 0);
+check('耗时：正常', elapsedSince(1000, 1250), 250);
+check('耗时：起点为 0 → 0', elapsedSince(0, 1250), 0);
+check('耗时：时间倒流 → 0', elapsedSince(2000, 1250), 0);
+check('耗时：NaN → 0', elapsedSince(NaN, 1250), 0);
+check('耗时：Infinity → 0', elapsedSince(1000, Infinity), 0);
+check('立即放弃文案带原因与指引', failFastHint('授权已失效'),
+  '上次目录无法打开（授权已失效）· 已立即停止恢复 · 请重新选择文件夹');
+
+console.log('--- 第十轮 ②：Index.ets 错误驱动立即放弃 + 恢复期零同步 IO ---');
+check('Index 引入 FailFast 纯函数', /from '\.\.\/common\/FailFast'/.test(INDEX), true);
+check('死路径小 key 与 ff1 诊断标记',
+  /const POS_KEY_DEAD: string = 'deadDirUri';/.test(INDEX) &&
+  /const FF_TAG: string = 'ff1';/.test(INDEX), true);
+const READPOS_FN = INDEX.slice(INDEX.indexOf('private async readLastPos('),
+  INDEX.indexOf('/** 只探最多 RESTORE_PROBE_LIMIT 张'));
+check('readLastPos 读死路径记忆', /p\.get\(POS_KEY_DEAD, ''\)/.test(READPOS_FN), true);
+check('readLastPos 命中死路径记忆立即放弃（零 IO 零等待）',
+  /deadMemoryMatches\(this\.deadMemory, this\.savedDirUri, ok\)/.test(READPOS_FN) &&
+  /this\.giveUpNow\('same dead dir as last time', 0\);/.test(READPOS_FN), true);
+check('死路径记忆命中时不预热 / 不排恢复定时器',
+  READPOS_FN.indexOf('this.giveUpNow') < READPOS_FN.indexOf('this.warmLast(ok)') &&
+  READPOS_FN.indexOf('this.giveUpNow') < READPOS_FN.indexOf('this.scheduleShowLast()'), true);
+const WARM_FN = INDEX.slice(INDEX.indexOf('private warmLast('),
+  INDEX.indexOf('/** 记下「这张成功显示过了」'));
+check('warmLast 恢复期按住同步文件 IO',
+  /restoreIoHeld\(this\.restoreEntered, this\.userActed, this\.hasRestoreMemory\)/.test(WARM_FN) &&
+  /zero file IO \(ff1\)/.test(WARM_FN), true);
+check('warmLast 放弃后也不碰文件',
+  /this\.giveUpDone \|\| this\.restoreCancelled/.test(WARM_FN), true);
+const PROBE_FN = INDEX.slice(INDEX.indexOf('private probeRestoreUris('),
+  INDEX.indexOf('/** 在建列表前统一落地恢复模式'));
+check('探测候选纯函数与限量常量不变',
+  /restoreProbeUris\(uris, okUri, savedUri, RESTORE_PROBE_LIMIT\)/.test(PROBE_FN) &&
+  /fs\.openSync\(cand\[i\], fs\.OpenMode\.READ_ONLY\)/.test(PROBE_FN), true);
+check('启动恢复期探测 fail-fast（只探 1 个）',
+  /const take: number = probeTakeOf\(fast, cand\.length\);/.test(PROBE_FN) &&
+  /for \(let i: number = 0; i < take; i\+\+\)/.test(PROBE_FN), true);
+check('fail-fast 由 startupGuard 显式传入，用户主动路径探全部',
+  /fastProbe: boolean = false/.test(PROBE_FN) &&
+  /p !== undefined \? p\.uri : '', startupGuard\);/.test(INDEX) &&
+  /this\.restoreFromSnapshot\(\);/.test(INDEX), true);
+check('成功列目录也清死路径记忆（且只在标记非空时写）',
+  /if \(this\.deadMemory\.length > 0\) \{\s*\n\s*this\.saveDeadTag\(''\);/.test(INDEX), true);
+const GIVEUP_ALL = INDEX.slice(INDEX.indexOf('private giveUpNow('),
+  INDEX.indexOf('/** 首帧之后真正执行恢复'));
+check('giveUpNow 作废在飞恢复链',
+  /this\.restoreCancelled = true;/.test(GIVEUP_ALL) &&
+  /this\.resumeDone = true;/.test(GIVEUP_ALL) &&
+  /this\.persistSettled = true;/.test(GIVEUP_ALL), true);
+check('giveUpNow 清掉两个定时器 + 看门狗',
+  /clearTimeout\(this\.resumeTimer\)/.test(GIVEUP_ALL) &&
+  /clearTimeout\(this\.persistTimer\)/.test(GIVEUP_ALL) &&
+  /this\.clearEnterWatchdog\(\);/.test(GIVEUP_ALL), true);
+check('giveUpNow 作废全量预载链',
+  /this\.allSeq\+\+;/.test(GIVEUP_ALL) && /this\.allBusy = false;/.test(GIVEUP_ALL), true);
+check('giveUpNow 直接打开选择文件夹 + 写死路径记忆',
+  /this\.chooseFolder\(\);/.test(GIVEUP_ALL) &&
+  /this\.saveDeadTag\(deadTagOf\(this\.savedDirUri, this\.okUri\)\);/.test(GIVEUP_ALL), true);
+check('giveUpNow 状态栏与诊断串带 ff1',
+  /this\.status = failFastHint\(reason\);/.test(GIVEUP_ALL) &&
+  /'restore GIVEUP \| ' \+ FF_TAG/.test(GIVEUP_ALL), true);
+check('giveUpNow 只跑一次（giveUpDone 挡重入）',
+  /if \(this\.giveUpDone \|\| this\.userActed \|\| this\.restoreEntered\) \{/.test(GIVEUP_ALL) &&
+  /this\.giveUpDone = true;/.test(GIVEUP_ALL), true);
+const SAVE_DEAD_FN = INDEX.slice(INDEX.indexOf('private saveDeadTag('),
+  INDEX.indexOf('/** 首帧之后真正执行恢复'));
+check('死路径记忆同步落盘（putSync + flushSync，无 await）',
+  /store\.putSync\(POS_KEY_DEAD, tag\);/.test(SAVE_DEAD_FN) &&
+  /store\.flushSync\(\);/.test(SAVE_DEAD_FN) &&
+  /await/.test(SAVE_DEAD_FN) === false, true);
+const FINISH_FN = INDEX.slice(INDEX.indexOf('private finishPersistActivate('),
+  INDEX.indexOf('/** 用户用 picker 选过目录'));
+check('finishPersistActivate 激活失败立即放弃',
+  /this\.giveUpNow\('persist auth lost'/.test(FINISH_FN), true);
+check('showLastOnStart 三处问题信号都立即放弃（不再等 3 秒）',
+  (RESUME_FN.match(/this\.giveUpNow\(/g) || []).length === 3 &&
+  /this\.giveUpNow\('snapshot unreadable'/.test(RESUME_FN) &&
+  /this\.giveUpNow\('readonly list or empty snapshot'/.test(RESUME_FN) &&
+  /this\.giveUpNow\('single fallback only'/.test(RESUME_FN), true);
+check('showLastOnStart 函数体仍不含选择器 / 权限 / 全量重扫字面量',
+  /loadAllGallery|queryAllPhotos|ensureGalleryPermission|DocumentViewPicker|PhotoViewPicker|chooseFolder\(/
+    .test(RESUME_FN), false);
+check('超时收口也写死路径记忆并挡重入',
+  /this\.giveUpDone = true;/.test(ABORT_FN) &&
+  /this\.saveDeadTag\(deadTagOf\(this\.savedDirUri, this\.okUri\)\);/.test(ABORT_FN), true);
+const CHOOSE_FN = INDEX.slice(INDEX.indexOf('private chooseFolder(): void {'),
+  INDEX.indexOf('/** 列一个目录'));
+check('用户重新选到目录 → 清死路径记忆', /this\.saveDeadTag\(''\);/.test(CHOOSE_FN), true);
+check('页面销毁置 giveUpDone（warm 回调不碰死路径）',
+  /this\.giveUpDone = true;/.test(DISAPPEAR_FN), true);
+
+console.log('--- 第十轮 ③：回归护栏（旧契约一条不动）---');
+check('et1 看门狗仍保留为「完全无信号」兜底',
+  /const RESTORE_ENTER_TIMEOUT_MS: number = 3000;/.test(INDEX) &&
+  /const ENTER_TAG: string = 'et1';/.test(INDEX) &&
+  /this\.enterWatchdogTimer = setTimeout\(/.test(INDEX), true);
+check('探测上限仍是 3（绝不探整批）', /const RESTORE_PROBE_LIMIT: number = 3;/.test(INDEX), true);
+check('两条恢复路径仍写 pendingRestoreReadonly',
+  (INDEX.match(/this\.pendingRestoreReadonly = !readable;/g) || []).length, 2);
+check('ro1 闸门数量不减',
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9, true);
+check('往上层仍不弹系统选择器',
+  /chooseFolder\(|DocumentViewPicker|dv\.select/.test(UP_FN) === false, true);
+check('chooseFolderAt 整个方法仍不存在', /chooseFolderAt/.test(INDEX) === false, true);
+check('版本 / 按钮永不禁用 / 启动重扫护栏 / 无同步等待都未动',
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX) &&
+  /new Promise|Promise\.race/.test(INDEX) === false, true);
+check('层级重建仍恰好 2 处、全量链与滚轮零解码未动',
+  (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 2 &&
+  /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
+  /this\.schedulePreload\(\);/.test(APPLY_FN) &&
+  /this\.onWheel\(v < 0 \? -1 : 1\);/.test(INDEX), true);
+check('失败信号不经过 3 秒等待（giveUpNow 内无 setTimeout）',
+  /setTimeout/.test(GIVEUP_ALL) === false, true);
+check('死路径记忆是小 key（不写大快照）',
+  /const POS_KEY_DEAD: string = 'deadDirUri';/.test(INDEX) &&
+  /store\.putSync\(POS_KEY_DEAD, tag\);/.test(INDEX) &&
+  /flushSnap/.test(GIVEUP_ALL) === false, true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

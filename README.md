@@ -525,6 +525,110 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第十轮：遇到问题立即放弃（错误驱动 + 死路径记忆 + 恢复期零同步 IO）（2026-11-13）
+
+### 用户诉求
+
+> 现在等待死路径超过 20 秒才放弃，改为遇到问题立即放弃。
+
+### 根因：3 秒看门狗被同步 IO 饿死
+
+第九轮的 `RESTORE_ENTER_TIMEOUT_MS = 3000` 本质是 `setTimeout`。但启动恢复链上有两处
+**同步**跨进程 IO 会先把它堵死：
+
+```
+aboutToAppear → readLastPos
+  → warmLast(ok)          +300ms  → decodePx → rawStore.ensure
+                                    → fs.statSync / openSync / readSync   ← 同步
+  → scheduleShowLast      +900ms  → beginRestore → activatePermission
+                                    → showLastOnStart → probeRestoreUris
+                                    → fs.openSync ×3                      ← 同步
+  → enterWatchdog         +3000ms（名义）
+```
+
+死 NAS 路径上一次 `openSync` 能挂十几到二十秒；JS 单线程被占住时，900ms 恢复定时器
+和 3 秒看门狗的回调**根本排不上队**，只有等系统 IO 超时返回才轮到 —— 于是实测表现为
+「名义 3 秒、实际 20 秒才放弃」。换个更小的超时值也解决不了：定时器本身被饿死了。
+
+### 方案：把「放弃」从计时驱动改为错误驱动
+
+新增 `common/FailFast.ts`（纯函数，零 SDK 依赖，Node 可直接回归）：
+
+| 函数 | 作用 |
+|---|---|
+| `deadTagOf(dirUri, okUri)` | 生成死路径标记；优先目录授权根，退到图 uri，截断到 256 字符 |
+| `deadMemoryMatches(dead, dir, ok)` | 上次记下的死路径是否与本次吻合；用户换过目录就不吻合 |
+| `failFastAction(problem, hasMemory, userActed, settled)` | 明确的失败信号 + 有记忆 + 用户未接手 + 未收口 → 立即放弃；首次启动 / 用户已操作一律不干预 |
+| `restoreIoHeld(entered, userActed, hasMemory)` | 启动恢复期是否按住同步文件 IO |
+| `probeTakeOf(fast, n)` | 启动恢复期只探 1 个候选（第一个打不开就判死），用户主动路径探全部 |
+| `elapsedSince(t0, now)` | 诊断串耗时，脏数据归 0 |
+| `failFastHint(reason)` | 状态栏文案 |
+
+`Index.ets` 的三层改造：
+
+**① 死路径记忆（跨启动，真正 0 秒）**
+`POS_KEY_DEAD` 小 key 记录上次栽在哪个目录。`giveUpNow()` / `abortRestoreForPicker()`
+失败时 `putSync + flushSync` 落盘；`readLastPos()` 读到且与本次 `savedDirUri` 吻合 →
+**连 900ms 定时器和 3 秒看门狗都不排**，不预热、不探测、不 `openSync`，直接
+`giveUpNow(..., 0)` 打开选择文件夹。用户重新选到目录（`chooseFolder().then`）或
+任何一次真的列目录成功（`openFolder`）都会清标记，绝不误伤正常恢复。
+
+**② 明确的「问题信号」立即收口，不再等 3 秒**
+
+| 信号 | 原来 | 现在 |
+|---|---|---|
+| `activatePermission` 失败 / 1500ms 超时 | 继续读快照、走探测 | **立即** `giveUpNow` |
+| 快照读不出 / 整批恢复失败 | 降级单张兜底，等看门狗 | **立即** `giveUpNow` |
+| ro1 只读名单态 / 空列表 | 留给 3 秒收口 | **立即** `giveUpNow` |
+| 单张兜底 | 留给 3 秒收口 | **立即** `giveUpNow` |
+| 死路径记忆命中 | 走完整恢复链 | **0 秒** `giveUpNow` |
+
+`giveUpNow()` 与 et1 超时收口做的是同一件事：作废在飞恢复链（`restoreCancelled` /
+`resumeDone` / `persistSettled`）、清 `resumeTimer` / `persistTimer` / 看门狗、
+`allSeq++` 作废全量预载链、写死路径记忆、打开选择文件夹。区别是**不依赖任何定时器**，
+且 `giveUpDone` 保证两条收口路径只弹一次。
+
+**③ 消除同步 IO 饿死定时器**
+- `warmLast()` 在启动恢复期（`restoreIoHeld`）直接跳过解码，零文件 IO；放弃后
+  （`giveUpDone` / `restoreCancelled`）也不碰文件。恢复成功后的首图由 `applyItems →
+  showPreviewOf` 正常解码出图，画面不空白，只是没有了「提前量」。
+- `probeRestoreUris()` 新增 `fastProbe` 参数：`restoreFromSnapshot(startupGuard)` 显式传
+  `startupGuard`，启动链只探 1 个候选；用户主动路径仍按 `RESTORE_PROBE_LIMIT=3` 探全部。
+- 全部同步 IO 收敛到「探测通过之后」：`applyItems` 的解码与全量预载只在 `ioOk=true`
+  （非 ro1）时发生，而 `ioOk` 由探测结果决定。
+
+### 边界（必须说清）
+
+系统对不可达网络路径的同步 IO 超时由平台决定，应用无法缩短。本轮保证的是：
+**不再额外等 3 秒看门狗**、**不再逐个候选重试**、**所有可先验识别的问题立即放弃**、
+**同一死路径复发 0 秒**。唯一残留是「持久授权激活成功、但 NAS 随后物理不可达」时，
+第一次探测仍会受一次系统 IO 超时限制 —— 但它只探 1 个候选、失败后立即放弃，并记下
+死路径，此后每次启动都是 0 秒。
+
+### 行为变化
+
+- 以前「单张兜底 / ro1 只读名单态」会停在半死界面等 3 秒；现在这两种情况**立即**
+  弹出选择文件夹（名单仍在，取消选择器也看得到）。这正是「未能进入上次的目录」的主要表现。
+- 启动期不再预热上一张低清图；恢复成功时由 `showPreviewOf` 正常出图。
+
+### 护栏（旧契约一条未动）
+
+`et1` 3000ms 看门狗保留为「完全无信号」兜底；`RESTORE_PROBE_LIMIT=3`、两条恢复路径的
+`pendingRestoreReadonly`、ro1 `bulkIoAllowed` 闸门（≥9 处）、「往上层」不弹系统选择器、
+`chooseFolderAt` 不存在、按钮永不禁用、`AUTO_RESUME_ON_START=false`、全量链与滚轮零解码、
+版本 `1.0.7 / 7` 全部不变。`showLastOnStart()` 函数体仍不含选择器 / 权限 / 全量重扫
+字面量（立即放弃统一走 `giveUpNow`）。
+
+### 验证
+
+- `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 949 passed, 0 failed**
+  （877 → 949，新增 72 条：FailFast 纯函数 + 第十轮源码静态契约 + 回归护栏）。
+- `git diff --check` 干净；12 个源码文件括号计数与 HEAD 增量全 0；
+  `node --check tests/dirname.test.mjs` 通过。
+- 两条旧断言按惯例**同步更新**：「恢复失败退回单张」改为「恢复失败立即放弃」、
+  `clearTimeout(this.persistTimer)` 计数 3 → 4（并补 `giveUpNow` 函数体切片检查）。
+- **未编译 HAP / 未放桌面 / 未跑 build.sh / 未升版本 / 未 push**。
+
 ## 第九轮：3 秒内未进入上次目录就停止恢复并直接打开选择文件夹（2026-11-13）
 
 ### 用户诉求
