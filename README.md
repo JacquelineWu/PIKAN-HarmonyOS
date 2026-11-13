@@ -525,6 +525,57 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第十一轮：版本号归位 / 顶部第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出（2026-11-13）
+
+### 用户诉求（精确改动，其余布局 / 样式 / 按钮功能 / 交互 / 状态一律不变，不重构）
+
+1. 版本号显示在**最顶部标题栏**，并从第二栏移除，避免重复显示。
+2. 含「全屏」「幻灯片」按钮的**第二栏默认隐藏**；仅鼠标悬停页面顶部区域
+   （含最顶部标题栏及第二栏所在行）时显示，离开立即恢复隐藏；隐藏时不影响其余布局，
+   显示时保持该栏原有样式与按钮功能。
+3. mouseover 左栏档案行时小图预览**事件触发即显示**；移除预览显示 / 隐藏过程中的
+   淡入、淡出、过渡动画及任何延迟逻辑；鼠标移出后的隐藏也不带动画或延迟。
+4. **仅非全屏态**按 ESC 触发退出 APP；全屏态保持原有 ESC 相关行为不变，避免与全屏交互冲突。
+
+### 落地（全部在 `Index.ets`，未新增 SDK 能力、未动其它模块）
+
+- **① 版本号归位**：`topBar()` 的 `Text('PIKAN ' + APP_VERSION)` 是版本号唯一显示处；
+  左栏抬头原 `Text('v' + APP_VERSION + ' · N 张')` 去掉版本号，改为
+  `Text(this.itemCount > 0 ? this.itemCount + ' 张' : '')`。全源码 `Text(...APP_VERSION)` 只剩 1 处。
+- **② 第二栏悬停显隐**：把「全屏 / 幻灯片」按钮原样包进一个 `Row`，加
+  `@State topToolsVisible: boolean = false`（默认隐藏）与
+  `.visibility(this.topToolsVisible ? Visibility.Visible : Visibility.Hidden)`。
+  用 **`Visibility.Hidden` 占位隐藏**（不是 `None`）→ 顶栏高度、路径文字宽度、下方主体
+  一行都不位移，严格满足「隐藏时不影响其余布局」；显示时按钮样式 / `onAction('play')` 功能不变。
+  显隐由 `topBar` 根 Row 的 `.onHover((isHover) => { this.topToolsVisible = isHover; })`
+  直接置位（事件触发当帧生效、离开即隐藏），根容器 `onRootMouse` 再按
+  `y <= TOPBAR_H` 的 Move 兜底（部分 2in1 SDK 不派发 onHover）。整条链无 `animateTo` /
+  `opacity` / `transition` / `setTimeout`。
+- **③ hover 零延迟零动画**：删除 `HOVER_CLOSE_DELAY_MS=120`、`hoverSeq`、`hoverCloseTimer`、
+  `cancelCloseTimer()` 全部延迟机制；`onHoverChange(false)` 改为同步
+  `showHover=false` + 清 px + `release(key)`；`bindPopup` 选项加官方
+  `transition: TransitionEffect.IDENTITY` 关掉 popup 默认的淡入 / 淡出 / 缩放动效
+  （`mask:false` / `autoCancel:false` / `enableArrow:false` 三项防闪根因配置保持不动）。
+  `forceHide` / `aboutToDisappear` / 点击 / `onMouse` 续命分支同步去掉代号作废逻辑。
+- **④ ESC 保持不动**：`onKey` 的 `KEYCODE_ESCAPE` 分支本就是
+  「全屏 → `toggleFull()`，非全屏 → `quitApp()`（`terminateSelf`）」，正好符合要求，
+  按「保持行为不变」原则**逻辑一行未改**，只补注释锁定，并由新增静态契约断言守住。
+
+### 验证
+
+- `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 968 passed, 0 failed**
+  （949 → 968，7 条旧 hover 断言按新语义同步更新、未删，新增 19 条第十一轮契约）。
+- 新增断言时踩到「注释也算正则文本」：本轮注释写了「无 setTimeout / duration:0」，
+  直接对含注释切片做正则会误命中 → 加了 `stripComments()` 只检测代码行（沿用既有惯例）。
+- `git diff --check` 干净；源码括号计数与 HEAD 增量全 0；`node --check` 通过。
+- 版本仍 `1.0.7 / versionCode 7`。**未编译 HAP / 未放桌面 / 未跑 build.sh / 未升版本 / 未 push**。
+
+### DevEco 编译侧确认点
+
+`Visibility` / `TransitionEffect.IDENTITY` / `MouseEvent.action === MouseAction.Move` 均为
+ArkUI 常用声明式 API，但本机 SDK `.d.ts` 不可见；若 DevEco 报枚举名 / 重载不符，
+把报错发我改成数值或 callback 形式即可。行为与像素级布局请实机确认。
+
 ## 第十轮：遇到问题立即放弃（错误驱动 + 死路径记忆 + 恢复期零同步 IO）（2026-11-13）
 
 ### 用户诉求

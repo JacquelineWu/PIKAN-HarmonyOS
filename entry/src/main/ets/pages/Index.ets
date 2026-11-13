@@ -724,10 +724,10 @@ function fmtDate(ms: number): string {
  *  自己的 24 张 LRU、同时只解一个，不挤占主预载缓存。 */
 const HOVER_EDGE: number = 384;
 const HOVER_MAX_COUNT: number = 24;
-/** 悬停浮层关闭去抖（ms）：鼠标跨过行 / 子元素边界时不立刻收起。
- *  注意：这只能抹平「正常进出」的抖动，**治不了不停闪** —— 闪烁真正的根因是
- *  bindPopup 默认的 mask / autoCancel（见下方 bindPopup 选项上的说明）。 */
-const HOVER_CLOSE_DELAY_MS: number = 120;
+/** 第十一轮：悬停小图预览「零延迟、零动画」—— 不再有关闭去抖常量 / 关闭计时器。
+ *  onHover(true) 同步展开、onHover(false) 同步收起；popup 的显隐动效由
+ *  bindPopup 的 transition: TransitionEffect.IDENTITY 关掉（见下方选项说明）。
+ *  闪烁真正的根因仍是 bindPopup 默认的 mask / autoCancel，两项保持关闭。 */
 /** 待处理队列上限。快速滑动列表会堆积大量「已划走」的请求，超了就丢最旧的，
  *  否则一次甩动可能排进上千个任务 */
 const THUMB_QUEUE_MAX: number = 240;
@@ -1270,29 +1270,19 @@ struct ArchiveRow {
   @State showHover: boolean = false;                       // 悬停浮层是否展开
   @State hoverPx: image.PixelMap | undefined = undefined;  // 悬停大图（384px 档）
   private alive: boolean = true;
-  /** 悬停关闭去抖代号 / 计时器：hover 只碰这两个字段和上面两个 @State，
-   *  绝不调用父组件的 onTap / 列表 / 目录方法（否则退出 hover 会把当前档案 / 目录带走）。 */
-  private hoverSeq: number = 0;
-  private hoverCloseTimer: number = -1;
+  /** 第十一轮：显隐完全同步，不再有去抖代号 / 关闭计时器。
+   *  hover 只碰上面两个 @State，绝不调用父组件的 onTap / 列表 / 目录方法
+   *  （否则退出 hover 会把当前档案 / 目录带走）。 */
 
   /** 行标识：同一目录里 uri 唯一，排序 / 重扫改变 idx 也不会串位。 */
   private rowKey(): string {
     return this.uri;
   }
 
-  private cancelCloseTimer(): void {
-    if (this.hoverCloseTimer !== -1) {
-      clearTimeout(this.hoverCloseTimer);
-      this.hoverCloseTimer = -1;
-    }
-  }
-
   /** 被 HoverGuard 同步收起（另一行接手浮层）：立刻关，不走延迟，
-   *  否则「旧行还在等 120ms、新行已经弹出」会看到两个浮层重叠闪一下。
+   *  否则「旧行还没收、新行已经弹出」会看到两个浮层重叠闪一下。
    *  只碰 hover 自己的状态，绝不调用 onTap / 列表 / 目录方法。 */
   private forceHide(): void {
-    this.hoverSeq++;
-    this.cancelCloseTimer();
     this.showHover = false;
     this.hoverPx = undefined;
   }
@@ -1337,16 +1327,15 @@ struct ArchiveRow {
 
   aboutToDisappear(): void {
     this.alive = false; // 离屏后即使队列轮到自己，也不再回调
-    this.hoverSeq++;    // 作废待执行的延迟关闭
-    this.cancelCloseTimer();
     HoverGuard.shared().release(this.rowKey());
-    this.showHover = false; // 行划出屏幕 / 滚动列表：浮层立刻收起
+    this.showHover = false; // 行划出屏幕 / 滚动列表：浮层立刻收起（无延迟 / 无动画）
     this.hoverPx = undefined;
   }
 
   /** Win64 51 行：鼠标停在档案行任意位置，右侧浮出小图（左栏本身不常驻缩略图）。
    *  先查悬停自己的 LRU，命中即同步出图；没命中才后台解一张 384px（同时最多一个）。
-   *  目录行 / 不支持预览的灰行不弹；离屏、点击、划走由 alive / showHover 收起。 */
+   *  目录行 / 不支持预览的灰行不弹；离屏、点击、划走由 alive / showHover 收起。
+   *  第十一轮：mouseover 事件触发当帧就展开 / 收起 —— 不排队、不 setTimeout、不淡入淡出。 */
   private onHoverChange(on: boolean): void {
     // 只读名单态：连浮层都不弹，彻底断掉 hover 解码链（预览区指引卡会说明原因）。
     if (this.kind !== ROW_IMAGE || this.thumbDisabled) {
@@ -1354,30 +1343,17 @@ struct ArchiveRow {
     }
     const key: string = this.rowKey();
     if (!on) {
-      // 已被 HoverGuard 同步收起（换到另一行 / 点击 / 离屏）就别再排一次关闭
+      // 鼠标移出：立即隐藏，不排队、不等计时器、不带淡出。
+      // 已被 HoverGuard 同步收起（换到另一行 / 点击 / 离屏）就别再重复释放。
       if (!this.showHover) {
         return;
       }
-      // 延迟收起 + 代号作废：鼠标跨过行内子元素 / 行边界的一瞬间会连着派发
-      // onHover(false) 与 onHover(true)，120ms 缓冲只用来抹平这种正常抖动。
-      // ⚠️ 它治不了「不停闪」：那是 popup 的 mask / autoCancel 默认值造成的
-      //    自激循环，已在 bindPopup 选项里关掉（见下方）。
-      const seq: number = ++this.hoverSeq;
-      this.cancelCloseTimer();
-      this.hoverCloseTimer = setTimeout(() => {
-        this.hoverCloseTimer = -1;
-        if (!this.alive || seq !== this.hoverSeq) {
-          return; // 期间又 hover 回来了 / 行已离屏
-        }
-        this.showHover = false;
-        this.hoverPx = undefined;
-        HoverGuard.shared().release(key);
-      }, HOVER_CLOSE_DELAY_MS);
+      this.showHover = false;
+      this.hoverPx = undefined;
+      HoverGuard.shared().release(key);
       return;
     }
-    // on === true：先作废待收起的计时器（鼠标又回来了）
-    this.hoverSeq++;
-    this.cancelCloseTimer();
+    // on === true：事件触发即同步展开（showHover 置位的同一帧浮层就在）。
     if (this.showHover) {
       return; // 连续派发别重复排队 384px 解码
     }
@@ -1493,14 +1469,11 @@ struct ArchiveRow {
         return;
       }
       if (this.showHover) {
-        // 鼠标仍在本行移动：续命、取消待收起。菜单 / 浮层抢焦点会造成一次
-        // 假的 onHover(false)，靠这条把它压住，浮层不会「刚出来就消失」。
-        this.hoverSeq++;
-        this.cancelCloseTimer();
+        // 浮层已展开：本行内的移动不重复打开（第十一轮起已无计时器可续命）。
         return;
       }
-      // ⚠️ 绝不能无条件自动打开：正常设备收到 onHover(false) 后会延迟收起，
-      // 紧接着一次 Move 就又把浮层打开 —— 「收起→打开→收起」自激成不停闪。
+      // ⚠️ 绝不能无条件自动打开：正常设备由 onHover 当帧收口，
+      // 一次 Move 又打开会「收起→打开→收起」自激成不停闪。
       // 只有在「整台设备从未派发过 onHover」时才启用兜底。
       if (!HoverGuard.shared().hoverSupported) {
         this.onHoverChange(true);
@@ -1519,12 +1492,13 @@ struct ArchiveRow {
       // 关掉这两项后，popup 显隐完全由 showHover 决定，onHover(false) 也重新可信。
       mask: false,
       autoCancel: false,
-      enableArrow: false // 少一次箭头位置计算，弹出的位置更稳定
+      enableArrow: false, // 少一次箭头位置计算，弹出的位置更稳定
+      // 第十一轮：关掉 popup 默认的淡入 / 淡出 / 缩放动效 —— 显示与隐藏都是瞬时的。
+      // CustomPopupOptions.transition 设为 IDENTITY 即「无过渡」，比设 duration:0 更彻底。
+      transition: TransitionEffect.IDENTITY
     })
     .onClick(() => {
-      // 鼠标按下选图：浮层立刻收起；顺手作废延迟关闭，别让计时器在组件重建后又跑一次
-      this.hoverSeq++;
-      this.cancelCloseTimer();
+      // 鼠标按下选图：浮层立刻收起（第十一轮起无计时器、无淡出）。
       this.showHover = false;
       this.hoverPx = undefined;
       HoverGuard.shared().release(this.rowKey());
@@ -1634,6 +1608,9 @@ struct Index {
   /** 顶栏自动隐藏（Win64 0cfabb2）：鼠标贴近窗口顶端才浮出，默认不占画面 */
   @State topbarVisible: boolean = true;
   private topbarTimer: number = -1;   // 「停手 N 秒自动收起」的兜底计时器
+  /** 第十一轮：「全屏 / 幻灯片」按钮组（第二栏工具区）默认隐藏；
+   *  仅鼠标悬停页面顶部区域时显示，离开立即恢复隐藏（无动画 / 无延迟 / 无计时器）。 */
+  @State topToolsVisible: boolean = false;
 
   // ---- 视图变换状态 ----
   @State zoom: number = 1;
@@ -5927,10 +5904,23 @@ struct Index {
     this.armCanvasReloadFallback();    // 窗口 API 静默失败时也能按当前画布重解
   }
 
-  /** 根容器收到鼠标移动：真全屏下不再有「贴顶唤出工具顶栏」（2026-11-11 用户要求「不会有标题列」）。
-   *  留着 SHOW_FULLSCREEN_CHROME 开关：改回 true 就能恢复旧的唤出式工具条，不用重新写代码。
-   *  y 是相对根 Stack 的坐标；非全屏时顶栏常驻，不必算。 */
+  /** 根容器收到鼠标移动：
+   *  · 第十一轮：非全屏时用 y 坐标驱动「全屏 / 幻灯片」按钮组（第二栏）显隐 ——
+   *    鼠标在页面顶部区域（最顶部标题栏 + 按钮所在行，即 TOPBAR_H 之内）就显示，
+   *    离开立即隐藏。作为 onHover 的兜底（部分 2in1 SDK 只派发 Move），同样零延迟。
+   *  · 真全屏下不再有「贴顶唤出工具顶栏」（2026-11-11 用户要求「不会有标题列」）。
+   *    留着 SHOW_FULLSCREEN_CHROME 开关：改回 true 就能恢复旧的唤出式工具条。
+   *  y 是相对根 Stack 的坐标。 */
   private onRootMouse(event: MouseEvent): void {
+    if (!this.fullscreen && event.action === MouseAction.Move) {
+      const yTop: number = Number(event.y);
+      if (yTop === yTop) {
+        const inTop: boolean = yTop >= 0 && yTop <= TOPBAR_H;
+        if (inTop !== this.topToolsVisible) {
+          this.topToolsVisible = inTop;
+        }
+      }
+    }
     if (!SHOW_FULLSCREEN_CHROME || !this.fullscreen) {
       return;
     }
@@ -6169,6 +6159,7 @@ struct Index {
         break;
       case KeyCode.KEYCODE_ESCAPE:
         if (this.fullscreen) {
+          // 第十一轮确认：全屏态保持原有全屏交互，这里绝不退出 APP。
           // 2026-11-11 第四轮：ESC 与双击 / F11 **完全同一个入口** toggleFull()，
           // 不再单独写 setFull(false) —— 两条路径分叉正是「ESC 效果跟双击不一样」的来源。
           this.toggleFull();
@@ -6336,25 +6327,36 @@ struct Index {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
 
-      // 11-10 起按用户要求彻底移除「选择图片」与「回到上次」两个按钮及其入口；
-      // 顶栏其余按钮（全屏 / 幻灯片）与事件保持不变。
-      this.toolBtn('全屏', 'full', false)
-      Button(this.playing ? '暂停' : '幻灯片')
-        .type(ButtonType.Normal)
-        .fontSize(13)
-        .fontColor(this.playing ? '#101216' : '#e8ecf4')
-        .backgroundColor(this.playing ? '#f6c85f' : '#2a2f3a')
-        .borderRadius(6)
-        .height(32)
-        .padding({ left: 12, right: 12 })
-        .margin({ left: 4 })
-        .onClick(() => this.doAction('play'))
+      // 第十一轮：包含「全屏 / 幻灯片」的第二栏（工具区）默认隐藏。
+      // Visibility.Hidden = 占位但不可见 → 隐藏时标题栏 / 下方主体布局零位移；
+      // 显示时用 Visibility.Visible，按钮原有样式与 onClick 功能一律不变。
+      Row() {
+        // 11-10 起按用户要求彻底移除「选择图片」与「回到上次」两个按钮及其入口；
+        // 顶栏其余按钮（全屏 / 幻灯片）与事件保持不变。
+        this.toolBtn('全屏', 'full', false)
+        Button(this.playing ? '暂停' : '幻灯片')
+          .type(ButtonType.Normal)
+          .fontSize(13)
+          .fontColor(this.playing ? '#101216' : '#e8ecf4')
+          .backgroundColor(this.playing ? '#f6c85f' : '#2a2f3a')
+          .borderRadius(6)
+          .height(32)
+          .padding({ left: 12, right: 12 })
+          .margin({ left: 4 })
+          .onClick(() => this.doAction('play'))
+      }
+      .visibility(this.topToolsVisible ? Visibility.Visible : Visibility.Hidden)
     }
     .width('100%')
     .height(TOPBAR_H)
     .padding({ left: 16, right: 12 })
     .backgroundColor('#1a1d23')
     .border({ width: { bottom: 1 }, color: '#2a2f3a' })
+    // 鼠标悬停页面顶部区域（本 Row 即最顶部标题栏 + 第二栏所在行）时立即显示第二栏；
+    // 离开立即隐藏。纯状态置位、无 animateTo / 无 opacity 过渡 / 无 setTimeout。
+    .onHover((isHover: boolean) => {
+      this.topToolsVisible = isHover;
+    })
   }
 
   build() {
@@ -6376,8 +6378,9 @@ struct Index {
                 .fontWeight(FontWeight.Bold)
                 .fontColor('#dfe5ef')
                 .layoutWeight(1)
-              // 版本标记常驻左栏抬头：即使顶栏被自动隐藏，截图也能一眼分辨新旧包
-              Text('v' + APP_VERSION + (this.itemCount > 0 ? ' · ' + this.itemCount + ' 张' : ''))
+              // 第十一轮：版本号只在最顶部标题栏（topBar 的 PIKAN 版本号）显示一次，
+              // 第二栏不再重复；这里只留档案张数，样式 / 位置都不变。
+              Text(this.itemCount > 0 ? this.itemCount + ' 张' : '')
                 .fontSize(12)
                 .fontColor('#7f88a3')
             }

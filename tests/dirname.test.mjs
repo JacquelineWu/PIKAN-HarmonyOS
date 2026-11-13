@@ -20,7 +20,8 @@
  * 以及第七轮「最大化状态重启保持 / 解码数据缓存复用 / 移圆点 / 去缓存张数 / 取消左键放大」、
  * 第八轮「原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复」、
  * 第九轮「3 秒内未进入上次目录就停止恢复并直接打开选择文件夹」、
- * 第十轮「遇到问题立即放弃：错误驱动 + 死路径记忆 + 恢复期零同步 IO」。
+ * 第十轮「遇到问题立即放弃：错误驱动 + 死路径记忆 + 恢复期零同步 IO」、
+ * 第十一轮「版本号归位最顶部 / 第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -230,19 +231,28 @@ const HOVER_FN = INDEX.slice(INDEX.indexOf('private onHoverChange('), INDEX.inde
 const HOVER_THUMB_START = INDEX.indexOf('hoverThumb()');
 const HOVER_THUMB_FN = INDEX.slice(HOVER_THUMB_START, INDEX.indexOf('  build() {', HOVER_THUMB_START));
 const APPLY_FN = INDEX.slice(INDEX.indexOf('private applyItems('), INDEX.indexOf('后台分批补测体积'));
-check('hover 关闭有去抖常量', /const HOVER_CLOSE_DELAY_MS: number = 120;/.test(INDEX), true);
-check('onHover(false) 改延迟关闭（hoverSeq 代号）', /const seq: number = \+\+this\.hoverSeq;/.test(HOVER_FN), true);
-check('延迟关闭带 clearTimeout 复位', /clearTimeout\(this\.hoverCloseTimer\)/.test(INDEX), true);
-check('hover 回来会取消待关闭计时器',
-  /this\.hoverSeq\+\+;\s*this\.cancelCloseTimer\(\)/.test(HOVER_FN), true);
+// 第十一轮：hover 小图预览改为「零延迟、零动画」，旧的去抖常量 / 计时器 / 代号断言
+// 全部按新语义同步更新（不删断言）。
+check('第十一轮：不再有 hover 关闭去抖常量',
+  /const HOVER_CLOSE_DELAY_MS/.test(INDEX), false);
+check('第十一轮：onHover(false) 同步立即隐藏、无去抖代号',
+  /this\.showHover = false;/.test(HOVER_FN) &&
+  /\+\+this\.hoverSeq/.test(HOVER_FN) === false, true);
+check('第十一轮：不再有 hoverCloseTimer 延迟计时器',
+  /clearTimeout\(this\.hoverCloseTimer\)/.test(INDEX), false);
+check('第十一轮：hover 回来不做计时器复位（无 cancelCloseTimer）',
+  /cancelCloseTimer/.test(HOVER_FN) === false &&
+  /if \(this\.showHover\) \{[\s\S]{0,120}return;/.test(HOVER_FN), true);
 check('onMouse(Move) 不再无条件自动打开（原自激闪烁源）',
   /MouseAction\.Move && !this\.showHover/.test(INDEX), false);
 check('hover 回调不触碰选中态 / 列表 / 目录',
   /this\.onTap\(|applyItems\(|openFolder\(|this\.cur =/.test(HOVER_FN), false);
-check('aboutToDisappear 清理 hover 计时器',
-  /aboutToDisappear\(\): void \{[\s\S]{0,400}cancelCloseTimer/.test(INDEX), true);
-check('点击行时作废 hover 计时器',
-  /\.onClick\(\(\) => \{[\s\S]{0,300}this\.hoverSeq\+\+/.test(INDEX), true);
+check('第十一轮：aboutToDisappear 同步立即收起浮层、无计时器',
+  /aboutToDisappear\(\): void \{[\s\S]{0,300}this\.showHover = false;/.test(INDEX) &&
+  /aboutToDisappear\(\): void \{[\s\S]{0,300}cancelCloseTimer/.test(INDEX) === false, true);
+check('第十一轮：点击行时立即收起浮层、无去抖代号',
+  /\.onClick\(\(\) => \{[\s\S]{0,220}this\.showHover = false;/.test(INDEX) &&
+  /\.onClick\(\(\) => \{[\s\S]{0,220}this\.hoverSeq\+\+/.test(INDEX) === false, true);
 check('hover 缩略图浮层只放相片、不显示档案名（2026-11-11）',
   /Image\(this\.hoverPx!\)/.test(HOVER_THUMB_FN) &&
   !/Text\(this\.name\)/.test(HOVER_THUMB_FN), true);
@@ -300,13 +310,14 @@ check('enableArrow:false 减少弹出位置抖动', /enableArrow: false/.test(PO
 check('onHover 回调里标记 hoverSupported', /HoverGuard\.shared\(\)\.noteHover\(\)/.test(INDEX), true);
 check('onMouse 兜底受 hoverSupported 门控',
   /if \(!HoverGuard\.shared\(\)\.hoverSupported\)/.test(INDEX), true);
-check('onMouse 在浮层展开时只续命、不打开',
-  /if \(this\.showHover\) \{[\s\S]{0,220}this\.cancelCloseTimer\(\);/.test(INDEX), true);
+check('第十一轮：onMouse 在浮层展开时直接返回、不打开（无计时器可续命）',
+  /if \(this\.showHover\) \{[\s\S]{0,160}return;/.test(INDEX) &&
+  /this\.cancelCloseTimer\(\)/.test(INDEX) === false, true);
 check('打开浮层前 take 同步收起上一行',
   /HoverGuard\.shared\(\)\.take\(key, \(\) => this\.forceHide\(\)\)/.test(HOVER_FN), true);
 check('forceHide 同步收起、不走延迟',
   /private forceHide\(\)[\s\S]{0,220}this\.showHover = false;/.test(INDEX), true);
-check('延迟关闭时释放持有者', /HoverGuard\.shared\(\)\.release\(key\)/.test(HOVER_FN), true);
+check('第十一轮：同步立即隐藏时释放持有者', /HoverGuard\.shared\(\)\.release\(key\)/.test(HOVER_FN), true);
 check('aboutToDisappear 释放持有者',
   /HoverGuard\.shared\(\)\.release\(this\.rowKey\(\)\)/.test(INDEX), true);
 check('点击行时释放持有者',
@@ -2303,6 +2314,82 @@ check('死路径记忆是小 key（不写大快照）',
   /const POS_KEY_DEAD: string = 'deadDirUri';/.test(INDEX) &&
   /store\.putSync\(POS_KEY_DEAD, tag\);/.test(INDEX) &&
   /flushSnap/.test(GIVEUP_ALL) === false, true);
+
+console.log('--- 第十一轮：版本号归位 / 第二栏悬停显隐 / hover 零延迟零动画 / ESC 退出 ---');
+const TOPBAR_FN = INDEX.slice(INDEX.indexOf('  topBar() {'),
+  INDEX.indexOf('  build() {', INDEX.indexOf('  topBar() {')));
+const ROOTMOUSE_FN = INDEX.slice(INDEX.indexOf('private onRootMouse('),
+  INDEX.indexOf('private armTopbarTimer('));
+const QUIT_FN = INDEX.slice(INDEX.indexOf('private async quitApp('),
+  INDEX.indexOf('private setFull('));
+const ESC_FN = INDEX.slice(INDEX.indexOf('case KeyCode.KEYCODE_ESCAPE:'),
+  INDEX.indexOf('default:', INDEX.indexOf('case KeyCode.KEYCODE_ESCAPE:')));
+// 检查「代码里没有某 API」时必须去掉注释行：本轮注释里写了「无 setTimeout / duration:0」
+// 这类说明文字，直接对含注释的切片做正则会误命中。
+const stripComments = (s) => s.split('\n').filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
+const TOPBAR_CODE = stripComments(TOPBAR_FN);
+const POPUP_CODE = stripComments(POPUP);
+const ESC_CODE = stripComments(ESC_FN);
+
+// ① 版本号显示在最顶部标题栏，第二栏不再重复
+check('① 版本号在最顶部标题栏（topBar 的 PIKAN + APP_VERSION）',
+  /Text\('PIKAN ' \+ APP_VERSION\)/.test(TOPBAR_FN) &&
+  /\+\ APP_VERSION\)/.test(TOPBAR_FN), true);
+check('① 第二栏（左栏抬头）不再重复显示版本号',
+  /Text\('v' \+ APP_VERSION/.test(INDEX) === false, true);
+check('① 全源码里版本号只在最顶部标题栏的 Text 出现一次',
+  (INDEX.match(/Text\([^\n]*APP_VERSION/g) || []).length, 1);
+check('① 左栏抬头改为只显示档案张数',
+  /Text\(this\.itemCount > 0 \? this\.itemCount \+ ' 张' : ''\)/.test(INDEX), true);
+
+// ② 第二栏（全屏 / 幻灯片按钮组）默认隐藏、悬停顶部立即显隐
+check('② 新增 @State topToolsVisible 默认 false（默认隐藏）',
+  /@State topToolsVisible: boolean = false;/.test(INDEX), true);
+check('② 工具组用 Visibility.Hidden 占位隐藏（隐藏时布局零位移）',
+  /\.visibility\(this\.topToolsVisible \? Visibility\.Visible : Visibility\.Hidden\)/.test(TOPBAR_FN) &&
+  /Visibility\.None/.test(TOPBAR_FN) === false, true);
+check('② onHover 事件触发时直接置位、立即显示 / 离开立即隐藏',
+  /\.onHover\(\(isHover: boolean\) => \{\s*this\.topToolsVisible = isHover;/.test(TOPBAR_FN), true);
+check('② 显隐链无动画 / 无过渡 / 无延迟（无 animateTo、opacity、setTimeout、duration）',
+  /animateTo|setTimeout|\.opacity\(|duration:/.test(TOPBAR_CODE) === false, true);
+check('② 根容器按 y 坐标兜底驱动显隐（部分 2in1 只派发 Move）',
+  /!this\.fullscreen && event\.action === MouseAction\.Move/.test(ROOTMOUSE_FN) &&
+  /yTop >= 0 && yTop <= TOPBAR_H/.test(ROOTMOUSE_FN) &&
+  /this\.topToolsVisible = inTop;/.test(ROOTMOUSE_FN), true);
+check('② 显示时保持该栏原有样式与按钮功能（全屏 / 幻灯片原样）',
+  /this\.toolBtn\('全屏', 'full', false\)/.test(TOPBAR_FN) &&
+  /\.onClick\(\(\) => this\.doAction\('play'\)\)/.test(TOPBAR_FN) &&
+  /Row\(\) \{[\s\S]{0,700}this\.toolBtn\('全屏'/.test(TOPBAR_FN), true);
+
+// ③ hover 小图预览：事件触发立即显示、移出立即隐藏、无动画无延迟
+check('③ bindPopup 用 TransitionEffect.IDENTITY 关掉默认淡入淡出',
+  /transition: TransitionEffect\.IDENTITY/.test(POPUP), true);
+check('③ popup 选项里无 opacity / duration / animateTo 动效（代码行）',
+  /\.opacity\(|duration:|animateTo/.test(POPUP_CODE) === false, true);
+check('③ 源码全局已无 hover 延迟机制（常量 / 计时器 / 代号 / 复位方法）',
+  /HOVER_CLOSE_DELAY_MS|hoverCloseTimer|hoverSeq|cancelCloseTimer/.test(INDEX) === false, true);
+check('③ onHover(false) 同步立即隐藏且释放持有者',
+  /if \(!on\) \{[\s\S]{0,400}this\.showHover = false;[\s\S]{0,160}HoverGuard\.shared\(\)\.release\(key\);/.test(HOVER_FN) &&
+  /setTimeout/.test(HOVER_FN) === false, true);
+check('③ hover 缩略图 builder 内无淡入淡出 / 过渡动画',
+  /\.opacity\(|\.transition\(|animateTo/.test(HOVER_THUMB_FN) === false, true);
+
+// ④ ESC：仅非全屏退出 APP，全屏保持原全屏交互
+check('④ ESC 全屏态仍走 toggleFull()、非全屏态才 quitApp()',
+  /case KeyCode\.KEYCODE_ESCAPE:[\s\S]{0,320}if \(this\.fullscreen\) \{[\s\S]{0,320}this\.toggleFull\(\);[\s\S]{0,80}\} else \{[\s\S]{0,80}this\.quitApp\(\);/.test(ESC_FN), true);
+check('④ quitApp 内确实是 terminateSelf 退出应用',
+  /ability\.terminateSelf\(\)/.test(QUIT_FN), true);
+check('④ 全屏分支里绝不调用 quitApp（不与全屏还原冲突）',
+  /if \(this\.fullscreen\) \{[^}]*quitApp/.test(ESC_CODE) === false &&
+  /\} else \{\s*this\.quitApp\(\);/.test(ESC_CODE), true);
+
+// 回归护栏：本轮四条改动不得破坏既有交互 / 版本
+check('第十一轮回归护栏：版本未升 / 往上层恒亮 / 不禁用 / 不弹 picker / 全量预载',
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX) &&
+  /chooseFolderAt/.test(INDEX) === false &&
+  /const PRELOAD_ALL: boolean = true;/.test(INDEX), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
