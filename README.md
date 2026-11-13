@@ -525,6 +525,88 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第九轮：3 秒内未进入上次目录就停止恢复并直接打开选择文件夹（2026-11-13）
+
+### 用户诉求
+
+> 尝试了 3 秒未能进入上次的目录就停止尝试，直接弹出选择文件夹。
+
+### 背景：启动恢复链原来没有总超时
+
+重开后的恢复链是：
+
+```
+aboutToAppear → readLastPos（读小 key）
+  → scheduleShowLast        +900ms
+  → beginRestore → activatePermission（超时兜底 1500ms）
+  → showLastOnStart → 读快照 → probeRestoreUris → setItems → 全量预载
+```
+
+`activatePermission` 有 1500ms 兜底，`readLastPos` / 读快照的 `preferences.get` 与
+`probeRestoreUris` 的 `fs.openSync` 却可能在上次目录位于 NAS / 网络卷时长时间挂住；
+即便全部走完，也可能只落到 **ro1 只读名单态**（名单在、图打不开）或**单张兜底**
+（只出一张图，没有进入目录）。此前这几种情况都只能等用户自己发现并去点「选择文件夹」。
+
+### 方案：一个 3 秒看门狗，与恢复链竞速
+
+新增 `common/RestoreTimeout.ts`（纯函数，零 SDK 依赖，Node 可直接回归）：
+
+| 函数 | 作用 |
+|---|---|
+| `enterTimeoutSafe(budget, min, max)` | 预算合法性校验（有限数 + 落在 `[1000, 10000]`），误配成 300ms 或 20s 一律不挂看门狗 |
+| `enterWatchdogWanted(auto, hasMemory, done, userActed)` | **首次启动（无上次记忆）绝不挂**，用户已抢先操作也不挂 |
+| `enterSettledOk(probeOk, itemCount, cancelled)` | 「真正进入上次目录」= 非 ro1 只读态 + 列表有图 + 恢复未作废 |
+| `enterTimeoutAction(elapsed, budget, settled, entered, userActed, pickerBusy, folderBusy)` | 到期裁决：成功进入 / 用户已操作 / picker 正忙 / 未到预算 → 继续等；否则 `ENTER_ABORT` |
+| `enterTimeoutHint(budget)` | 「上次目录 3 秒内未能打开 · 已停止恢复 · 请重新选择文件夹」 |
+
+`Index.ets` 侧（`RESTORE_ENTER_TIMEOUT_MS = 3000`，诊断标记 **et1**）：
+
+- `scheduleShowLast()` 记 `restoreStartedAt`，与 `RESUME_DELAY_MS=900` 的恢复定时器
+  **一起**排一个 3000ms 看门狗；只有 `hasRestoreMemory` 为真（读过上次位置 / okUri /
+  持久目录 URI）才挂。
+- 整批快照恢复成功且非只读态 → `markRestoreEntered()` 撤掉看门狗，正常用户完全无感。
+- **单张兜底和 ro1 只读名单态不算「进入目录」**：只置 `restoreSettled`，不撤看门狗，
+  到期照样收口 —— 这正是「未能进入上次的目录」的两种主要表现。
+- 到期且没人抢先 → `abortRestoreForPicker()`：
+
+  1. `restoreCancelled = true` 作废在飞的恢复链；`showLastOnStart()` 入口与每个 `await`
+     之后、`restoreFromSnapshot(startupGuard=true)` 的每个 `await` 之后都检查它并立刻
+     返回，**绝不继续 probe / setItems / 启动预载**；
+  2. 清掉 `resumeTimer` / `persistTimer` / 看门狗，`resumeDone = true` 防止恢复链再被调度，
+     `persistSettled = true` 挡住 activate 竞速收口；
+  3. `allSeq++` 作废可能已经拉起的全量预载链，后台不再继续读旧目录；
+  4. 写 et1 诊断串与超时文案，**直接调用 `chooseFolder()` 打开 FOLDER picker**。
+
+- `chooseFolder()` 主动入口与 `aboutToDisappear()` 都会清看门狗：用户 1 秒时自己点了
+  「选择文件夹」，3 秒时绝不会再弹第二次。
+
+### 判据速查
+
+| 3 秒时的状态 | 动作 |
+|---|---|
+| 整批恢复成功、非 ro1、列表有图 | 看门狗早已撤销，不干预 |
+| ro1 只读名单态 / 单张兜底 / 快照读不出 | 停止尝试 → 打开选择文件夹 |
+| activatePermission 或读快照仍挂着 | 停止尝试 → 打开选择文件夹 |
+| 用户已选目录 / picker 正忙 / 目录载入中 | 不抢视图、不弹第二次 |
+| 首次启动（无任何上次记忆） | 根本不挂看门狗 |
+
+### 护栏（旧契约一条未动）
+
+`showLastOnStart()` 函数体内仍**不含**任何选择器 / 权限申请 / 全量重扫调用（超时弹 picker
+在恢复链之外）；「往上层」仍恒可点、不弹系统选择器、在 APP 内出清单；
+ro1 防冻结闸门、`bulkIoAllowed()`、`AUTO_RESUME_ON_START=false`、按钮永不禁用、
+层级重建恰好 2 处、全量预载链与滚轮零解码、版本 `1.0.7 / 7` 全部不变。
+
+### 验证与约束
+
+`node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 877 passed, 0 failed**
+（813 → 877，新增 64 条）；`git diff --check` 干净；11 个源码文件括号计数与 HEAD 增量全 0；
+`node --check tests/dirname.test.mjs` 通过。**未编译 HAP、未放桌面、未跑 `build.sh`、
+未升版本、未 push** —— 编译与实机验证仍由 DevEco Studio 侧完成。
+
+若实机觉得 3 秒偏短（本地大盘、大快照），把 `RESTORE_ENTER_TIMEOUT_MS` 调到 4000~5000
+即可，纯函数预算区间允许到 10000；调大只会让「失败后弹 picker」晚一点，不影响成功路径。
+
 ## 第八轮：原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复（2026-11-12）
 
 ### 用户诉求（两项，一次落地）

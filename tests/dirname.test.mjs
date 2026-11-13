@@ -18,7 +18,8 @@
  * 以及第五轮「resize 实机仍不生效 → @Builder 参数 / 累积阈值 / 节流 / 根容器兜底」，
  * 以及第六轮「重启后档案日期不丢失 / 窗口大小与位置恢复 / 界面状态一致」，
  * 以及第七轮「最大化状态重启保持 / 解码数据缓存复用 / 移圆点 / 去缓存张数 / 取消左键放大」、
- * 第八轮「原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复」。
+ * 第八轮「原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复」、
+ * 第九轮「3 秒内未进入上次目录就停止恢复并直接打开选择文件夹」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -46,6 +47,9 @@ import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../entry/src/main/ets/common/DecodeCache.ts';
 import { rawFitOf, rawSingleAllowed, rawReadComplete,
   rawCacheTargetOf, rawPrefetchWanted } from '../entry/src/main/ets/common/RawCache.ts';
+import { ENTER_WAIT, ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
+  enterTimeoutSafe, enterWatchdogWanted, enterSettledOk,
+  enterTimeoutAction, enterTimeoutHint } from '../entry/src/main/ets/common/RestoreTimeout.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -897,8 +901,12 @@ check('activate 有超时竞速 + 只跑一次的收口',
 check('收口后照常进入原恢复链',
   /this\.showLastOnStart\(\);/.test(PERSIST_FNS) &&
   /this\.beginRestore\(\);/.test(INDEX) && /}, RESUME_DELAY_MS\);/.test(INDEX), true);
-check('aboutToDisappear 清掉 activate 超时定时器',
-  (INDEX.match(/clearTimeout\(this\.persistTimer\)/g) || []).length, 2);
+check('finishPersistActivate / aboutToDisappear / et1 超时收口都清 activate 定时器',
+  (INDEX.match(/clearTimeout\(this\.persistTimer\)/g) || []).length, 3);
+const DISAPPEAR_FN = INDEX.slice(INDEX.indexOf('aboutToDisappear(): void {'),
+  INDEX.indexOf('/** 拿到 preferences 实例'));
+check('aboutToDisappear 内确实清 activate 定时器',
+  /clearTimeout\(this\.persistTimer\)/.test(DISAPPEAR_FN), true);
 check('目录 URI 有独立 key，读 / 立即写 / 异步写 / 同步写四处都在',
   /const POS_KEY_DIR: string = 'lastDirUri';/.test(INDEX) &&
   (INDEX.match(/POS_KEY_DIR/g) || []).length >= 5, true);
@@ -1972,6 +1980,155 @@ check('回归护栏：ro1 闸门 / 版本 / 按钮 / 最高画质 / 滚轮 / 全
   /this\.onWheel\(v < 0 \? -1 : 1\);/.test(INDEX) &&
   /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
   /this\.allActive <= 0/.test(INDEX), true);
+
+// ===========================================================================
+// 第九轮（2026-11-12）：启动恢复 3 秒预算 —— 未进入上次目录就停止尝试并打开选择文件夹
+// ===========================================================================
+console.log('--- 第九轮 ①：RestoreTimeout 纯函数（预算 / 看门狗 / 收口决策）---');
+check('动作常量：0 继续等 / 1 停止并打开选择文件夹',
+  ENTER_WAIT === 0 && ENTER_ABORT === 1, true);
+check('预算合法区间 1000..10000ms',
+  ENTER_TIMEOUT_MIN_MS === 1000 && ENTER_TIMEOUT_MAX_MS === 10000, true);
+check('预算 3000 合法', enterTimeoutSafe(3000, 1000, 10000), true);
+check('预算恰好等于下限合法', enterTimeoutSafe(3000, 3000, 10000), true);
+check('预算恰好等于上限合法', enterTimeoutSafe(3000, 1000, 3000), true);
+check('预算低于下限拒绝（不误伤正常恢复）', enterTimeoutSafe(300, 1000, 10000), false);
+check('预算高于上限拒绝（不把卡死拖回启动）', enterTimeoutSafe(20000, 1000, 10000), false);
+check('预算 NaN 拒绝', enterTimeoutSafe(NaN, 1000, 10000), false);
+check('预算 Infinity 拒绝', enterTimeoutSafe(Infinity, 1000, 10000), false);
+check('预算上下限倒置拒绝', enterTimeoutSafe(3000, 10000, 1000), false);
+check('有记忆 + 自动恢复 → 挂看门狗', enterWatchdogWanted(true, true, false, false), true);
+check('首次启动无记忆 → 绝不挂（不被动弹选择器）',
+  enterWatchdogWanted(true, false, false, false), false);
+check('恢复已完成 → 不挂', enterWatchdogWanted(true, true, true, false), false);
+check('用户已抢先 → 不挂', enterWatchdogWanted(true, true, false, true), false);
+check('自动恢复关 → 不挂', enterWatchdogWanted(false, true, false, false), false);
+check('非只读 + 217 张 → 算进入上次目录', enterSettledOk(true, 217, false), true);
+check('非只读 + 1 张 → 算进入（整批恢复）', enterSettledOk(true, 1, false), true);
+check('空列表 → 不算进入', enterSettledOk(true, 0, false), false);
+check('ro1 只读名单态 → 不算进入', enterSettledOk(false, 217, false), false);
+check('恢复已作废 → 不算进入', enterSettledOk(true, 217, true), false);
+check('张数 NaN → 不算进入', enterSettledOk(true, NaN, false), false);
+const EA = (el, bud, s, e, u, p, f) => enterTimeoutAction(el, bud, s, e, u, p, f);
+check('已成功进入 → 看门狗不干预',
+  EA(3000, 3000, true, true, false, false, false), ENTER_WAIT);
+check('到期但只落只读 / 单张兜底 → 停止并弹 picker',
+  EA(3000, 3000, true, false, false, false, false), ENTER_ABORT);
+check('到期且恢复链还挂着 → 停止并弹 picker',
+  EA(3000, 3000, false, false, false, false, false), ENTER_ABORT);
+check('未到预算 → 继续等', EA(2999, 3000, false, false, false, false, false), ENTER_WAIT);
+check('用户已操作 → 不抢视图', EA(3000, 3000, false, false, true, false, false), ENTER_WAIT);
+check('picker 正忙 → 不弹第二次', EA(3000, 3000, false, false, false, true, false), ENTER_WAIT);
+check('目录载入中 → 不抢视图', EA(3000, 3000, false, false, false, false, true), ENTER_WAIT);
+check('elapsed NaN → 不误弹', EA(NaN, 3000, false, false, false, false, false), ENTER_WAIT);
+check('budget NaN → 不误弹', EA(3000, NaN, false, false, false, false, false), ENTER_WAIT);
+check('远超预算（系统服务挂死）仍收口',
+  EA(9800, 3000, false, false, false, false, false), ENTER_ABORT);
+check('超时文案点明 3 秒 / 已停止恢复 / 重新选择文件夹',
+  enterTimeoutHint(3000).includes('3 秒') &&
+  enterTimeoutHint(3000).includes('已停止恢复') &&
+  enterTimeoutHint(3000).includes('重新选择文件夹'), true);
+check('超时文案对 NaN 预算有兜底', enterTimeoutHint(NaN).includes('3 秒'), true);
+
+console.log('--- 第九轮 ②：源码静态契约（3 秒看门狗接线 / 超时弹 picker）---');
+const ENTER_SRC = readFileSync(new URL('../entry/src/main/ets/common/RestoreTimeout.ts', import.meta.url), 'utf8');
+check('RestoreTimeout.ts 是纯函数模块（不 import 鸿蒙 SDK）', /@ohos\./.test(ENTER_SRC), false);
+check('RestoreTimeout.ts 不用 Number.isFinite（ArkTS 兼容）', /Number\.isFinite/.test(ENTER_SRC), false);
+check('Index 引入 RestoreTimeout 纯函数',
+  /from '\.\.\/common\/RestoreTimeout'/.test(INDEX), true);
+check('总预算恒为 3000ms、诊断标记 et1',
+  /const RESTORE_ENTER_TIMEOUT_MS: number = 3000;/.test(INDEX) &&
+  /const ENTER_TAG: string = 'et1';/.test(INDEX), true);
+check('看门狗在 scheduleShowLast 内与恢复链一起排程',
+  /this\.restoreStartedAt = Date\.now\(\);/.test(INDEX) &&
+  /this\.enterWatchdogTimer = setTimeout\(/.test(INDEX) &&
+  /this\.onEnterWatchdog\(\);/.test(INDEX) &&
+  /}, RESTORE_ENTER_TIMEOUT_MS\);/.test(INDEX) &&
+  /}, RESUME_DELAY_MS\);/.test(INDEX), true);
+check('排程前做预算校验 + 有记忆才挂',
+  /enterTimeoutSafe\(RESTORE_ENTER_TIMEOUT_MS, ENTER_TIMEOUT_MIN_MS,\s*\n\s*ENTER_TIMEOUT_MAX_MS\)/.test(INDEX) &&
+  /enterWatchdogWanted\(AUTO_SHOW_LAST_ON_START, this\.hasRestoreMemory,/.test(INDEX), true);
+check('首次启动无记忆绝不弹选择文件夹',
+  /this\.hasRestoreMemory = idx >= 0 \|\| uri\.length > 0 \|\| ok\.length > 0 \|\|/.test(INDEX), true);
+check('四个看门狗方法都在，且不在 showLastOnStart 函数体内',
+  /private clearEnterWatchdog\(\): void \{/.test(INDEX) &&
+  /private markRestoreEntered\(\): void \{/.test(INDEX) &&
+  /private onEnterWatchdog\(\): void \{/.test(INDEX) &&
+  /private abortRestoreForPicker\(elapsed: number\): void \{/.test(INDEX) &&
+  /clearEnterWatchdog\(\)/.test(RESUME_FN) === false, true);
+const WD_FNS = INDEX.slice(INDEX.indexOf('private clearEnterWatchdog(): void {'),
+  INDEX.indexOf('/** 首帧之后真正执行恢复'));
+const ABORT_FN = INDEX.slice(INDEX.indexOf('private abortRestoreForPicker('),
+  INDEX.indexOf('/** 首帧之后真正执行恢复'));
+check('看门狗区不含全量重扫 / 权限申请',
+  /loadAllGallery|queryAllPhotos|ensureGalleryPermission/.test(WD_FNS), false);
+check('到期由纯函数裁决，非 ABORT 一律不干预',
+  /const act: number = enterTimeoutAction\(/.test(WD_FNS) &&
+  /if \(act !== ENTER_ABORT\) \{/.test(WD_FNS), true);
+check('超时收口直接打开选择文件夹', /this\.chooseFolder\(\);/.test(ABORT_FN), true);
+check('超时收口不绕回恢复链',
+  /this\.showLastOnStart\(\)/.test(ABORT_FN) === false &&
+  /this\.beginRestore\(\)/.test(ABORT_FN) === false, true);
+check('超时收口作废在飞恢复链并挡住 activate 收口',
+  /this\.restoreCancelled = true;/.test(ABORT_FN) &&
+  /this\.resumeDone = true;/.test(ABORT_FN) &&
+  /this\.persistSettled = true;/.test(ABORT_FN), true);
+check('超时收口清掉两个定时器 + 看门狗',
+  /clearTimeout\(this\.resumeTimer\)/.test(ABORT_FN) &&
+  /clearTimeout\(this\.persistTimer\)/.test(ABORT_FN) &&
+  /this\.clearEnterWatchdog\(\);/.test(ABORT_FN), true);
+check('超时状态栏文案由纯函数生成并带 et1 诊断',
+  /this\.status = enterTimeoutHint\(RESTORE_ENTER_TIMEOUT_MS\);/.test(ABORT_FN) &&
+  /'restore TIMEOUT \| ' \+ ENTER_TAG/.test(ABORT_FN), true);
+check('超时收口作废在飞的全量预载链（后台不再读旧目录）',
+  /this\.allSeq\+\+;/.test(ABORT_FN) &&
+  /this\.allBusy = false;/.test(ABORT_FN) &&
+  /this\.allActive = 0;/.test(ABORT_FN), true);
+check('成功进入上次目录立即撤掉看门狗',
+  /private markRestoreEntered\(\): void \{[\s\S]{0,320}this\.restoreEntered = true;[\s\S]{0,320}this\.clearEnterWatchdog\(\);/.test(WD_FNS), true);
+check('只有整批恢复成功才判「进入目录」，单张兜底不撤看门狗',
+  (RESUME_FN.match(/markRestoreEntered\(\)/g) || []).length === 1 &&
+  /enterSettledOk\(this\.restoreMode !== RESTORE_READONLY &&/.test(RESUME_FN) &&
+  /单张兜底只是临时画面，没有进入上次的目录/.test(RESUME_FN), true);
+check('恢复链入口 / await 之后都检查作废标志',
+  (INDEX.match(/this\.restoreCancelled/g) || []).length >= 9 &&
+  /if \(this\.resumeDone \|\| this\.restoreCancelled\) \{/.test(RESUME_FN) &&
+  /if \(this\.restoreCancelled\) \{\s*\n\s*return;/.test(RESUME_FN) &&
+  /private beginRestore\(\): void \{\s*\n\s*if \(this\.restoreCancelled\) \{/.test(INDEX), true);
+check('restoreFromSnapshot 有 startupGuard，用户主动路径不传',
+  /private async restoreFromSnapshot\(startupGuard: boolean = false\): Promise<boolean> \{/.test(INDEX) &&
+  /this\.restoreFromSnapshot\(true\)/.test(RESUME_FN) &&
+  /this\.restoreFromSnapshot\(\);/.test(INDEX), true);
+check('快照恢复链至少 5 处作废检查，且 setItems 前必查',
+  (INDEX.match(/startupGuard && this\.restoreCancelled/g) || []).length >= 5 &&
+  /if \(startupGuard && this\.restoreCancelled\) \{\s*\n\s*return false;\s*\n\s*\}\s*\n\s*this\.pendingRestoreReadonly/.test(INDEX), true);
+check('作废标志不污染正常载入 / APP 内上层清单',
+  /restoreCancelled/.test(APPLY_FN) === false &&
+  /chooseFolder\(|DocumentViewPicker|dv\.select/.test(UPLIST_FN) === false, true);
+check('chooseFolder 主动入口清看门狗（不弹第二次）',
+  /private chooseFolder\(\): void \{\s*\n\s*this\.clearEnterWatchdog\(\);/.test(INDEX), true);
+check('页面销毁清看门狗',
+  /this\.clearEnterWatchdog\(\); \/\/ 页面已销毁，超时也不该再弹选择文件夹/.test(INDEX), true);
+
+console.log('--- 第九轮 ③：回归护栏（旧契约一条不动）---');
+check('showLastOnStart 仍不含选择器 / 权限 / 全量重扫',
+  /loadAllGallery|queryAllPhotos|ensureGalleryPermission|DocumentViewPicker|PhotoViewPicker/.test(RESUME_FN), false);
+check('往上层仍不弹系统选择器',
+  /chooseFolder\(|DocumentViewPicker|dv\.select/.test(UP_FN) === false, true);
+check('chooseFolderAt 整个方法仍不存在', /chooseFolderAt/.test(INDEX) === false, true);
+check('ro1 闸门 / 版本 / 按钮 / 启动重扫护栏 / 无同步等待都未动',
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX) &&
+  /new Promise|Promise\.race/.test(INDEX) === false, true);
+check('层级重建仍恰好 2 处、全量链与滚轮零解码未动',
+  (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 2 &&
+  /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
+  /this\.schedulePreload\(\);/.test(APPLY_FN) &&
+  /this\.onWheel\(v < 0 \? -1 : 1\);/.test(INDEX), true);
+check('3 秒预算合法且覆盖 1500ms 激活超时',
+  enterTimeoutSafe(3000, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS) && 3000 > 1500, true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

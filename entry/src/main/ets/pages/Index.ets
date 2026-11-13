@@ -80,6 +80,9 @@ import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../common/DecodeCache';
 import { RawFit, rawFitOf, rawSingleAllowed, rawReadComplete,
   rawCacheTargetOf, rawPrefetchWanted } from '../common/RawCache';
+import { ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
+  enterTimeoutSafe, enterWatchdogWanted, enterSettledOk,
+  enterTimeoutAction, enterTimeoutHint } from '../common/RestoreTimeout';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -117,6 +120,12 @@ const UP_LIST_TAG: string = 'ul1';
 const PERSIST_ACTIVATE_MS: number = 1500;
 /** 上面这个超时的硬上限：防止以后有人把它调成几十秒，变相把恢复拖回启动关键路径。 */
 const PERSIST_TIMEOUT_MAX_MS: number = 3000;
+/** 「启动恢复进入上次目录」的总预算（ms）。从排程恢复那一刻起算：
+ *  activatePermission(1500ms) + 读快照 + 探测 uri + 建列表都要在预算内完成并真正出图，
+ *  否则（NAS 不可达 / 授权失效 / 系统服务挂住）不再继续尝试，直接打开选择文件夹。 */
+const RESTORE_ENTER_TIMEOUT_MS: number = 3000;
+/** 上述预算的诊断标记：状态栏/诊断串出现 et1 即表示装的是带超时收口的新包。 */
+const ENTER_TAG: string = 'et1';
 /** 一次 persist / activate 最多带几个 policy。**恒为 1**：只授权 picker 返回的原始
  *  目录 URI，绝不把快照里几百条拼出来的子文件 uri 塞进去（批量跨进程调用 = 冻结源）。 */
 const PERSIST_POLICY_LIMIT: number = 1;
@@ -1725,6 +1734,13 @@ struct Index {
   /** 启动恢复：只跑一次，且用户已经自己选了东西就立刻让路。 */
   private resumeDone: boolean = false;
   private resumeTimer: number = -1;
+  /** 启动恢复「3 秒内进入上次目录」的看门狗（见 RestoreTimeout.ts）。 */
+  private enterWatchdogTimer: number = -1;
+  private restoreStartedAt: number = 0;      // 计时起点：排程恢复的那一刻
+  private hasRestoreMemory: boolean = false; // 有上次会话记忆才挂看门狗，首次启动绝不弹
+  private restoreCancelled: boolean = false; // 超时作废：在飞的恢复链回来后不许再改视图
+  private restoreSettled: boolean = false;   // 恢复链是否已收口（成功或失败）
+  private restoreEntered: boolean = false;   // 是否真正「进入上次的目录」
   /** 恢复模式（见 ResumePlan）：默认 RESTORE_FULL（正常使用），
    *  只有启动恢复探测到「快照 uri 一个都打不开」才降为 RESTORE_READONLY。
    *  只读态只列名单，禁止一切批量同步磁盘 IO，保证主线程空闲、按钮与列表可操作。 */
@@ -1875,6 +1891,7 @@ struct Index {
       clearTimeout(this.resumeTimer); // 别让恢复在页面已经销毁后还去改视图
       this.resumeTimer = -1;
     }
+    this.clearEnterWatchdog(); // 页面已销毁，超时也不该再弹选择文件夹
     if (this.persistTimer !== -1) {
       clearTimeout(this.persistTimer); // activate 超时兜底也别在页面销毁后触发恢复
       this.persistTimer = -1;
@@ -1939,6 +1956,9 @@ struct Index {
       // 必须在 scheduleShowLast() / 可能的提前 return 之前读到：恢复前要先激活它。
       this.savedDirUri = typeof rawDir === 'string' ? rawDir : '';
       this.okUri = ok;
+      // 有「上次会话」记忆才给恢复链挂 3 秒看门狗；首次启动没有任何记忆，绝不弹选择器。
+      this.hasRestoreMemory = idx >= 0 || uri.length > 0 || ok.length > 0 ||
+        this.savedDirUri.length > 0;
       // 2026-11-12 第六轮：会话界面状态（窗口大小位置 / 左栏收起态）。
       // 都是小 key，和上面 4 个一起在首帧之后异步读，绝不碰大快照、绝不重扫。
       const rawRect = await p.get(WIN_KEY_RECT, '');
@@ -2104,6 +2124,9 @@ struct Index {
    *     调用栈上做跨进程调用。activatePermission 是异步的，本方法**不 await** 它，
    *     而是用 PERSIST_ACTIVATE_MS 超时兜底：哪怕系统服务挂住，恢复链也照样往下走。 */
   private beginRestore(): void {
+    if (this.restoreCancelled) {
+      return; // 3 秒看门狗已作废这次尝试，别再启动激活 / 恢复
+    }
     const act: number = persistAction(this.savedDirUri.length > 0,
       AUTO_SHOW_LAST_ON_START, this.userActed, this.resumeDone);
     if (act === PERSIST_SKIP || !persistTimeoutSafe(PERSIST_ACTIVATE_MS, PERSIST_TIMEOUT_MAX_MS)) {
@@ -2403,6 +2426,18 @@ struct Index {
         RESUME_DELAY_MS, WARM_DELAY_MS, RESUME_MIN_SAFE_MS);
       return;
     }
+    this.restoreStartedAt = Date.now();
+    // 3 秒总预算看门狗：与恢复链一起排程，谁先收口谁生效。
+    // 只有「有上次会话记忆」才挂；首次启动绝不被动弹选择文件夹。
+    if (enterTimeoutSafe(RESTORE_ENTER_TIMEOUT_MS, ENTER_TIMEOUT_MIN_MS,
+        ENTER_TIMEOUT_MAX_MS) &&
+        enterWatchdogWanted(AUTO_SHOW_LAST_ON_START, this.hasRestoreMemory,
+          this.resumeDone, this.userActed)) {
+      this.enterWatchdogTimer = setTimeout(() => {
+        this.enterWatchdogTimer = -1;
+        this.onEnterWatchdog();
+      }, RESTORE_ENTER_TIMEOUT_MS);
+    }
     this.resumeTimer = setTimeout(() => {
       this.resumeTimer = -1;
       // 先（有超时兜底地）激活持久授权，再进入原来的恢复链；
@@ -2411,15 +2446,86 @@ struct Index {
     }, RESUME_DELAY_MS);
   }
 
+  // ------------------------------------------------------------------
+  // 启动恢复「3 秒内进入上次目录」看门狗（et1，见 RestoreTimeout.ts）
+  // ------------------------------------------------------------------
+
+  /** 清掉看门狗计时器：成功进入目录 / 用户自己动手 / 页面销毁都要调。 */
+  private clearEnterWatchdog(): void {
+    if (this.enterWatchdogTimer !== -1) {
+      clearTimeout(this.enterWatchdogTimer);
+      this.enterWatchdogTimer = -1;
+    }
+  }
+
+  /** 恢复链真正进入上次的目录：记成功并撤掉看门狗，不再打扰用户。
+   *  ⚠️ 只有整批恢复成功才调；单张兜底 / ro1 只读名单态都不算进入目录。 */
+  private markRestoreEntered(): void {
+    this.restoreEntered = true;
+    this.restoreSettled = true;
+    this.clearEnterWatchdog();
+    hilog.info(DOMAIN, TAG, 'restore: entered last dir in %{public}d ms (et1)',
+      Date.now() - this.restoreStartedAt);
+  }
+
+  /** 看门狗到期：由 RestoreTimeout 纯函数裁决，
+   *  只有「到期仍未进入且没人抢先」才停止尝试并打开选择文件夹。 */
+  private onEnterWatchdog(): void {
+    const elapsed: number = this.restoreStartedAt > 0
+      ? Date.now() - this.restoreStartedAt : RESTORE_ENTER_TIMEOUT_MS;
+    const act: number = enterTimeoutAction(elapsed, RESTORE_ENTER_TIMEOUT_MS,
+      this.restoreSettled, this.restoreEntered, this.userActed,
+      this.pickerBusy, this.folderBusy);
+    if (act !== ENTER_ABORT) {
+      return;
+    }
+    this.abortRestoreForPicker(elapsed);
+  }
+
+  /** 停止尝试，直接打开选择文件夹。
+   *  「停止」包含四件事：作废在飞的恢复链、清掉两个还在排的定时器、
+   *  挡住 activate 竞速收口、把 resumeDone 置真防止恢复链再被调度。
+   *  ⚠️ 不碰 ro1 只读闸门、不碰已有缓存：用户选完目录后 openFolder → applyItems
+   *    会自然换源重建，这里只把控制权交还给「选择文件夹」。 */
+  private abortRestoreForPicker(elapsed: number): void {
+    this.restoreCancelled = true;
+    this.restoreEntered = false;
+    this.restoreSettled = true;
+    this.resumeDone = true;
+    this.persistSettled = true;
+    if (this.resumeTimer !== -1) {
+      clearTimeout(this.resumeTimer);
+      this.resumeTimer = -1;
+    }
+    if (this.persistTimer !== -1) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = -1;
+    }
+    this.clearEnterWatchdog();
+    // 作废启动恢复可能已经拉起的全量预载链：自增代号后 pumpAll / onAllDecoded 的
+    // 旧批次回调全部失效，后台不再继续读这个（多半已不可达的）目录。
+    this.allSeq++;
+    this.allBusy = false;
+    this.allActive = 0;
+    this.status = enterTimeoutHint(RESTORE_ENTER_TIMEOUT_MS);
+    this.diagLine = 'restore TIMEOUT | ' + ENTER_TAG + ' | ' + elapsed +
+      'ms | v' + APP_VERSION;
+    hilog.warn(DOMAIN, TAG,
+      'restore: enter timeout %{public}d ms, stop and open folder picker', elapsed);
+    this.chooseFolder();
+  }
+
   /** 首帧之后真正执行恢复。只读「1 个小 key（snapCount）+ 分块 uri 快照」，
    *  绝不重扫图库、绝不弹权限框、绝不弹选择器 —— 无交互、无 ANR。
+   *  ⚠️ 唯一的例外在恢复链之外：et1 看门狗 3 秒到期仍未进入上次目录时，
+   *    由 abortRestoreForPicker() 停止本次尝试并打开选择文件夹；本函数体不碰选择器。
    *
    *  两条路径最终都会经过 applyItems() → showPreviewOf()，所以
    *  「当前路径 / 目录展示 / 往上层按钮状态」与正常载入完全一致：
    *  恢复出来的是**图片列表态**（browseBase=''），此时 canGoUp=false，但按钮仍亮着可点，
    *  点了由 browseUp() 给「请用选择文件夹进入目录浏览」提示（2026-11-11：不再 grey out）。 */
   private async showLastOnStart(): Promise<void> {
-    if (this.resumeDone) {
+    if (this.resumeDone || this.restoreCancelled) {
       return;
     }
     this.resumeDone = true; // 只跑一次：无论成功、失败还是用户已抢先操作
@@ -2439,6 +2545,9 @@ struct Index {
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'resume: read snapCount failed: %{public}s', JSON.stringify(e));
     }
+    if (this.restoreCancelled) {
+      return; // 看门狗已收口：读小 key 期间超时，别再往下建列表
+    }
     const act: number = resumeAction(userActed, false, AUTO_SHOW_LAST_ON_START,
       snapCount, savedUri, this.okUri, true);
     if (act === RESUME_SKIP) {
@@ -2447,8 +2556,18 @@ struct Index {
       return;
     }
     if (act === RESUME_SNAPSHOT) {
-      const ok: boolean = await this.restoreFromSnapshot(); // setItems → applyItems → restoreIndex
+      const ok: boolean = await this.restoreFromSnapshot(true); // setItems → applyItems → restoreIndex
+      if (this.restoreCancelled) {
+        return; // 看门狗已作废这次尝试；绝不再碰状态栏 / 视图
+      }
       if (ok) {
+        // 只有真正「进入上次的目录」（非只读名单态、列表有图）才撤掉看门狗；
+        // 只读名单态留给 3 秒收口，直接打开选择文件夹让用户重新授权。
+        if (enterSettledOk(this.restoreMode !== RESTORE_READONLY &&
+            this.restoreHintText.length === 0, this.items.length, this.restoreCancelled)) {
+          this.markRestoreEntered();
+        }
+        this.restoreSettled = true;
         // 只读名单态（授权失效）时不说「已恢复图片」：名单在、图打不开，给明确指引。
         this.status = this.restoreHintText.length > 0
           ? this.restoreHintText
@@ -2476,6 +2595,9 @@ struct Index {
       const metaStore: preferences.Preferences | undefined = await this.posStore();
       const oneMeta: ArchiveMeta = metaStore !== undefined
         ? await this.readMetaForUri(metaStore, single) : { size: -1, mtime: 0 };
+      if (this.restoreCancelled) {
+        return; // 看门狗已收口：单张兜底也不许再建列表 / 启动预载
+      }
       this.setItems([single], src, [oneMeta]);
       // 回填目录层级：单张兜底同样要让「往上层」能用，不能只给名单就锁死层级。
       this.restoreBrowseContext();
@@ -2499,6 +2621,9 @@ struct Index {
           '」· ' + RESUME_TAG + '（用「选择文件夹」可重新打开整批图片）' +
           (this.browseBase.length > 0
             ? ' · ' + restoreUpHint(baseName(this.browseBase), UP_CTX_TAG) : '');
+      // 单张兜底只是临时画面，没有进入上次的目录 —— 不撤看门狗，
+      // 让 3 秒收口直接打开选择文件夹，用户可重新打开整批图片。
+      this.restoreSettled = true;
       hilog.info(DOMAIN, TAG, 'resume: single shown, snapshot preserved, ro=%{public}d',
         this.restoreHintText.length > 0 ? 1 : 0);
     }
@@ -2772,15 +2897,25 @@ struct Index {
 
   /** 用上次会话的 uri 快照重建列表（顺序与上次一致，随后 restoreIndex 会精确落到上次那张）。
    *  返回 false 表示没有可用快照。不要求当前列表为空 —— 「回到上次」也复用它。 */
-  private async restoreFromSnapshot(): Promise<boolean> {
+  private async restoreFromSnapshot(startupGuard: boolean = false): Promise<boolean> {
+    // startupGuard 只由启动恢复链传入：看门狗超时作废后，每个 await 回来都要立刻停手，
+    // 绝不能继续 probe / setItems / 启动预载去抢用户正在开的「选择文件夹」。
+    // 「回到上次」等用户主动路径不传，行为完全不变。
+    // 逐点内联判断而不用局部闭包：ArkTS 对方法内 lambda 捕获 this 的支持各版本不一。
     try {
       const store: preferences.Preferences | undefined = await this.posStore();
-      if (store === undefined) {
+      if (store === undefined || (startupGuard && this.restoreCancelled)) {
         return false;
       }
       const uris: Array<string> = await this.readSnapUris(store);
+      if (startupGuard && this.restoreCancelled) {
+        return false;
+      }
       // 2026-11-12：连同体积 / 日期一起还原（只读几个小 key，不新增 IO 闸门外的磁盘访问）。
       const metas: Array<ArchiveMeta> = await this.readSnapMeta(store, uris.length);
+      if (startupGuard && this.restoreCancelled) {
+        return false;
+      }
       hilog.info(DOMAIN, TAG, 'snapshot: %{public}d uris / %{public}d meta', uris.length, metas.length);
       if (uris.length === 0) {
         return false;
@@ -2790,8 +2925,14 @@ struct Index {
       // ⚠️ 恢复前只探最多 3 张：重启后逐 URI 授权通常整体失效。
       //    证实可读才走完整恢复（预载 / 补体积 / 解码照常）；证伪则落只读名单态，
       //    绝不把几百次同步跨进程 IO 打到主线程上（那正是「名单在、界面全卡住」的根因）。
+      if (startupGuard && this.restoreCancelled) {
+        return false;
+      }
       const readable: boolean = this.probeRestoreUris(uris, this.okUri,
         p !== undefined ? p.uri : '');
+      if (startupGuard && this.restoreCancelled) {
+        return false;
+      }
       this.pendingRestoreReadonly = !readable;
       this.pendingRestoreCount = uris.length;
       this.pendingRestoreSrc = src;
@@ -4938,6 +5079,7 @@ struct Index {
   }
 
   private chooseFolder(): void {
+    this.clearEnterWatchdog(); // 用户已接手（含超时自动打开），恢复看门狗不再需要
     this.userActed = true; // 用户一动手，启动恢复就不该再抢视图
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
