@@ -12,6 +12,7 @@
  *  2026-11-11 第四轮：用户要「全量缓存到内存、载入时同时预解码、加快滚轮跳转」。
  *  于是新增「全量顺序 / 受控并发批次 / 链是否重置」三件纯计算，供 Index.ets 的
  *  全量预载链使用；旧窗口链（前后各 100）保留为 PRELOAD_ALL=false 的回退路径。
+ *  2026-11-13 第十二轮：新增「按当前 items 长度夹界」的批次挑选，修换源竞态崩溃。
  */
 
 /** 全量预解码的遍历顺序（**绝对下标**，环绕，先近后远、前后交替，不含当前张）。
@@ -69,6 +70,28 @@ export function preloadBatchOf(order: number[], from: number, conc: number,
   while (i < order.length && picks.length < n) {
     if (!done.has(order[i])) {
       picks.push(order[i]);
+    }
+    i++;
+  }
+  return { picks: picks, nextFrom: i };
+}
+
+/** 换源竞态护栏：与 preloadBatchOf 相同，但按当前 items 长度夹掉越界的绝对下标。
+ *
+ *  全量预载的 order 是「建链那一刻」按旧 items 长度生成的绝对下标。若期间
+ *  applyItems 换了数据源（新目录张数变少 / 顺序重排），旧批次回调仍可能带着
+ *  旧 seq 活到这一刻；此时 order[i] 落在新 items 之外，`this.items[idx].uri`
+ *  读到 undefined 会直接抛 TypeError 崩掉整个 APP（2026-11-13 实机 crash）。
+ *  越界下标只跳过、不计入 picks，nextFrom 照常推进 —— 不卡住也不死循环。 */
+export function preloadBatchBoundedOf(order: number[], from: number, conc: number,
+  done: Set<number>, total: number): PreloadBatch {
+  const picks: number[] = [];
+  let i: number = from < 0 ? 0 : from;
+  const n: number = conc > 0 ? conc : 1;
+  while (i < order.length && picks.length < n) {
+    const idx: number = order[i];
+    if (idx >= 0 && idx < total && !done.has(idx)) {
+      picks.push(idx);
     }
     i++;
   }

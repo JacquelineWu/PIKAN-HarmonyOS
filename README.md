@@ -525,6 +525,79 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第十二轮：切换 NAS 目录时 `pumpAll` 换源竞态崩溃修复（2026-11-13）
+
+### 崩溃现场（实机日志 20:00:17.781，HUAWEI MateBook Pro S / 1.0.7 / arm64-v8a）
+
+```
+Reason: TypeError
+Error message: Cannot read property uri of undefined
+at pumpAll  (Index.ets:4894:41)
+at anonymous (Index.ets:4939:14)   ← onAllDecoded 的 setTimeout 下一批回调
+```
+
+HiLog 时间线还原：
+
+| 时间 | 事件 |
+|---|---|
+| 20:00:10.017 | `all preload: budget reached, cached 63` —— 旧目录全量预载链跑满预算 |
+| 20:00:11.682 | picker 选中新 NAS 目录 `…/2026/编号202617 模特 娇娇`，`openFolder` 起 3 个候选 |
+| 20:00:11.745 | `listFile OK [2] … → 64 entries` |
+| 20:00:11.755 | `applyItems: 63 items, cur=45 keepView=0` —— **`this.items` 被整批替换** |
+| 20:00:15.016 | `openFolder done: 63 imgs, 65 rows` |
+| 20:00:17.781 | 旧批次回调带旧 `allOrder` 回来，旧绝对下标落在新数组之外 → **崩溃** |
+
+日志里满屏的 `FeatureManager get config failed, key:multiModalInputOptions ret:1`、
+`Vsync: recv vsync timeout`、`GetRSUIDirector: screenId is invalid` 都是 2in1 上与崩溃无关的
+平台噪声；`listFile FAIL [0]/[1] → 13900002` 是 NAS 候选路径的正常降级（第 3 个候选成功）。
+
+### 根因
+
+全量预载的 `allOrder` / `allDone` / `allFrom` 是**建链那一刻按旧 `items` 长度生成的绝对下标**。
+`onAllDecoded()` 用 `setTimeout` 排下一批 `pumpAll(seq)`，属于异步回调；`applyItems()` 换掉
+`this.items` 后，只要有一条路径没让旧 `seq` 失效或没重建 `allOrder`，回调就会拿旧下标访问
+新数组：`this.items[idx] === undefined`，再读 `.uri` 直接抛 TypeError 杀掉进程。
+
+原先唯一的作废点是 `clearPreviews()`，而它只在 `!keepView` 分支执行 ——
+**目录自动重扫（`preserveView=true`）刻意不清预览缓存，会整个绕过作废**；
+且 `startAllPreload()` 在 `allBusy` 为真时被 `shouldResetPreloadChain(PRELOAD_ALL, false)`
+短路，不会重建顺序。加上 `pumpAll` 对下标 / 元素零校验，一次竞态就是整个 APP 闪退。
+
+### 落地（只改纯函数模块 + 主页面，不动任何 UI 与交互）
+
+- **① 统一作废收口**：新增 `resetAllPreloadChain()`（`allSeq++` + 清
+  `allOrder / allFrom / allDone / allActive / allBusy / allComplete`），在 `applyItems()`
+  **替换 `this.items` 之前**调用，覆盖选新目录 / 进子目录 / 往上层 / 自动重扫 /
+  快照恢复 / 只读名单态全部路径；`clearPreviews()` 改为复用同一方法，不再散落 7 行状态。
+  ⚠️ 只动作废代号与顺序，**不 release 任何 `PixelMap`** —— `keepView` 重扫继续复用已解码缓存，
+  与既有「重扫不清缓存、不重解大图」语义完全一致。
+- **② 批次夹界纯函数**：`PreloadBudget.ts` 新增
+  `preloadBatchBoundedOf(order, from, conc, done, total)`，与 `preloadBatchOf` 同语义但跳过
+  `<0 || >= total` 的绝对下标，`nextFrom` 照常推进（不卡住、不死循环）。`pumpAll()` 改用它，
+  把当前 `n = this.items.length` 作为 `total` 传入。
+- **③ 元素级双保险**：`pumpAll()` 取 `.uri` 前先取 `ImageItem | undefined` 判空，
+  把 uri 转成显式可空局部 `string | undefined` 再验 `u.length > 0`
+  （直接写 `it.uri !== undefined` 会触发 ArkTS 严格模式的 TS2367「类型无重叠」）；
+  先筛出 `valid[]` 再按 **`valid.length`** 设置 `allActive`
+  （否则漏调 `preloadOne` 会让这批永远等不到收齐 → 链假死）；`valid` 为空直接收工。
+- **④ 回退链同源护栏**：`preloadNext()` 在 `items.length <= 0` 时早退，避免 `wrapIndex`
+  返回 NaN 后读 `undefined.uri`（同一类崩溃）。
+
+### 验证
+
+- `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 982 passed, 0 failed**
+  （968 → 982：6 条 `preloadBatchBoundedOf` 纯函数回归 + 7 条源码静态契约 +
+  1 条回归护栏；1 条旧断言「全量链用 preloadBatchOf」按新实现同步更新，未删）。
+- `git diff --check` 干净；源码括号计数与 HEAD 增量全 0；`node --check` 通过。
+- 版本仍 `1.0.7 / versionCode 7`。**未编译 HAP / 未放桌面 / 未跑 build.sh / 未升版本 / 未 push**。
+
+### DevEco 编译侧确认点
+
+本轮不新增任何 ArkUI / SDK API，只加纯 TS 函数与普通成员方法；`ImageItem | undefined`
+可空局部在 ArkTS 严格模式下合法。实机请复现一次「旧目录预载到预算触顶 → 立刻换到
+张数更少的 NAS 子目录 → 停留数秒」，确认不再闪退；若 DevEco 对
+`preloadBatchBoundedOf` 的导入签名报错，把报错原文给我改成本地实现。
+
 ## 第十一轮：版本号归位 / 顶部第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出（2026-11-13）
 
 ### 用户诉求（精确改动，其余布局 / 样式 / 按钮功能 / 交互 / 状态一律不变，不重构）

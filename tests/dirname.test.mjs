@@ -21,7 +21,8 @@
  * 第八轮「原始档案数据全量载入内存同时解码 / NAS 网络卷层级修复」、
  * 第九轮「3 秒内未进入上次目录就停止恢复并直接打开选择文件夹」、
  * 第十轮「遇到问题立即放弃：错误驱动 + 死路径记忆 + 恢复期零同步 IO」、
- * 第十一轮「版本号归位最顶部 / 第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出」。
+ * 第十一轮「版本号归位最顶部 / 第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出」、
+ * 第十二轮「切换 NAS 目录时 pumpAll 换源竞态崩溃（Cannot read property uri of undefined）」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -30,7 +31,8 @@ import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, 
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
-  shouldResetPreloadChain, fullCacheTargetOf } from '../entry/src/main/ets/common/PreloadBudget.ts';
+  shouldResetPreloadChain, fullCacheTargetOf,
+  preloadBatchBoundedOf } from '../entry/src/main/ets/common/PreloadBudget.ts';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC, FLUSH_SYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   upButtonEnabled, RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed,
@@ -1553,11 +1555,11 @@ check('③ PRELOAD_ALL 开关与全量/并发/让出常量',
   /const PRELOAD_ALL_YIELD_MS: number = 0;/.test(INDEX), true);
 check('③ schedulePreload 按 PRELOAD_ALL 分流，且守住 ro1 只读名单态闸门',
   /if \(!bulkIoAllowed\(this\.restoreMode\)\) \{[\s\S]{0,140}if \(PRELOAD_ALL\) \{\s*this\.startAllPreload\(\);\s*return;/.test(INDEX), true);
-check('③ 全量链用整库顺序 + 受控并发批次',
+check('③ 全量链用整库顺序 + 受控并发批次（第十二轮起按 items 长度夹界）',
   /private startAllPreload\(\): void \{/.test(INDEX) &&
   /this\.allOrder = fullPreloadIndex\(n, this\.cur\);/.test(INDEX) &&
   /const conc: number = preloadConcurrencyOf\(n, PRELOAD_CONCURRENCY\);/.test(INDEX) &&
-  /const batch: PreloadBatch = preloadBatchOf\(this\.allOrder, this\.allFrom, conc, this\.allDone\);/.test(INDEX), true);
+  /const batch: PreloadBatch = preloadBatchBoundedOf\(this\.allOrder, this\.allFrom, conc,\s*this\.allDone, n\);/.test(INDEX), true);
 check('③ 整批落地才让出主线程灌下一批（不同步堆叠 openSync）',
   /private pumpAll\(seq: number\): void \{/.test(INDEX) &&
   /private onAllDecoded\(/.test(INDEX) &&
@@ -2390,6 +2392,95 @@ check('第十一轮回归护栏：版本未升 / 往上层恒亮 / 不禁用 / �
   /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX) &&
   /chooseFolderAt/.test(INDEX) === false &&
   /const PRELOAD_ALL: boolean = true;/.test(INDEX), true);
+
+// ==================== 第十二轮：切换 NAS 目录时 pumpAll 换源竞态崩溃 ====================
+// 实机 crash log（2026-11-13 20:00:17，HUAWEI MateBook Pro S / 1.0.7）：
+//   TypeError: Cannot read property uri of undefined
+//   at pumpAll (Index.ets:4894:41)  ← onAllDecoded 的 setTimeout 回调 (4939:14)
+// 时间线：20:00:10 旧目录全量预载预算触顶（cached 63）→ 20:00:11.682 picker 选新 NAS
+// 目录 → 20:00:11.755 applyItems 换 items → 20:00:17.781 旧批次回调带旧 allOrder 回来，
+// 旧绝对下标落在新 items 之外，this.items[idx].uri 读到 undefined 直接崩。
+console.log('\n--- 第十二轮：pumpAll 换源竞态护栏（2026-11-13 crash log） ---');
+
+// ①~⑥：新增纯函数 preloadBatchBoundedOf 的行为回归
+check('① bounded 在合法 order 上与旧 preloadBatchOf 完全一致',
+  (() => {
+    const a = preloadBatchOf([1, 4, 2, 3, 0], 0, 2, new Set());
+    const b = preloadBatchBoundedOf([1, 4, 2, 3, 0], 0, 2, new Set(), 5);
+    return a.picks.join(',') === b.picks.join(',') && a.nextFrom === b.nextFrom;
+  })(), true);
+check('② 旧目录 200 张 / 新目录 63 张时绝不返回越界下标',
+  (() => {
+    const oldOrder = fullPreloadIndex(200, 45);
+    const b = preloadBatchBoundedOf(oldOrder, 0, 4, new Set(), 63);
+    return oldOrder.length === 199 && b.picks.length > 0 &&
+      b.picks.every(x => x >= 0 && x < 63);
+  })(), true);
+check('③ 旧 order 中段夹着越界下标时继续推进、仍能凑够合法 picks',
+  (() => {
+    const b = preloadBatchBoundedOf([100, 101, 7, 102, 8, 103, 9], 0, 3, new Set(), 10);
+    return b.picks.join(',') === '7,8,9' && b.nextFrom === 7;
+  })(), true);
+check('④ 全部越界时 picks 为空、nextFrom 走到尾（不死循环、不崩）',
+  (() => {
+    const b = preloadBatchBoundedOf([100, 101, 102], 0, 4, new Set(), 10);
+    return b.picks.length === 0 && b.nextFrom === 3;
+  })(), true);
+check('⑤ total <= 0 时一个下标都不返回（空 items 兜底）',
+  preloadBatchBoundedOf([0, 1, 2], 0, 2, new Set(), 0).picks.length, 0);
+check('⑥ 负下标 / from 越界 / done 仍保持旧语义',
+  (() => {
+    const a = preloadBatchBoundedOf([-1, 0, 1], 0, 2, new Set(), 2);
+    const b = preloadBatchBoundedOf([0, 1], 99, 2, new Set(), 2);
+    const c = preloadBatchBoundedOf([3, 0, 1], 0, 2, new Set([0]), 2);
+    return a.picks.join(',') === '0,1' && b.picks.length === 0 && c.picks.join(',') === '1';
+  })(), true);
+
+// ⑦~⑬：源码静态契约（切片后过滤注释，避免注释文字误伤正则）
+const PUMP12_FN = INDEX.slice(INDEX.indexOf('private pumpAll('),
+  INDEX.indexOf('/** 单张全量预载'));
+const CLEAR12_FN = INDEX.slice(INDEX.indexOf('private clearPreviews('),
+  INDEX.indexOf('/** 切到第 idx 张时调用'));
+const RESET12_FN = INDEX.slice(INDEX.indexOf('private resetAllPreloadChain('),
+  INDEX.indexOf('private clearPreviews('));
+const PUMP12_CODE = stripComments(PUMP12_FN);
+const CLEAR12_CODE = stripComments(CLEAR12_FN);
+const RESET12_CODE = stripComments(RESET12_FN);
+const APPLY12_CODE = stripComments(APPLY_FN);
+
+check('⑦ applyItems 在替换 items 之前先 resetAllPreloadChain（所有换源路径统一收口）',
+  /this\.resetAllPreloadChain\(\);\s*this\.items = list;/.test(APPLY12_CODE), true);
+check('⑧ reset 作废旧批次但绝不 release 已解码缓存（重扫继续复用）',
+  /this\.allSeq\+\+;[\s\S]{0,300}this\.allDone\.clear\(\);/.test(RESET12_CODE) &&
+  /\.release\(/.test(RESET12_CODE) === false, true);
+check('⑨ clearPreviews 改为复用同一作废收口，不再散落 7 行状态',
+  /this\.resetAllPreloadChain\(\);/.test(CLEAR12_CODE) &&
+  /this\.allSeq\+\+/.test(CLEAR12_CODE) === false, true);
+check('⑩ pumpAll 用 bounded 批次，且不再裸调未夹界的 preloadBatchOf',
+  /preloadBatchBoundedOf\(this\.allOrder, this\.allFrom, conc,\s*this\.allDone, n\)/.test(PUMP12_CODE) &&
+  /const batch: PreloadBatch = preloadBatchOf\(/.test(PUMP12_CODE) === false, true);
+check('⑪ 取 uri 前先判 ImageItem 与 uri，且 allActive 按合法数设置（不留假死链）',
+  /const it: ImageItem \| undefined = this\.items\[idx\];/.test(PUMP12_CODE) &&
+  /const u: string \| undefined = it !== undefined \? it\.uri : undefined;/.test(PUMP12_CODE) &&
+  /u !== undefined && u\.length > 0/.test(PUMP12_CODE) &&
+  /it\.uri !== undefined/.test(PUMP12_CODE) === false &&
+  /this\.allActive = valid\.length;/.test(PUMP12_CODE) &&
+  /for \(let i = 0; i < valid\.length; i\+\+\)/.test(PUMP12_CODE) &&
+  /const u: string = this\.items\[idx\]\.uri;/.test(PUMP12_CODE), true);
+check('⑫ valid 为空时收工，不留下永远等不到收齐的批次',
+  /if \(valid\.length === 0\) \{[\s\S]{0,180}this\.allBusy = false;[\s\S]{0,90}this\.allComplete = true;\s*return;/.test(PUMP12_CODE), true);
+check('⑬ 窗口回退链空列表早退（wrapIndex 不再产生 NaN 下标读 undefined.uri）',
+  /const n: number = this\.items\.length;\s*if \(n <= 0\) \{[\s\S]{0,160}this\.preloadBusy = false;\s*return;/.test(INDEX), true);
+
+// 回归护栏：修崩溃不得动既有交互 / 版本
+check('第十二轮回归护栏：版本未升 / 全量预载仍在 / 往上层恒亮 / 不禁用 / 不弹 picker / 重扫仍不清缓存',
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
+  /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX) &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  /chooseFolderAt/.test(INDEX) === false &&
+  /回上层/.test(INDEX) === false &&
+  /if \(!keepView\) \{\s*this\.clearPreviews\(\)/.test(APPLY_FN), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

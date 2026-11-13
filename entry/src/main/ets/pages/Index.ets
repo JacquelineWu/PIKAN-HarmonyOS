@@ -62,7 +62,8 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
-  shouldResetPreloadChain, fullCacheTargetOf } from '../common/PreloadBudget';
+  shouldResetPreloadChain, fullCacheTargetOf,
+  preloadBatchBoundedOf } from '../common/PreloadBudget';
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed, restoreProbeUris,
@@ -3312,6 +3313,12 @@ struct Index {
     const ioOk: boolean = bulkIoAllowed(this.restoreMode);
     const prevUri: string = (keepView && this.cur >= 0 && this.cur < this.items.length)
       ? this.items[this.cur].uri : '';
+    // 第十二轮：items 即将被替换，先作废全量预载链的旧批次（含 keepView 自动重扫路径）。
+    // allOrder 是建链时按旧 items 长度生成的绝对下标；onAllDecoded 排的下一批回调
+    // 还在事件队列里，等它回来再判就晚了 —— 旧下标读新数组会拿到 undefined，
+    // 取 .uri 直接抛 TypeError 崩掉 APP（2026-11-13 20:00:17 切换 NAS 目录时复现）。
+    // 只动作废代号与顺序，不 release 任何 PixelMap：目录重扫要继续复用已解码缓存。
+    this.resetAllPreloadChain();
     this.items = list;
     if (rows !== undefined) {
       this.rows = rows;
@@ -4391,6 +4398,24 @@ struct Index {
     return ((this.cur + k) % n + n) % n;
   }
 
+  /** 第十二轮：全量预载链唯一的「旧源作废」收口点。
+   *  allOrder / allDone / allFrom 都是建链那一刻按 this.items 长度生成的绝对下标；
+   *  只要 items 被替换（选新目录 / 进子目录 / 往上层 / 自动重扫 / 快照恢复 /
+   *  只读名单态），旧下标就可能落在新数组之外。onAllDecoded 的回调是异步的，
+   *  仅靠 clearPreviews() 作废不够 —— keepView 自动重扫刻意不清缓存，那条路径
+   *  会整个绕过它。故统一在 applyItems 最前面自增代号并清空顺序状态，
+   *  让所有在途旧批次立刻失效。
+   *  ⚠️ 只动作废代号与顺序，绝不 release PixelMap：目录重扫要继续复用已解码缓存。 */
+  private resetAllPreloadChain(): void {
+    this.allSeq++;
+    this.allBusy = false;
+    this.allComplete = false;
+    this.allOrder = [];
+    this.allFrom = 0;
+    this.allActive = 0;
+    this.allDone.clear();
+  }
+
   private clearPreviews(): void {
     this.clearBlur(); // 过渡层用的正是缓存里那张，必须先撤掉再 release，否则会花屏
     for (let i = 0; i < this.previews.length; i++) {
@@ -4416,13 +4441,8 @@ struct Index {
     this.rightPixelMap = undefined;
     this.releaseRightOwned(); // 自解码的右页不进缓存，单独释放
     // 全量预载链：换数据源必须作废旧批次（旧 uri 已失效），并允许新源重新铺满。
-    this.allSeq++;
-    this.allBusy = false;
-    this.allComplete = false;
-    this.allOrder = [];
-    this.allFrom = 0;
-    this.allActive = 0;
-    this.allDone.clear();
+    // 第十二轮起统一走 resetAllPreloadChain()，与 applyItems 的换源收口同源。
+    this.resetAllPreloadChain();
   }
 
   /** 切到第 idx 张时调用。
@@ -4873,7 +4893,9 @@ struct Index {
       return;
     }
     const conc: number = preloadConcurrencyOf(n, PRELOAD_CONCURRENCY);
-    const batch: PreloadBatch = preloadBatchOf(this.allOrder, this.allFrom, conc, this.allDone);
+    // 第十二轮：按当前 items 长度夹掉旧 order 里的越界下标（换源竞态第一道闸）。
+    const batch: PreloadBatch = preloadBatchBoundedOf(this.allOrder, this.allFrom, conc,
+      this.allDone, n);
     this.allFrom = batch.nextFrom;
     if (batch.picks.length === 0) {
       this.allBusy = false;
@@ -4882,15 +4904,33 @@ struct Index {
         this.previews.length, n);
       return;
     }
-    this.allActive = batch.picks.length;
+    // 第十二轮：第二道闸 —— 下标合法也可能已被换源掏空。先逐个验完再定 allActive，
+    // 否则漏调 preloadOne 会让这批永远等不到收齐，整条链假死。
+    const valid: number[] = [];
+    for (let i = 0; i < batch.picks.length; i++) {
+      const idx: number = batch.picks[i];
+      const it: ImageItem | undefined = this.items[idx];
+      // uri 声明为必填 string，直接写 it.uri !== undefined 在 ArkTS 严格模式下会
+      // 触发「类型无重叠」(TS2367)；先转成显式可空局部，类型与运行时防御都成立。
+      const u: string | undefined = it !== undefined ? it.uri : undefined;
+      if (u !== undefined && u.length > 0) {
+        valid.push(idx);
+      }
+    }
+    if (valid.length === 0) {
+      this.allBusy = false;
+      this.allComplete = true;
+      return;
+    }
+    this.allActive = valid.length;
     const edge: number = this.preloadEdge();
     // 第八轮：解码前先把这一批的原始档案数据读进内存（rawPrefetchWanted 仍守 ro1 闸门）。
     // 读与解走同一条受控并发链，保证「刚读进来的立刻被解」的局部性；另起一条预取链
     // 会先把预算占满，解码链反而要回网络重读，得不偿失。
     const wantRaw: boolean = rawPrefetchWanted(bulkIoAllowed(this.restoreMode),
       n, RAW_CACHE_MAX_COUNT);
-    for (let i = 0; i < batch.picks.length; i++) {
-      const idx: number = batch.picks[i];
+    for (let i = 0; i < valid.length; i++) {
+      const idx: number = valid[i];
       const u: string = this.items[idx].uri;
       this.preloadOne(seq, idx, u, edge, wantRaw);
     }
@@ -4948,6 +4988,10 @@ struct Index {
       return;
     }
     const n: number = this.items.length;
+    if (n <= 0) {
+      this.preloadBusy = false;
+      return; // 第十二轮：空列表时 wrapIndex 会返回 NaN，别让窗口链读 undefined.uri
+    }
     let target: string = '';
     // 窗口环绕：末尾的「前方」绕回开头，与 go() 的模运算一致（否则跨首尾要重解一批）
     const fwdSpan: number = Math.min(PRELOAD_FWD, n - 1);
