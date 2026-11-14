@@ -22,7 +22,8 @@
  * 第九轮「3 秒内未进入上次目录就停止恢复并直接打开选择文件夹」、
  * 第十轮「遇到问题立即放弃：错误驱动 + 死路径记忆 + 恢复期零同步 IO」、
  * 第十一轮「版本号归位最顶部 / 第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出」、
- * 第十二轮「切换 NAS 目录时 pumpAll 换源竞态崩溃（Cannot read property uri of undefined）」。
+ * 第十二轮「切换 NAS 目录时 pumpAll 换源竞态崩溃（Cannot read property uri of undefined）」、
+ * 第十三轮「点选零自动滚动 / 整栏贴顶唤出 / 预览图 3cm 3 倍放大镜」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -57,6 +58,11 @@ import { ENTER_WAIT, ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
 import { FF_WAIT, FF_GIVEUP, DEAD_TAG_MAX, deadTagOf, deadMemoryMatches,
   failFastAction, restoreIoHeld, probeTakeOf, elapsedSince,
   failFastHint } from '../entry/src/main/ets/common/FailFast.ts';
+import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
+  isListEdgeRow, tapScrollAction, stepScrollAction, scrollAllowed,
+  topBarPeekOf, cmToVp, loupeDiameterVp, loupeCircleOrigin,
+  loupeImageOffset, loupeClampedOffset, loupeInFrame,
+  loupeEligibleOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -2481,6 +2487,211 @@ check('第十二轮回归护栏：版本未升 / 全量预载仍在 / 往上层�
   /chooseFolderAt/.test(INDEX) === false &&
   /回上层/.test(INDEX) === false &&
   /if \(!keepView\) \{\s*this\.clearPreviews\(\)/.test(APPLY_FN), true);
+
+// ==================== 第十三轮：点选零滚动 / 整栏贴顶唤出 / 预览图放大镜 ====================
+console.log('--- 第十三轮 ①：InteractionPlan.ts 纯函数（点选滚动 / 贴顶滞回 / 放大镜几何） ---');
+const IP_SRC = readFileSync(new URL('../entry/src/main/ets/common/InteractionPlan.ts', import.meta.url), 'utf8');
+const IP_CODE = stripComments(IP_SRC);
+const NO_UI_SIDE_EFFECT = ['@ohos.', 'setTimeout', 'fileIo', 'new Promise', 'Atomics.wait'];
+check('① InteractionPlan.ts 是纯函数模块（不 import 鸿蒙 SDK / 无 IO / 无计时器）',
+  NO_UI_SIDE_EFFECT.some(s => IP_CODE.includes(s)) === false &&
+  IP_CODE.includes('Number.isFinite') === false, true);
+
+// ①-a 档案列表点选：一般点选零滚动，仅顶 / 底边界档案例外
+check('①-a 一般点选（非边界）一律零自动滚动',
+  tapScrollAction(5, 3, 9, 20) === SCROLL_NONE &&
+  tapScrollAction(5, 0, 19, 20) === SCROLL_NONE &&
+  scrollAllowed(tapScrollAction(5, 3, 9, 20)) === false, true);
+check('①-a 列表最顶端 / 最底端档案例外才允许上下移动',
+  tapScrollAction(0, 3, 9, 20) === SCROLL_UP &&
+  tapScrollAction(19, 3, 9, 20) === SCROLL_DOWN &&
+  scrollAllowed(tapScrollAction(0, 3, 9, 20)) === true, true);
+check('①-a 可见范围最顶 / 最底行也是边界例外（onScrollIndex 上报）',
+  tapScrollAction(3, 3, 9, 20) === SCROLL_UP &&
+  tapScrollAction(9, 3, 9, 20) === SCROLL_DOWN, true);
+check('①-a 可见范围未上报时只认绝对首 / 末，其余保守不滚',
+  tapScrollAction(7, -1, -1, 20) === SCROLL_NONE &&
+  tapScrollAction(0, -1, -1, 20) === SCROLL_UP &&
+  tapScrollAction(19, -1, -1, 20) === SCROLL_DOWN, true);
+check('①-a 空列表 / 负下标绝不滚动',
+  tapScrollAction(-1, 0, 0, 0) === SCROLL_NONE &&
+  tapScrollAction(0, 0, 0, 0) === SCROLL_NONE, true);
+check('①-a isListEdgeRow 真值来源（边界判定与动作判定一致）',
+  isListEdgeRow(0, 3, 9, 20) === true &&
+  isListEdgeRow(19, 3, 9, 20) === true &&
+  isListEdgeRow(3, 3, 9, 20) === true &&
+  isListEdgeRow(9, 3, 9, 20) === true &&
+  isListEdgeRow(5, 3, 9, 20) === false &&
+  isListEdgeRow(5, -1, -1, 20) === false, true);
+check('①-b 翻页：目标仍在可见范围内零滚动，跑出范围才跟随',
+  stepScrollAction(5, 3, 9) === SCROLL_NONE &&
+  stepScrollAction(2, 3, 9) === SCROLL_UP &&
+  stepScrollAction(10, 3, 9) === SCROLL_DOWN, true);
+check('①-b 可见范围未上报时翻页保守跟随（保持既有体验）',
+  stepScrollAction(5, -1, -1) === SCROLL_FOLLOW &&
+  scrollAllowed(SCROLL_FOLLOW) === true &&
+  scrollAllowed(SCROLL_NONE) === false, true);
+
+// ①-c 顶栏贴顶唤出：滞回稳定不闪烁
+check('①-c 默认隐藏：鼠标不在顶部触发区时不显示',
+  topBarPeekOf(false, 100, 10, 60, false) === false, true);
+check('①-c 鼠标压进顶部触发区 → 显示',
+  topBarPeekOf(false, 5, 10, 60, false) === true &&
+  topBarPeekOf(false, 10, 10, 60, false) === true, true);
+check('①-c 已显示且仍在顶栏 + 缓冲内 → 保持（滞回）',
+  topBarPeekOf(true, 40, 10, 60, false) === true &&
+  topBarPeekOf(true, 60, 10, 60, false) === true, true);
+check('①-c 鼠标离开该栏 / 触发区 → 隐藏',
+  topBarPeekOf(true, 61, 10, 60, false) === false &&
+  topBarPeekOf(false, 61, 10, 60, false) === false, true);
+check('①-c 滞回带内微抖不翻转（显示阈值窄 / 隐藏阈值宽）',
+  (() => {
+    let v = topBarPeekOf(false, 10, 10, 60, false);
+    const seq = [9, 11, 30, 59, 11, 60];
+    for (let i = 0; i < seq.length; i++) {
+      v = topBarPeekOf(v, seq[i], 10, 60, false);
+      if (!v) { return false; }
+    }
+    return v === true;
+  })(), true);
+check('①-c 全屏态恒隐藏', topBarPeekOf(true, 0, 10, 60, true) === false, true);
+check('①-c 脏坐标（NaN / 负）保持现状，绝不误翻转',
+  topBarPeekOf(true, NaN, 10, 60, false) === true &&
+  topBarPeekOf(false, -1, 10, 60, false) === false, true);
+
+// ①-d 放大镜几何
+check('①-d 3cm → 约 189vp（1vp = 1/160 inch，与屏幕 dpi 无关）',
+  Math.abs(cmToVp(3) - 480 / 2.54) < 1e-9 &&
+  loupeDiameterVp(3) === 189, true);
+check('①-d 圆心严格落在光标处（实时跟随）',
+  loupeCircleOrigin(100, 189) === 100 - 189 / 2 &&
+  loupeCircleOrigin(0, 189) === -94.5, true);
+check('①-d 理想偏移把光标处图像点对齐圆心（内容线性对应）',
+  loupeImageOffset(100, 189, 3) === 189 / 2 - 300 &&
+  loupeImageOffset(0, 189, 3) === 189 / 2, true);
+check('①-d 贴左 / 上边缘夹到 0，圆内不空白',
+  loupeClampedOffset(0, 800, 189, 3) === 0 &&
+  loupeClampedOffset(2, 800, 189, 3) === 0, true);
+check('①-d 贴右 / 下边缘夹到下界，圆内不空白',
+  (() => {
+    const off = loupeClampedOffset(800, 800, 189, 3);
+    return off === 189 - 2400 && off + 2400 >= 189;
+  })(), true);
+check('①-d 中段用理想偏移，不空白 / 不错位',
+  (() => {
+    const off = loupeClampedOffset(400, 800, 189, 3);
+    return off === loupeImageOffset(400, 189, 3) && off <= 0 && off >= 189 - 2400;
+  })(), true);
+check('①-d 放大图比圆还小时居中（极端尺寸也不空白）',
+  loupeClampedOffset(10, 50, 189, 3) === (189 - 150) / 2, true);
+check('①-d 光标在画框内 / 外判定（按坐标兜底显隐）',
+  loupeInFrame(10, 10, 800, 600) === true &&
+  loupeInFrame(-1, 10, 800, 600) === false &&
+  loupeInFrame(801, 10, 800, 600) === false &&
+  loupeInFrame(10, 10, 0, 600) === false, true);
+check('①-d 移出 / 无图立即隐藏（仅悬停且有图才显示）',
+  loupeEligibleOf(true, true) === true &&
+  loupeEligibleOf(false, true) === false &&
+  loupeEligibleOf(true, false) === false, true);
+
+console.log('--- 第十三轮 ②：Index.ets 源码静态契约（接线 / 收口 / 回归护栏） ---');
+const SELECT13_FN = INDEX.slice(INDEX.indexOf('private select('), INDEX.indexOf('private go('));
+const GO13_FN = INDEX.slice(INDEX.indexOf('private go('), INDEX.indexOf('private onWheel('));
+const TAP13_CODE = stripComments(INDEX.slice(INDEX.indexOf('private scrollOnTap('), INDEX.indexOf('private scrollOnStep(')));
+const STEP13_CODE = stripComments(INDEX.slice(INDEX.indexOf('private scrollOnStep('), INDEX.indexOf('private hasPreviewImage(')));
+const LOUPE13_CODE = stripComments(INDEX.slice(INDEX.indexOf('  loupeLayer('), INDEX.indexOf('  previewImage(')));
+const PREVIEW13_CODE = stripComments(INDEX.slice(INDEX.indexOf('  previewImage('), INDEX.indexOf('  rightPageImage(')));
+const PEEK13_CODE = stripComments(INDEX.slice(INDEX.indexOf('// 第十三轮：非全屏时的整栏'), INDEX.indexOf('// 真全屏下不画工具顶栏')));
+const ROOTMOUSE13_CODE = stripComments(ROOTMOUSE_FN);
+const NO_ANIM = ['animateTo', 'setTimeout', '.opacity(', 'duration:'];
+const NO_ANIM2 = ['animateTo', 'setTimeout', '.transition(', 'duration:'];
+
+check('②-a select() 两处裸 scrollToIndex 全部收口到 scrollOnTap',
+  SELECT13_FN.includes('this.scroller.scrollToIndex(') === false &&
+  SELECT13_FN.split('this.scrollOnTap(idx);').length - 1 === 2, true);
+check('②-a go() 两处裸 scrollToIndex 全部收口到 scrollOnStep',
+  GO13_FN.includes('this.scroller.scrollToIndex(') === false &&
+  GO13_FN.split('this.scrollOnStep(this.cur);').length - 1 === 2, true);
+check('②-a 点选判定走 tapScrollAction + scrollAllowed（一般点选零滚动）',
+  TAP13_CODE.includes('tapScrollAction(row, this.listFirstRow, this.listLastRow,') &&
+  TAP13_CODE.includes('this.rows.length)') &&
+  TAP13_CODE.includes('if (scrollAllowed(action))') &&
+  TAP13_CODE.includes('this.scroller.scrollToIndex(row, false);'), true);
+check('②-a 翻页判定走 stepScrollAction + SCROLL_NONE（可见范围内不滚）',
+  STEP13_CODE.includes('stepScrollAction(row, this.listFirstRow, this.listLastRow)') &&
+  STEP13_CODE.includes('action !== SCROLL_NONE'), true);
+check('②-a List 用 onScrollIndex 记录可见范围',
+  INDEX.includes('.onScrollIndex((first: number, last: number, center: number) => {') &&
+  INDEX.includes('this.listFirstRow = first;') &&
+  INDEX.includes('this.listLastRow = last;'), true);
+check('②-a applyItems 换源后重置可见范围（不拿旧范围误判）',
+  APPLY_FN.includes('this.listFirstRow = -1;') &&
+  APPLY_FN.includes('this.listLastRow = -1;'), true);
+check('②-a 全源码裸 scrollToIndex 只剩 3 处（换源定位 + 两个收口方法）',
+  INDEX.split('this.scroller.scrollToIndex(').length - 1, 3);
+
+check('②-b @State topBarPeek 默认 false（默认整栏不渲染）',
+  INDEX.includes('@State topBarPeek: boolean = false;'), true);
+check('②-b 主体 Column 里不再有常驻顶栏（不占布局空间）',
+  INDEX.includes('// ============================== 顶栏（非全屏时常驻）') === false &&
+  INDEX.includes('// 第十三轮：顶栏不再放进主体 Column') === true, true);
+check('②-b 浮层用条件渲染 + 绝对定位 + zIndex（显隐都不改主体尺寸）',
+  PEEK13_CODE.includes('if (this.topBarPeek && !this.fullscreen)') &&
+  PEEK13_CODE.includes('this.topBar();') &&
+  PEEK13_CODE.includes('.position({ x: 0, y: 0 })') &&
+  PEEK13_CODE.includes('.zIndex(10)'), true);
+check('②-b 显隐走 topBarPeekOf 滞回判定（稳定不闪烁）',
+  ROOTMOUSE13_CODE.includes('topBarPeekOf(this.topBarPeek, yTop,') &&
+  ROOTMOUSE13_CODE.includes('TOPBAR_PEEK_TRIGGER_VP, TOPBAR_PEEK_KEEP_VP, this.fullscreen)'), true);
+check('②-b 滞回带常量：显示阈值 10 < 隐藏阈值 TOPBAR_H + TOPBAR_KEEP_PX',
+  INDEX.includes('const TOPBAR_PEEK_TRIGGER_VP: number = 10;') &&
+  INDEX.includes('const TOPBAR_PEEK_KEEP_VP: number = TOPBAR_H + TOPBAR_KEEP_PX;'), true);
+check('②-b 显隐链零动画 / 零延迟（无计时器 / 无过渡）',
+  NO_ANIM.some(s => PEEK13_CODE.includes(s)) === false &&
+  NO_ANIM.some(s => ROOTMOUSE13_CODE.includes(s)) === false, true);
+
+check('②-c 3cm / 3 倍常量与 cmToVp 换算接线',
+  INDEX.includes('const LOUPE_CM: number = 3;') &&
+  INDEX.includes('const LOUPE_ZOOM: number = 3;') &&
+  INDEX.includes('const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);'), true);
+check('②-c 圆形裁剪：borderRadius(d/2) + clip(true)',
+  LOUPE13_CODE.includes('.borderRadius(LOUPE_D_VP / 2)') &&
+  LOUPE13_CODE.includes('.clip(true)'), true);
+check('②-c 圆心跟随光标 + 边缘夹界偏移（圆内不空白）',
+  LOUPE13_CODE.includes('.position({ x: this.loupeLeft(), y: this.loupeTop() })') &&
+  INDEX.includes('loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM)') &&
+  INDEX.includes('loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM)') &&
+  INDEX.includes('return loupeCircleOrigin(this.loupeX, LOUPE_D_VP);'), true);
+check('②-c 圆内放大图 3 个源都 objectFit(Contain) + High（对应且不变形）',
+  LOUPE13_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 3 &&
+  LOUPE13_CODE.split('.interpolation(ImageInterpolation.High)').length - 1 === 3, true);
+check('②-c 放大镜只挂在 previewImage（onHover / onMouse / loupeLayer）',
+  PREVIEW13_CODE.includes('this.loupeLayer(uri, half);') &&
+  PREVIEW13_CODE.includes('.onHover((on: boolean) => {') &&
+  PREVIEW13_CODE.includes('.onMouse((event: MouseEvent) => this.onLoupeMouse(event, half))') &&
+  PREVIEW13_CODE.includes('rightPageImage') === false, true);
+check('②-c 移出立即隐藏（零动画 / 零延迟 / 无计时器）',
+  PREVIEW13_CODE.includes('this.loupeHover = false;') &&
+  NO_ANIM2.some(s => PREVIEW13_CODE.includes(s)) === false, true);
+check('②-c 浮层 Transparent 命中模式（不吞鼠标、圆出现不闪烁）',
+  LOUPE13_CODE.includes('.hitTestBehavior(HitTestMode.Transparent)'), true);
+check('②-c 放大镜不破坏主画质三处 autoResize(false) 契约',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  LOUPE13_CODE.includes('.autoResize(false)') === false, true);
+
+// 回归护栏：三项新交互不得破坏既有行为 / 版本
+check('第十三轮回归护栏：版本未升 / 往上层恒亮 / 不禁用 / 不弹 picker / 全量预载 / 主画质三处 / 第十一轮 hover 与 ESC 未动',
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  CODE_LINES.includes('.enabled(') === false &&
+  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  INDEX.includes('chooseFolderAt') === false &&
+  INDEX.includes('回上层') === false &&
+  INDEX.includes('const PRELOAD_ALL: boolean = true;') &&
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  POPUP.includes('transition: TransitionEffect.IDENTITY') &&
+  QUIT_FN.includes('ability.terminateSelf()') &&
+  TOPBAR_FN.includes('.visibility(this.topToolsVisible ? Visibility.Visible : Visibility.Hidden)') &&
+  TOPBAR_FN.includes('Visibility.None') === false, true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

@@ -525,6 +525,110 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第十三轮：点选零自动滚动 / 顶部栏贴顶唤出 / 预览图 3cm 放大镜（2026-11-13）
+
+三项纯 UI / 交互调整：新增 `InteractionPlan.ts` 把判定从 ArkUI builder 里剥成可单测的纯函数，
+`Index.ets` 只负责接线；不改缓存、解码、目录层级、恢复、全屏、画质等既有链路。
+
+### ① 左侧档案列表：点选零自动滚动（仅顶 / 底边界档案例外）
+
+**诉求**：鼠标点选任一档案时，列表默认不自动上下滚动，保持当前滚动位置与可见范围；
+只有所选档案是列表最顶端 / 最底端档案时才允许列表上下移动；点选与切换档案不得在
+其他情况下改变滚动位置；选中状态与其余交互不变。
+
+**根因**：`select()`（两处，含只读名单态）与 `go()`（两处）都无条件调用
+`this.scroller.scrollToIndex(this.rowOfItem(...), false)`，任意一次点选都会把选中行
+重新对齐到列表顶部附近，正是「点一下列表就跳一下」的来源。
+
+**做法**：
+
+| 环节 | 改动 |
+|---|---|
+| 真值来源 | `InteractionPlan.ts` → `isListEdgeRow()` / `tapScrollAction()` / `scrollAllowed()` |
+| 可见范围 | `List.onScrollIndex(first, last, center)` 写入普通字段 `listFirstRow / listLastRow`（不进状态系统）；换源时 `applyItems()` 重置为 `-1` |
+| 点选收口 | 新增 `scrollOnTap(idx)`，`select()` 两处裸 `scrollToIndex` 全部替换；只有 `tapScrollAction` 返回非 `SCROLL_NONE` 才滚 |
+| 翻页收口 | 新增 `scrollOnStep(idx)`，`go()` 两处替换；`stepScrollAction` 只在目标跑出可见范围时跟随（`SCROLL_FOLLOW` 兜底未上报） |
+| 换源定位 | `applyItems()` 里那一次 `scrollToIndex` 保留 —— 它是「载入新目录后把恢复位置滚进视野」，不属于鼠标点选语义 |
+
+边界定义（两重，`isListEdgeRow`）：整列表绝对首行 `0` / 末行 `totalRows-1`，
+或 `onScrollIndex` 上报的可见范围最顶行 `firstRow` / 最底行 `lastRow`。
+可见范围尚未上报时只认绝对首 / 末，其余保守不滚 —— 绝不会因脏数据误滚。
+全源码裸 `scroller.scrollToIndex` 收敛为 3 处（换源定位 + 两个收口方法）。
+
+### ② PIKAN 1.0.7 顶部栏：完全隐藏 / 贴顶唤出 / 稳定不闪烁
+
+**诉求**：默认完全隐藏且**不占用布局空间**，让左侧文件列表与预览区最大化；
+仅鼠标移动到页面顶部触发区时显示；离开该栏或触发区后自动隐藏；切换稳定不闪烁；
+不影响文件列表、预览与其他界面功能。
+
+**与第十一轮的关系**：第十一轮只是把「全屏 / 幻灯片」第二栏工具组用
+`Visibility.Hidden` 占位隐藏；本轮把**整个顶栏**（含版本号与路径）升级为
+默认不渲染的浮层。第二栏工具组的 `Visibility.Hidden` 逻辑保留，顶栏浮出后照常可用。
+
+**做法**：
+
+| 环节 | 改动 |
+|---|---|
+| 不占布局 | `build()` 主体 `Column` 里的 `if (!this.fullscreen) { this.topBar(); }` 删除；改为根 `Stack` 末尾的条件渲染浮层 `if (this.topBarPeek && !this.fullscreen)` + `position({x:0,y:0})` + `zIndex(10)` |
+| 默认隐藏 | `@State topBarPeek: boolean = false` → 组件根本不存在，比 `Visibility.None` 更彻底（布局、测量、命中测试都不参与） |
+| 稳定显隐 | `onRootMouse()` 用 `topBarPeekOf(wasVisible, y, triggerEdge, keepEdge, fullscreen)` 滞回判定：贴顶 `TOPBAR_PEEK_TRIGGER_VP=10` 才显示；已显示时到 `TOPBAR_PEEK_KEEP_VP = TOPBAR_H + TOPBAR_KEEP_PX = 60` 都保持；越过 60 才隐藏 |
+| 不闪烁 | `triggerEdge < keepEdge` 形成滞回带（显示阈值窄、隐藏阈值宽），边界微抖不会反复翻转；坐标无效（NaN / 负）保持现状 |
+| 无副作用 | 浮层是绝对定位、显隐都不改主体 `Column` 尺寸 → 不触发 `onAreaChange` / resize 重解码；`chromeH` 由首帧 `onAreaChange` 自动重新测量，无需硬编码 |
+
+显隐链零动画 / 零延迟 / 无计时器：纯状态置位 + 条件渲染。
+
+### ③ 预览图：3cm 圆形 / 3 倍放大镜悬停交互
+
+**诉求**：鼠标移入图片时在光标处显示直径 `3cm` 的圆形放大镜并实时跟随；
+圆内显示以光标为中心、放大 `3 倍`的局部图像，与原图对应且不变形；
+移出立即隐藏；效果仅作用于该预览图片；图片边缘处也不空白、不错位。
+
+**几何（`InteractionPlan.ts`）**：ArkUI 的 `1vp = 1/160 inch`，故 `3cm = 3 × 160 / 2.54 ≈ 188.98vp`，
+`loupeDiameterVp(3) = 189vp`（与屏幕 dpi 无关）。
+
+| 函数 | 作用 |
+|---|---|
+| `cmToVp()` / `loupeDiameterVp()` | cm → vp 换算与整 vp 取整 |
+| `loupeCircleOrigin(cursor, d)` | 圆心严格落在光标 → 圆左上角 `cursor - d/2`，实现实时跟随 |
+| `loupeImageOffset(cursor, d, zoom)` | 理想偏移 `d/2 - zoom*cursor`：把光标处图像点对齐圆心 |
+| `loupeClampedOffset(cursor, size, d, zoom)` | 夹界到 `[d - size*zoom, 0]`，保证圆 `(0..d)` 始终被放大图覆盖 —— 贴左/上夹 `0`、贴右/下夹下界、放大图比圆小则居中 |
+| `loupeInFrame()` / `loupeEligibleOf()` | 画框内判定与「仅悬停 + 有图」显示判定 |
+
+**接线**：新增 `@Builder loupeLayer(uri, half)`，作为 `previewImage()` 内 `Stack` 的**最后一层**
+（z 序最高）。圆内放大图 = 主预览显示框整体等比放大 `LOUPE_ZOOM=3` 倍
+（`objectFit(ImageFit.Contain)` 与主图逐点对应、不变形，`ImageInterpolation.High`），
+按 `loupeClampedOffset` 定位；圆形由 `borderRadius(LOUPE_D_VP/2) + clip(true)` 裁出。
+
+| 约束 | 实现 |
+|---|---|
+| 仅作用于预览图片 | `onHover` / `onMouse` 只挂在 `previewImage()` 的 `Stack` 上；左栏、对开右页、信息 / 角标浮层一律不触发 |
+| 移入显示 / 移出立即隐藏 | `onHover(false)` 同步置 `loupeHover=false`；`onMouse(Move)` 用 `loupeInFrame` 按坐标兜底（部分 2in1 只派发 Move） |
+| 实时跟随 | 每次 Move 写 `@State loupeX/loupeY`，圆心、放大图偏移、放大图定位全部随之重算 |
+| 边缘不空白 / 不错位 | X / Y 两个方向分别 `loupeClampedOffset` 夹界；放大图比圆小则居中 |
+| 圆出现不闪烁 | `hitTestBehavior(HitTestMode.Transparent)` 让浮层不吞鼠标事件，避免圆一出现就触发 `onHover(false)` |
+| 不破坏主画质契约 | 放大镜是临时放大浮层，刻意不加 `autoResize(false)`；主视图 / 兜底 / 右页三处 `autoResize(false)` 计数保持 3 |
+
+### 验证（本地，未编译 HAP）
+
+```
+node --experimental-strip-types tests/dirname.test.mjs
+ALL PASS  1029 passed, 0 failed      # 982 既有 + 47 条第十三轮契约
+```
+
+- `InteractionPlan.ts` 是纯函数模块（不 import 鸿蒙 SDK / 无 IO / 无计时器 / 不用 `Number.isFinite`）。
+- 源码静态契约覆盖：`select()` / `go()` 收口、可见范围记录、顶栏浮层与滞回、
+  放大镜几何接线、零动画链路，以及版本未升 / 往上层恒亮 / 不禁用 / 不弹 picker /
+  全量预载 / 主画质三处 / 第十一轮 hover 与 ESC 的回归护栏。
+- 按长期约束：**未编译 HAP、未放桌面、未跑 `build.sh`、未升版本（仍 1.0.7）、未 push**；
+  DevEco Studio 编译、HAP 安装与实机验证由用户侧完成。
+
+### DevEco 侧建议确认点
+
+1. 左栏点中间任意档案，滚动条与可见行应保持不动；点第一张 / 最后一张（或可见范围首 / 末行）才允许列表移动。
+2. 非全屏启动后顶部应完全看不到顶栏，左栏与预览一直顶到窗口上沿；鼠标贴到窗口最顶端约 10vp 顶栏浮出，在顶栏内移动不闪，移出即隐。
+3. 鼠标在预览图上移动应出现约 189vp 的圆形放大镜并跟随；把光标推到图片四个边缘，圆内始终是对应局部的放大内容、无空白条带；移出图片立即消失。
+4. 全屏、resize、对开双页、hover 缩略图、ESC 退出等既有行为保持原样。
+
 ## 第十二轮：切换 NAS 目录时 `pumpAll` 换源竞态崩溃修复（2026-11-13）
 
 ### 崩溃现场（实机日志 20:00:17.781，HUAWEI MateBook Pro S / 1.0.7 / arm64-v8a）

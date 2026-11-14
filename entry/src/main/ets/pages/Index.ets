@@ -87,6 +87,9 @@ import { ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
 import { FF_GIVEUP, deadTagOf, deadMemoryMatches,
   failFastAction, restoreIoHeld, probeTakeOf, elapsedSince,
   failFastHint } from '../common/FailFast';
+import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
+  topBarPeekOf, loupeDiameterVp, loupeCircleOrigin, loupeClampedOffset,
+  loupeInFrame, loupeEligibleOf } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -165,6 +168,17 @@ const TOPBAR_EDGE_PX: number = 10;
 const TOPBAR_KEEP_PX: number = 8;
 const TOPBAR_H: number = 52;
 const TOPBAR_HIDE_MS: number = 2000;
+/** 第十三轮：非全屏时整栏「贴顶唤出」的滞回带（vp，MouseEvent.y 相对根 Stack）。
+ *  默认整栏不渲染（完全不占布局）；鼠标压进页面最顶 TRIGGER 内才浮出，
+ *  浮出后只要还在顶栏 + KEEP 缓冲内就保持，越过才收起 —— 显示阈值窄、隐藏阈值宽，
+ *  边界微抖不会反复翻转（不闪烁）。显隐都是纯条件渲染，不改主体尺寸、不触发 resize。 */
+const TOPBAR_PEEK_TRIGGER_VP: number = 10;
+const TOPBAR_PEEK_KEEP_VP: number = TOPBAR_H + TOPBAR_KEEP_PX;
+/** 第十三轮：预览图放大镜 —— 直径 3cm（1vp = 1/160 inch，故约 189vp）、局部放大 3 倍。
+ *  只作用于预览图片本身；移入显示、移出立即隐藏、边缘夹界不空白。 */
+const LOUPE_CM: number = 3;
+const LOUPE_ZOOM: number = 3;
+const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);
 /** 左栏宽度：展开 / 收起。
  *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 往上层 / 选择文件夹）等宽并排且不重叠；
  *  LIST_MAX_W 是上限，避免个别超长档案名把右侧预览区压没。
@@ -1612,6 +1626,18 @@ struct Index {
   /** 第十一轮：「全屏 / 幻灯片」按钮组（第二栏工具区）默认隐藏；
    *  仅鼠标悬停页面顶部区域时显示，离开立即恢复隐藏（无动画 / 无延迟 / 无计时器）。 */
   @State topToolsVisible: boolean = false;
+  /** 第十三轮：整栏「贴顶唤出」开关。默认 false → 整栏不渲染（完全不占布局空间）。
+   *  由 onRootMouse 走 topBarPeekOf 滞回判定置位；浮层显隐都不改主体尺寸。 */
+  @State topBarPeek: boolean = false;
+  /** 第十三轮：左栏可见范围（onScrollIndex 上报，-1 = 尚未上报）。
+   *  只作点选 / 翻页的滚动判据，不参与 UI 渲染，故不用 @State。 */
+  private listFirstRow: number = -1;
+  private listLastRow: number = -1;
+  /** 第十三轮：预览图放大镜状态。坐标是相对「预览图显示框」的局部坐标；
+   *  loupeHover=false 时浮层完全不渲染（移出立即隐藏、零动画）。 */
+  @State loupeHover: boolean = false;
+  @State loupeX: number = 0;
+  @State loupeY: number = 0;
 
   // ---- 视图变换状态 ----
   @State zoom: number = 1;
@@ -3383,6 +3409,10 @@ struct Index {
     hilog.info(DOMAIN, TAG, 'applyItems: %{public}d items, cur=%{public}d keepView=%{public}d',
       list.length, this.cur, keepView ? 1 : 0);
     this.clearWheel();     // 换了图片源，攒着的滚轮步数必须作废
+    // 第十三轮：换源后旧可见范围作废，等新 List 的 onScrollIndex 重新上报；
+    // 拿旧范围判点选边界会误滚（firstRow < 0 时退化为只认绝对首 / 末档案，保守不滚）。
+    this.listFirstRow = -1;
+    this.listLastRow = -1;
     if (!keepView) {
       this.clearPreviews();
       this.failed.clear();   // 换了图片源，上一批的「解不开」黑名单作废
@@ -3689,6 +3719,84 @@ struct Index {
     return idx;
   }
 
+  /** 第十三轮：鼠标点选档案的滚动收口。
+   *  一般点选零自动滚动（保持当前滚动位置与可见范围）；仅当所选档案是
+   *  列表最顶端 / 最底端（或可见范围最顶 / 最底行）时才允许列表上下移动。
+   *  真值来源统一走 InteractionPlan.tapScrollAction，UI 不自作判定。 */
+  private scrollOnTap(idx: number): void {
+    const row: number = this.rowOfItem(idx);
+    const action: number = tapScrollAction(row, this.listFirstRow, this.listLastRow,
+      this.rows.length);
+    if (scrollAllowed(action)) {
+      this.scroller.scrollToIndex(row, false);
+    }
+  }
+
+  /** 第十三轮：滚轮 / 键盘切图的滚动收口。
+   *  目标仍在可见范围内就不动列表；只有跑出可见范围才跟随（保持既有翻页体验）。
+   *  这不属于「鼠标点选档案」语义，故用 stepScrollAction 而非 tapScrollAction。 */
+  private scrollOnStep(idx: number): void {
+    const row: number = this.rowOfItem(idx);
+    const action: number = stepScrollAction(row, this.listFirstRow, this.listLastRow);
+    if (action !== SCROLL_NONE) {
+      this.scroller.scrollToIndex(row, false);
+    }
+  }
+
+  /** 第十三轮：放大镜是否有可显示的图（清晰图 / 过渡图 / 系统兜底 uri 任一）。 */
+  private hasPreviewImage(): boolean {
+    return this.viewPixelMap !== undefined || this.lowPixelMap !== undefined || this.viewFailed;
+  }
+
+  /** 第十三轮：预览图放大镜的鼠标驱动。
+   *  挂在 previewImage 的 Stack 上，坐标天然相对「预览图显示框」。
+   *  Move 时按坐标兜底判定是否仍在框内（部分 2in1 只派发 Move、不给 enter / leave）；
+   *  onHover(false) 另行同步立即隐藏。只认这一层，左栏 / 右页 / 状态浮层一律不触发。 */
+  private onLoupeMouse(event: MouseEvent, half: boolean): void {
+    if (event.action !== MouseAction.Move) {
+      return;
+    }
+    const x: number = Number(event.x);
+    const y: number = Number(event.y);
+    const inside: boolean = x === x && y === y &&
+      loupeInFrame(x, y, this.viewBoxW(half), this.frameH());
+    const on: boolean = loupeEligibleOf(inside, this.hasPreviewImage());
+    if (on !== this.loupeHover) {
+      this.loupeHover = on;
+    }
+    if (on) {
+      this.loupeX = x;
+      this.loupeY = y;
+    }
+  }
+
+  /** 放大镜圆内放大图的尺寸：主预览显示框整体等比放大 LOUPE_ZOOM 倍。 */
+  private loupeContentW(half: boolean): number {
+    return this.viewBoxW(half) * LOUPE_ZOOM;
+  }
+
+  private loupeContentH(): number {
+    return this.frameH() * LOUPE_ZOOM;
+  }
+
+  /** 圆内放大图偏移（夹界版）：把光标处的图像点对齐圆心，边缘不空白。 */
+  private loupeOffX(half: boolean): number {
+    return loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM);
+  }
+
+  private loupeOffY(): number {
+    return loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM);
+  }
+
+  /** 圆形放大镜左上角：圆心严格落在光标处（实时跟随）。 */
+  private loupeLeft(): number {
+    return loupeCircleOrigin(this.loupeX, LOUPE_D_VP);
+  }
+
+  private loupeTop(): number {
+    return loupeCircleOrigin(this.loupeY, LOUPE_D_VP);
+  }
+
   /** fillSizes 补测到体积后同步到左栏行（rows 与 items 可能是不同对象） */
   private setRowSize(uri: string, size: number): void {
     for (let i = 0; i < this.rows.length; i++) {
@@ -3748,7 +3856,7 @@ struct Index {
     // 只读名单态：名单照常可选 / 高亮 / 记位置，只切断一切 uri IO。
     // 状态栏给一句明确指引 —— 按钮和列表「点了必须看得见反应」，不能像死了一样。
     if (!bulkIoAllowed(this.restoreMode)) {
-      this.scroller.scrollToIndex(this.rowOfItem(idx), false);
+      this.scrollOnTap(idx);
       this.status = readonlyTapHint(this.items[idx].name);
       this.dataSource.reload(this.rows);
       this.markPos();
@@ -3757,7 +3865,7 @@ struct Index {
     this.loadMeta(idx);
     this.showPreviewOf(idx);
     this.refreshSpread();
-    this.scroller.scrollToIndex(this.rowOfItem(idx), false);
+    this.scrollOnTap(idx);
     this.status = this.pageLabel();
     // LazyForEach 不会自动感知 selected 变化，通知数据源重取 @Prop（只重建可见的几行）
     this.dataSource.reload(this.rows);
@@ -3775,7 +3883,7 @@ struct Index {
     // 只读名单态：滚轮 / 翻页照常走名单（位置、高亮、记忆都更新），
     // 只切断解码与元数据 IO，并给一句看得见的反馈。
     if (!bulkIoAllowed(this.restoreMode)) {
-      this.scroller.scrollToIndex(this.rowOfItem(this.cur), false);
+      this.scrollOnStep(this.cur);
       this.status = readonlyTapHint(this.items[this.cur].name);
       this.dataSource.reload(this.rows);
       this.markPos();
@@ -3788,7 +3896,8 @@ struct Index {
     this.refreshSpread();
     // 第二个参数 smooth=false：快速翻页时不要播滚动动画，否则每次切换都重启一段动画，
     // 左侧列表会一直「追」不上当前项，观感上就是图片和列表错位。
-    this.scroller.scrollToIndex(this.rowOfItem(this.cur), false);
+    // 第十三轮：翻页只在目标跑出可见范围时才跟随（stepScrollAction 判定）。
+    this.scrollOnStep(this.cur);
     this.status = this.pageLabel();
     this.dataSource.reload(this.rows); // 同步左侧高亮（只重建可见的几行）
     this.schedulePreload();
@@ -5963,6 +6072,13 @@ struct Index {
         if (inTop !== this.topToolsVisible) {
           this.topToolsVisible = inTop;
         }
+        // 第十三轮：整栏贴顶唤出（滞回，稳定不闪烁）。浮层不占布局，
+        // 显隐都不改主体尺寸 → 不触发 resize / 重解码。真值来源统一走纯函数。
+        const peek: boolean = topBarPeekOf(this.topBarPeek, yTop,
+          TOPBAR_PEEK_TRIGGER_VP, TOPBAR_PEEK_KEEP_VP, this.fullscreen);
+        if (peek !== this.topBarPeek) {
+          this.topBarPeek = peek;
+        }
       }
     }
     if (!SHOW_FULLSCREEN_CHROME || !this.fullscreen) {
@@ -6243,6 +6359,55 @@ struct Index {
       .onClick(() => this.doAction(act))
   }
 
+  /** 第十三轮：预览图放大镜浮层（3cm 圆形 / 3 倍局部 / 跟随光标 / 边缘夹界）。
+   *  只在「鼠标悬停预览图片 + 确有可显示的图」时出现；移出立即隐藏、零动画零延迟。
+   *  圆内放大图 = 主预览显示框整体等比放大 LOUPE_ZOOM 倍（objectFit 仍为 Contain →
+   *  与主图逐点对应且不变形），用 loupeClampedOffset 把光标处的图像点对齐圆心，
+   *  边缘 clamp 保证圆 (0..d) 始终被放大图覆盖，不空白、不错位。
+   *  圆本身用 borderRadius(d/2) + clip(true) 裁出；Transparent 命中模式让浮层不吞鼠标事件，
+   *  否则圆一出现就挡住光标、触发 leave → 闪烁。 */
+  @Builder
+  loupeLayer(uri: string, half: boolean) {
+    if (loupeEligibleOf(this.loupeHover, this.hasPreviewImage())) {
+      Stack() {
+        if (this.viewPixelMap !== undefined) {
+          Image(this.viewPixelMap!)
+            .objectFit(ImageFit.Contain)
+            // 放大镜是「放大显示」的临时浮层，不参与主视图 / 兜底 / 右页那三处
+            // autoResize(false) 的画质契约计数；High 插值保证放大后仍清晰。
+            .interpolation(ImageInterpolation.High)
+            .draggable(false)
+            .width(this.loupeContentW(half))
+            .height(this.loupeContentH())
+            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+        } else if (this.lowPixelMap !== undefined) {
+          Image(this.lowPixelMap!)
+            .objectFit(ImageFit.Contain)
+            .interpolation(ImageInterpolation.High)
+            .draggable(false)
+            .width(this.loupeContentW(half))
+            .height(this.loupeContentH())
+            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+        } else {
+          Image(uri)
+            .objectFit(ImageFit.Contain)
+            .interpolation(ImageInterpolation.High)
+            .draggable(false)
+            .width(this.loupeContentW(half))
+            .height(this.loupeContentH())
+            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+        }
+      }
+      .width(LOUPE_D_VP)
+      .height(LOUPE_D_VP)
+      .borderRadius(LOUPE_D_VP / 2)
+      .clip(true)
+      .border({ width: 2, color: '#e8ecf4' })
+      .position({ x: this.loupeLeft(), y: this.loupeTop() })
+      .hitTestBehavior(HitTestMode.Transparent)
+    }
+  }
+
   /** 主视图：优先画「我们自己解码的 PixelMap」（清晰，且一定是当前这张）；
    *  只有自解码失败（如某些 uri 打不开）时才回退到 Image(uri) 交给系统解码兜底。
    *
@@ -6306,9 +6471,19 @@ struct Index {
           .blur(this.blurRadius)
           .opacity(this.lowOpacity)
       }
+
+      // 第十三轮：放大镜浮层排在最后一层（z 序最高），只作用于本预览图片。
+      this.loupeLayer(uri, half);
     }
     .width(this.viewBoxW(half))
     .height(this.frameH())
+    .onHover((on: boolean) => {
+      // 移出预览图片立即隐藏，零动画 / 零延迟 / 无计时器。
+      if (!on) {
+        this.loupeHover = false;
+      }
+    })
+    .onMouse((event: MouseEvent) => this.onLoupeMouse(event, half))
   }
 
   /** 对开右页：优先用命中缓存的 PixelMap；未就绪时留中灰占位，不阻塞左页。
@@ -6406,11 +6581,8 @@ struct Index {
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Column() {
-        // ============================== 顶栏（非全屏时常驻）==============================
-        if (!this.fullscreen) {
-          this.topBar();
-        }
-
+        // 第十三轮：顶栏不再放进主体 Column —— 默认整栏不渲染，完全不占布局空间，
+        // 左侧文件列表与预览区从窗口顶端开始（最大化）。浮层见根 Stack 末尾。
         // ============================== 主体 ==============================
         Row() {
         // ---------- 左侧：图像档案列表 ----------
@@ -6520,6 +6692,12 @@ struct Index {
               .scrollBar(BarState.Auto)
               .padding({ left: 8, right: 8 })
               .cachedCount(6)
+              // 第十三轮：记录左栏可见范围，供点选 / 翻页的滚动判定使用。
+              // 只读数值、不驱动 UI，故直接写普通字段（不进状态系统）。
+              .onScrollIndex((first: number, last: number, center: number) => {
+                this.listFirstRow = first;
+                this.listLastRow = last;
+              })
             }
   
             // 11-10 起按用户要求取消左下角 4 行 × 2 列共 8 个视图控制按钮。
@@ -6894,6 +7072,19 @@ struct Index {
       .focusable(true)
       .defaultFocus(true)
       .onKeyEvent((event: KeyEvent) => this.onKey(event))
+
+      // 第十三轮：非全屏时的整栏「贴顶唤出」浮层。
+      // 条件渲染：topBarPeek=false 时组件根本不存在 → 完全不占布局空间（不是占位隐藏），
+      // 显隐都不改主体 Column 尺寸 → 不触发 resize / 重解码；绝对定位盖在画布之上。
+      // 显隐由 onRootMouse 走 topBarPeekOf 滞回判定（显示阈值窄 / 隐藏阈值宽，边界不闪烁）。
+      if (this.topBarPeek && !this.fullscreen) {
+        Column() {
+          this.topBar();
+        }
+        .width('100%')
+        .position({ x: 0, y: 0 })
+        .zIndex(10)
+      }
 
       // 真全屏下不画工具顶栏（SHOW_FULLSCREEN_CHROME=false）：用户要求「不会有标题列」。
       // 开关改回 true 才恢复旧的「鼠标贴顶浮出、绝对定位不占布局」行为。
