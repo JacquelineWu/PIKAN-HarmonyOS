@@ -525,6 +525,83 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第十四轮：放大镜 6cm / 左右并排双页独立 / 全屏保留 / 退出全屏后不失效（2026-11-13）
+
+承接第十三轮 `InteractionPlan.ts` 的纯函数真值来源，只改放大镜的「尺寸 / 作用页 / 模式切换」三处，
+不动点选滚动、顶栏滞回、缓存、解码、目录层级、恢复、画质等任何既有链路。
+
+### 诉求
+
+1. 放大镜直径由 3cm 翻倍到 6cm，局部放大倍率仍是 3 倍。
+2. 左右并排的两张图片都要能生效且互不影响：鼠标在哪页，哪页显示它自己那张图的局部放大。
+3. 新的全屏模式下同样保留完整放大镜效果。
+4. 修复「从全屏退出到正常模式后放大镜失效」：进入全屏、全屏中使用、退出全屏后都能继续正常使用。
+5. 其余既有交互一律不变。
+
+### 根因
+
+| 现象 | 根因 |
+|---|---|
+| 只有 3cm | `LOUPE_CM = 3` → `loupeDiameterVp(3) = 189vp` |
+| 右页没有放大镜 | `loupeLayer()` / `onHover` / `onMouse` 只挂在 `previewImage()`；`rightPageImage()` 完全没有接线 |
+| 两页会互相干扰 | 只有单份 `@State loupeHover / loupeX / loupeY`，没有「哪一页被悬停」的标识；两页共用同一份坐标与图源判定 |
+| 退出全屏后失效 | `setFull(on)` 切换时整块重建布局、画布尺寸与左右页划分，却从不复位放大镜的悬停态 / 坐标 / 作用页；残留的旧状态与新画布不匹配，且没有归零与重新激活的收口路径 |
+
+补充：预览 `Row`（`previewImage` + `rightPageImage`）在 `build()` 里**始终构建**，并未被
+`if (!this.fullscreen)` 之类条件移除，所以只要把放大镜接到两个 builder 上，全屏态自然覆盖。
+
+### 做法
+
+| 环节 | 改动 |
+|---|---|
+| 尺寸真值来源 | `InteractionPlan.ts` 新增 `LOUPE_CM_14 = 6` / `LOUPE_D_VP_14 = 378`；`Index.ets` 的 `LOUPE_CM` 改为取 `LOUPE_CM_14`（单一真值来源，避免魔数漂移），`LOUPE_ZOOM` 保持 3 |
+| 纯函数 | 新增 `loupePaneActiveOf()` / `loupePaneAfterHover()` / `loupeResetOnModeChange()` / `loupeHoverAfterModeChange()`，以及 pane 常量 `LOUPE_PANE_NONE(-1)` / `LEFT(0)` / `RIGHT(1)` |
+| 双页独立状态 | 新增 `@State loupePane`，保留单份 `loupeHover / loupeX / loupeY`；坐标是「相对该页显示框」的局部坐标，两页各自解释自己的坐标 |
+| 双页独立绘制 | `loupeLayer(pane, uri, half)` 用 `loupePaneActiveOf(this.loupePane, pane, ...)` 判定，只有当前激活页那一层会绘制；`hasLoupeImage(pane)` 按页取源（右页只看 `rightPixelMap`，左页沿用三源） |
+| 右页接线 | `rightPageImage()` 也挂 `loupeLayer(LOUPE_PANE_RIGHT, ...)` / `onHover` / `onMouse`；左页改挂 `LOUPE_PANE_LEFT` |
+| hover 收口 | 新增 `onLoupeHover(on, pane)` 走 `loupePaneAfterHover()`：移入激活本页，移出**只清本页**，A 页迟到的 `leave` 不会误清 B 页刚置好的激活页 |
+| Move 兜底 | `onLoupeMouse(event, pane, half)` 按 pane 取图、按 `loupeInFrame` 兜底显隐，并同步激活页（部分 2in1 只派发 Move） |
+| 全屏复位 | `setFull(on)` 在 `this.fullscreen = on` **之前**，用 `loupeResetOnModeChange(this.fullscreen, on)` 判定；模式变化时统一把 `loupePane / loupeHover / loupeX / loupeY` 复位，且**不设任何永久禁用标志** |
+
+`6cm → 6 * 160 / 2.54 ≈ 377.95 → 378vp`，正好是 `189vp` 的两倍；
+`loupeCircleOrigin` / `loupeClampedOffset` 几何不变，圆内放大图仍 `objectFit(Contain)` 且边缘夹界不空白。
+
+### 为什么「退出全屏后不失效」
+
+复位只清**瞬时**状态，不写任何 `loupeDisabled` 之类的永久开关；下一次
+`onHover(true)` / `onMouse(Move)` 会重新置 `loupePane` 并点亮。因此
+「正常模式使用 → 进入全屏（复位）→ 全屏中使用（重新激活，左右页皆可）→
+退出全屏（再复位）→ 正常模式继续使用」全链路都通。
+所有全屏切换都从 `setFull()` 收口（双击 / F11 / ESC / 画布缩小自愈），
+复位放在 early-return 之后、赋值之前，保证只在真正切换时执行一次。
+
+### 回归护栏（保持不变）
+
+- 全文 `.autoResize(false)` 仍恰好 3 处、`.dynamicRangeMode(...)` 仍恰好 3 处；
+  右页放大镜刻意**不引入**这两类画质属性（第十三轮踩过 7 条计数型断言同时失败的坑）。
+- `HitTestMode.Transparent`、`onHover(false)` 立即隐藏、`onMouse(Move)` 坐标兜底、
+  圆形 `borderRadius(d/2) + clip(true)`、零动画零延迟全部保留。
+- 点选零滚动 / 顶栏贴顶唤出滞回 / ESC 非全屏退出 / 版本 1.0.7 / 往上层恒亮 /
+  全量预载 / 最高画质三处属性，一律未改。
+
+### 验证
+
+- `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 1060 passed, 0 failed**
+  （第十三轮 1029 → 第十四轮 1060，新增 31 条：纯函数 / 源码静态契约 / 全链路模拟 / 回归护栏）。
+- 同步更新 4 条第十三轮旧断言（3cm→6cm 常量、3 源→4 源、只挂 previewImage→两页各挂、
+  移出隐藏位置），旧断言不删只改。
+- `git diff --check` / 三种括号增量均 0 / `node --check` 全绿；版本仍 `1.0.7` / `7`。
+
+### 待用户侧确认（DevEco Studio 编译 + 实机）
+
+1. 放大镜直径目测为原来的两倍，圆内 3 倍局部放大仍与原图逐点对应、不变形。
+2. 并排双页：鼠标在左页只放大左页内容、在右页只放大右页内容；从一页滑到另一页不闪烁、不串图。
+3. 双击 / F11 进入全屏后放大镜可用；全屏中使用正常；ESC 退出全屏后移动鼠标放大镜重新出现，
+   且内容与当前页对应。
+4. 点选列表、顶部栏唤出、hover 缩略图、画质、resize、缓存等既有交互未受影响。
+
+**本次仍未编译 HAP / 未放桌面 / 未跑 `build.sh` / 未升版本 / 未 push**。
+
 ## 第十三轮：点选零自动滚动 / 顶部栏贴顶唤出 / 预览图 3cm 放大镜（2026-11-13）
 
 三项纯 UI / 交互调整：新增 `InteractionPlan.ts` 把判定从 ArkUI builder 里剥成可单测的纯函数，

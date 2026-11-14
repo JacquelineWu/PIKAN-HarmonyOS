@@ -3,7 +3,8 @@
  *
  *  ① 档案列表「点选零自动滚动」：默认不动列表，仅边界档案例外；
  *  ② 顶部栏「贴顶唤出」：滞回判定，默认完全隐藏、浮层不占布局，切换稳定不闪烁；
- *  ③ 预览图「放大镜」：3cm 圆形 / 3 倍局部，cm→vp 换算、圆心与内图偏移几何。
+ *  ③ 预览图「放大镜」：圆形 / 3 倍局部，cm→vp 换算、圆心与内图偏移几何；
+ *  ④ 第十四轮放大镜增强：6cm 直径、左右并排双页独立、全屏切换复位。
  *
  * 只做数值判定，不碰任何 SDK / IO / 状态，便于静态契约测试直接 import。
  */
@@ -164,4 +165,57 @@ export function loupeInFrame(x: number, y: number, w: number, h: number): boolea
 /** 放大镜是否显示：仅悬停于预览图片且确有可显示的解码图时生效（移出立即隐藏）。 */
 export function loupeEligibleOf(hover: boolean, hasImage: boolean): boolean {
   return hover && hasImage;
+}
+
+// ==================================================================
+// ④ 第十四轮：放大镜双页独立 / 全屏切换复位
+// ==================================================================
+
+/** 放大镜作用的预览页标识。单页与并排左页都归 LEFT，并排右页归 RIGHT；
+ *  NONE = 当前没有任何页被悬停（放大镜完全不绘制）。 */
+export const LOUPE_PANE_NONE: number = -1;
+export const LOUPE_PANE_LEFT: number = 0;
+export const LOUPE_PANE_RIGHT: number = 1;
+
+/** 第十四轮：直径由 3cm 翻倍到 6cm，局部放大倍率仍是 3 倍。
+ *  1vp = 1/160 inch → 6cm = 6 * 160 / 2.54 ≈ 377.95 → 378vp，正好是 189 的两倍。 */
+export const LOUPE_CM_14: number = 6;
+export const LOUPE_D_VP_14: number = loupeDiameterVp(LOUPE_CM_14);
+
+/** 某页放大镜是否应当绘制（双页互不影响的真值来源）：
+ *  · 只有「当前激活页 == 本页」+ 悬停 + 该页确有可显示图时才画；
+ *  · 左右并排时两页各挂一层，但同一时刻只会命中一层 —— 鼠标在哪页，
+ *    哪页显示它自己那张图的局部放大，另一页绝不被同一份状态误触发。 */
+export function loupePaneActiveOf(activePane: number, pane: number,
+  hover: boolean, hasImage: boolean): boolean {
+  return activePane === pane && hover && hasImage;
+}
+
+/** hover 事件后的激活页：
+ *  · 移入（on=true）→ 激活页切到本页；
+ *  · 移出（on=false）→ 仅当当前激活页就是本页时才清成 NONE，避免「从 A 页
+ *    直接滑到 B 页」时 A 迟到的 leave 把 B 刚置好的激活页误清（互不影响）。 */
+export function loupePaneAfterHover(activePane: number, pane: number,
+  on: boolean): number {
+  if (on) {
+    return pane;
+  }
+  return activePane === pane ? LOUPE_PANE_NONE : activePane;
+}
+
+/** 全屏 / 正常模式切换后放大镜是否必须复位。
+ *  只要 fullscreen 变化就复位（进入全屏、退出全屏都算）：切换会整块重建
+ *  布局 / 画布尺寸 / pane 划分，残留的旧 pane / 坐标 / 悬停态会与之不一致。
+ *  所有切换都从 setFull 收口经过，复位只清瞬时状态、不设永久禁用标志，
+ *  下一次 onHover(true) / onMouse(Move) 会重新激活 —— 这正是修复
+ *  「退出全屏后放大镜失效」并保持「进入全屏 / 全屏中使用 / 退出全屏」全程可用的关键。 */
+export function loupeResetOnModeChange(prevFull: boolean,
+  nextFull: boolean): boolean {
+  return prevFull !== nextFull;
+}
+
+/** 模式切换复位后的悬停态：恒为 false（等待下一次真实 hover 重新激活）。 */
+export function loupeHoverAfterModeChange(wasHover: boolean,
+  modeChanged: boolean): boolean {
+  return modeChanged ? false : wasHover;
 }

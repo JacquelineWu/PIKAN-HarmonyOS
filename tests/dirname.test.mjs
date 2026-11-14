@@ -23,7 +23,8 @@
  * 第十轮「遇到问题立即放弃：错误驱动 + 死路径记忆 + 恢复期零同步 IO」、
  * 第十一轮「版本号归位最顶部 / 第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出」、
  * 第十二轮「切换 NAS 目录时 pumpAll 换源竞态崩溃（Cannot read property uri of undefined）」、
- * 第十三轮「点选零自动滚动 / 整栏贴顶唤出 / 预览图 3cm 3 倍放大镜」。
+ * 第十三轮「点选零自动滚动 / 整栏贴顶唤出 / 预览图 3cm 3 倍放大镜」、
+ * 第十四轮「放大镜 6cm / 左右并排双页独立 / 全屏保留 / 退出全屏后不失效」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -62,7 +63,9 @@ import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
   isListEdgeRow, tapScrollAction, stepScrollAction, scrollAllowed,
   topBarPeekOf, cmToVp, loupeDiameterVp, loupeCircleOrigin,
   loupeImageOffset, loupeClampedOffset, loupeInFrame,
-  loupeEligibleOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
+  loupeEligibleOf, LOUPE_PANE_NONE, LOUPE_PANE_LEFT, LOUPE_PANE_RIGHT,
+  LOUPE_CM_14, LOUPE_D_VP_14, loupePaneActiveOf, loupePaneAfterHover,
+  loupeResetOnModeChange, loupeHoverAfterModeChange } from '../entry/src/main/ets/common/InteractionPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -2605,6 +2608,21 @@ const PEEK13_CODE = stripComments(INDEX.slice(INDEX.indexOf('// 第十三轮：�
 const ROOTMOUSE13_CODE = stripComments(ROOTMOUSE_FN);
 const NO_ANIM = ['animateTo', 'setTimeout', '.opacity(', 'duration:'];
 const NO_ANIM2 = ['animateTo', 'setTimeout', '.transition(', 'duration:'];
+// 第十四轮切片：hover 收口 / 鼠标驱动 / 按 pane 图源 / 右页 builder / 全屏复位 / 预览 Row
+const LOUPE_HOVER14_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('private onLoupeHover('), INDEX.indexOf('private onLoupeMouse(')));
+const LOUPE_MOUSE14_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('private onLoupeMouse('), INDEX.indexOf('private loupeContentW(')));
+const HAS_LOUPE14_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('private hasLoupeImage('), INDEX.indexOf('private onLoupeHover(')));
+const RIGHT14_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('  rightPageImage('), INDEX.indexOf('  topBar() {')));
+const SET_FULL14_CODE = stripComments(SET_FULL_FN);
+// 用 build() 里「右侧大图预览」的唯一注释锚点定位；不能用 spreadB 判定式，
+// 它在 loadRightPage 等处先出现，会把切片拉成大半文件而误命中 fullscreen。
+const PREVIEW_ROW14_START = INDEX.indexOf('// ---------- 右侧：大图预览');
+const PREVIEW_ROW14_CODE = stripComments(INDEX.slice(PREVIEW_ROW14_START,
+  INDEX.indexOf('.rotate({ angle: this.rot })', PREVIEW_ROW14_START)));
 
 check('②-a select() 两处裸 scrollToIndex 全部收口到 scrollOnTap',
   SELECT13_FN.includes('this.scroller.scrollToIndex(') === false &&
@@ -2650,10 +2668,13 @@ check('②-b 显隐链零动画 / 零延迟（无计时器 / 无过渡）',
   NO_ANIM.some(s => PEEK13_CODE.includes(s)) === false &&
   NO_ANIM.some(s => ROOTMOUSE13_CODE.includes(s)) === false, true);
 
-check('②-c 3cm / 3 倍常量与 cmToVp 换算接线',
-  INDEX.includes('const LOUPE_CM: number = 3;') &&
+check('②-c 6cm / 3 倍常量与 cmToVp 换算接线（第十四轮直径翻倍）',
+  INDEX.includes('const LOUPE_CM: number = LOUPE_CM_14;') &&
+  LOUPE_CM_14 === 6 &&
   INDEX.includes('const LOUPE_ZOOM: number = 3;') &&
-  INDEX.includes('const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);'), true);
+  INDEX.includes('const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);') &&
+  loupeDiameterVp(LOUPE_CM_14) === 378 &&
+  loupeDiameterVp(LOUPE_CM_14) === 2 * loupeDiameterVp(3), true);
 check('②-c 圆形裁剪：borderRadius(d/2) + clip(true)',
   LOUPE13_CODE.includes('.borderRadius(LOUPE_D_VP / 2)') &&
   LOUPE13_CODE.includes('.clip(true)'), true);
@@ -2662,17 +2683,18 @@ check('②-c 圆心跟随光标 + 边缘夹界偏移（圆内不空白）',
   INDEX.includes('loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM)') &&
   INDEX.includes('loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM)') &&
   INDEX.includes('return loupeCircleOrigin(this.loupeX, LOUPE_D_VP);'), true);
-check('②-c 圆内放大图 3 个源都 objectFit(Contain) + High（对应且不变形）',
-  LOUPE13_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 3 &&
-  LOUPE13_CODE.split('.interpolation(ImageInterpolation.High)').length - 1 === 3, true);
-check('②-c 放大镜只挂在 previewImage（onHover / onMouse / loupeLayer）',
-  PREVIEW13_CODE.includes('this.loupeLayer(uri, half);') &&
-  PREVIEW13_CODE.includes('.onHover((on: boolean) => {') &&
-  PREVIEW13_CODE.includes('.onMouse((event: MouseEvent) => this.onLoupeMouse(event, half))') &&
+check('②-c 圆内放大图 4 个源（左页 3 + 右页 1）都 objectFit(Contain) + High（对应且不变形）',
+  LOUPE13_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 4 &&
+  LOUPE13_CODE.split('.interpolation(ImageInterpolation.High)').length - 1 === 4, true);
+check('②-c 左页按 LEFT pane 独立接线（第十四轮：两页各挂一层，左页不引用右页）',
+  PREVIEW13_CODE.includes('this.loupeLayer(LOUPE_PANE_LEFT, uri, half);') &&
+  PREVIEW13_CODE.includes('.onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_LEFT))') &&
+  PREVIEW13_CODE.includes('.onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_LEFT, half))') &&
   PREVIEW13_CODE.includes('rightPageImage') === false, true);
 check('②-c 移出立即隐藏（零动画 / 零延迟 / 无计时器）',
-  PREVIEW13_CODE.includes('this.loupeHover = false;') &&
-  NO_ANIM2.some(s => PREVIEW13_CODE.includes(s)) === false, true);
+  LOUPE_HOVER14_CODE.includes('this.loupeHover = false;') &&
+  NO_ANIM2.some(s => PREVIEW13_CODE.includes(s)) === false &&
+  NO_ANIM2.some(s => LOUPE_HOVER14_CODE.includes(s)) === false, true);
 check('②-c 浮层 Transparent 命中模式（不吞鼠标、圆出现不闪烁）',
   LOUPE13_CODE.includes('.hitTestBehavior(HitTestMode.Transparent)'), true);
 check('②-c 放大镜不破坏主画质三处 autoResize(false) 契约',
@@ -2692,6 +2714,186 @@ check('第十三轮回归护栏：版本未升 / 往上层恒亮 / 不禁用 / �
   QUIT_FN.includes('ability.terminateSelf()') &&
   TOPBAR_FN.includes('.visibility(this.topToolsVisible ? Visibility.Visible : Visibility.Hidden)') &&
   TOPBAR_FN.includes('Visibility.None') === false, true);
+
+// ==================== 第十四轮：放大镜 6cm / 双页独立 / 全屏保留 / 退出全屏不失效 ====================
+console.log('--- 第十四轮 ①：InteractionPlan.ts 纯函数（6cm 换算 / 双页独立 / 全屏复位） ---');
+check('① 6cm → 378vp，正好是 3cm / 189vp 的两倍（直径翻倍、倍率不变）',
+  LOUPE_CM_14 === 6 &&
+  Math.abs(cmToVp(6) - 960 / 2.54) < 1e-9 &&
+  loupeDiameterVp(6) === 378 &&
+  LOUPE_D_VP_14 === 378 &&
+  LOUPE_D_VP_14 === 2 * loupeDiameterVp(3), true);
+check('① 6cm 直径下圆心仍严格落在光标处（378/2 = 189）',
+  loupeCircleOrigin(100, 378) === 100 - 189 &&
+  loupeCircleOrigin(0, 378) === -189, true);
+check('① 6cm 直径下边缘夹界仍不空白（左 / 右 / 中段）',
+  loupeClampedOffset(0, 800, 378, 3) === 0 &&
+  loupeClampedOffset(800, 800, 378, 3) === 378 - 2400 &&
+  loupeClampedOffset(400, 800, 378, 3) === loupeImageOffset(400, 378, 3), true);
+check('① pane 常量：NONE / LEFT / RIGHT 三者互异',
+  LOUPE_PANE_NONE === -1 && LOUPE_PANE_LEFT === 0 && LOUPE_PANE_RIGHT === 1 &&
+  new Set([LOUPE_PANE_NONE, LOUPE_PANE_LEFT, LOUPE_PANE_RIGHT]).size === 3, true);
+check('① 双页独立：激活左页只画左页，激活右页只画右页',
+  loupePaneActiveOf(LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, true, true) === true &&
+  loupePaneActiveOf(LOUPE_PANE_LEFT, LOUPE_PANE_RIGHT, true, true) === false &&
+  loupePaneActiveOf(LOUPE_PANE_RIGHT, LOUPE_PANE_RIGHT, true, true) === true &&
+  loupePaneActiveOf(LOUPE_PANE_RIGHT, LOUPE_PANE_LEFT, true, true) === false, true);
+check('① 双页独立：无激活页 / 未悬停 / 该页无图一律不画',
+  loupePaneActiveOf(LOUPE_PANE_NONE, LOUPE_PANE_LEFT, true, true) === false &&
+  loupePaneActiveOf(LOUPE_PANE_NONE, LOUPE_PANE_RIGHT, true, true) === false &&
+  loupePaneActiveOf(LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, false, true) === false &&
+  loupePaneActiveOf(LOUPE_PANE_RIGHT, LOUPE_PANE_RIGHT, true, false) === false, true);
+check('① hover 移入激活本页（左右切换互不干扰）',
+  loupePaneAfterHover(LOUPE_PANE_NONE, LOUPE_PANE_LEFT, true) === LOUPE_PANE_LEFT &&
+  loupePaneAfterHover(LOUPE_PANE_LEFT, LOUPE_PANE_RIGHT, true) === LOUPE_PANE_RIGHT &&
+  loupePaneAfterHover(LOUPE_PANE_RIGHT, LOUPE_PANE_LEFT, true) === LOUPE_PANE_LEFT, true);
+check('① hover 移出只清本页：A 迟到的 leave 不误清 B 的激活页',
+  loupePaneAfterHover(LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, false) === LOUPE_PANE_NONE &&
+  loupePaneAfterHover(LOUPE_PANE_RIGHT, LOUPE_PANE_LEFT, false) === LOUPE_PANE_RIGHT &&
+  loupePaneAfterHover(LOUPE_PANE_LEFT, LOUPE_PANE_RIGHT, false) === LOUPE_PANE_LEFT, true);
+check('① hover 序列：左进 → 左出 → 右进 → 右出，激活页始终正确',
+  (() => {
+    let p = LOUPE_PANE_NONE;
+    p = loupePaneAfterHover(p, LOUPE_PANE_LEFT, true);
+    if (p !== LOUPE_PANE_LEFT) { return false; }
+    p = loupePaneAfterHover(p, LOUPE_PANE_LEFT, false);
+    if (p !== LOUPE_PANE_NONE) { return false; }
+    p = loupePaneAfterHover(p, LOUPE_PANE_RIGHT, true);
+    if (p !== LOUPE_PANE_RIGHT) { return false; }
+    p = loupePaneAfterHover(p, LOUPE_PANE_RIGHT, false);
+    return p === LOUPE_PANE_NONE;
+  })(), true);
+check('① 全屏切换复位：进入 / 退出全屏都复位，同一态不变则不复位',
+  loupeResetOnModeChange(false, true) === true &&
+  loupeResetOnModeChange(true, false) === true &&
+  loupeResetOnModeChange(false, false) === false &&
+  loupeResetOnModeChange(true, true) === false, true);
+check('① 复位后悬停恒 false（等待下一次 hover 重新激活，非永久禁用）',
+  loupeHoverAfterModeChange(true, true) === false &&
+  loupeHoverAfterModeChange(false, true) === false &&
+  loupeHoverAfterModeChange(true, false) === true &&
+  loupeHoverAfterModeChange(false, false) === false, true);
+check('① 全链路：正常用 → 进全屏复位 → 全屏中用 → 退出全屏复位 → 正常模式再用',
+  (() => {
+    let pane = loupePaneAfterHover(LOUPE_PANE_NONE, LOUPE_PANE_LEFT, true);
+    let hover = loupeEligibleOf(true, true);
+    if (!loupePaneActiveOf(pane, LOUPE_PANE_LEFT, hover, true)) { return false; }
+    let changed = loupeResetOnModeChange(false, true);
+    pane = LOUPE_PANE_NONE;
+    hover = loupeHoverAfterModeChange(hover, changed);
+    if (hover !== false) { return false; }
+    pane = loupePaneAfterHover(pane, LOUPE_PANE_RIGHT, true);
+    hover = loupeEligibleOf(true, true);
+    if (!loupePaneActiveOf(pane, LOUPE_PANE_RIGHT, hover, true)) { return false; }
+    if (loupePaneActiveOf(pane, LOUPE_PANE_LEFT, hover, true)) { return false; }
+    changed = loupeResetOnModeChange(true, false);
+    pane = LOUPE_PANE_NONE;
+    hover = loupeHoverAfterModeChange(hover, changed);
+    if (hover !== false) { return false; }
+    pane = loupePaneAfterHover(pane, LOUPE_PANE_LEFT, true);
+    hover = loupeEligibleOf(true, true);
+    return loupePaneActiveOf(pane, LOUPE_PANE_LEFT, hover, true);
+  })(), true);
+check('① InteractionPlan.ts 仍是纯函数模块（第十四轮函数不带 SDK / IO / 计时器）',
+  NO_UI_SIDE_EFFECT.some(s => IP_CODE.includes(s)) === false &&
+  IP_CODE.includes('Number.isFinite') === false &&
+  IP_CODE.includes('export function loupePaneActiveOf') &&
+  IP_CODE.includes('export function loupeResetOnModeChange'), true);
+
+console.log('--- 第十四轮 ②：Index.ets 源码静态契约（6cm / 双页 / 全屏 / 回归护栏） ---');
+check('② 6cm 常量取 InteractionPlan 单一真值来源，倍率仍是 3 倍',
+  INDEX.includes('const LOUPE_CM: number = LOUPE_CM_14;') &&
+  INDEX.includes('const LOUPE_ZOOM: number = 3;') &&
+  INDEX.includes('const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);') &&
+  INDEX.includes('LOUPE_PANE_RIGHT, LOUPE_CM_14, loupePaneActiveOf, loupePaneAfterHover,'), true);
+check('② @State loupePane 默认 NONE（无激活页时两页都不绘制）',
+  INDEX.includes('@State loupePane: number = LOUPE_PANE_NONE;'), true);
+check('② hasLoupeImage 按 pane 分流：右页只看 rightPixelMap，左页沿用三源',
+  HAS_LOUPE14_CODE.includes('pane === LOUPE_PANE_RIGHT') &&
+  HAS_LOUPE14_CODE.includes('this.rightPixelMap !== undefined') &&
+  HAS_LOUPE14_CODE.includes('return this.hasPreviewImage();'), true);
+check('② loupeLayer 只按 loupePaneActiveOf 命中当前激活页（双页互不影响）',
+  LOUPE13_CODE.includes('loupeLayer(pane: number, uri: string, half: boolean)') &&
+  LOUPE13_CODE.includes('loupePaneActiveOf(this.loupePane, pane, this.loupeHover, this.hasLoupeImage(pane))') &&
+  LOUPE13_CODE.includes('loupeEligibleOf(this.loupeHover,') === false, true);
+check('② loupeLayer 右页分支只取 rightPixelMap（不误用左页图源）',
+  LOUPE13_CODE.includes('if (pane === LOUPE_PANE_RIGHT)') &&
+  LOUPE13_CODE.split('Image(this.rightPixelMap!)').length - 1 === 1, true);
+check('② 左页 builder 按 LEFT pane 挂 loupeLayer / onHover / onMouse',
+  PREVIEW13_CODE.includes('this.loupeLayer(LOUPE_PANE_LEFT, uri, half);') &&
+  PREVIEW13_CODE.includes('.onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_LEFT))') &&
+  PREVIEW13_CODE.includes('.onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_LEFT, half))'), true);
+check('② 右页 builder 按 RIGHT pane 挂 loupeLayer / onHover / onMouse（两页都生效）',
+  RIGHT14_CODE.includes('this.loupeLayer(LOUPE_PANE_RIGHT, uri, half);') &&
+  RIGHT14_CODE.includes('.onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_RIGHT))') &&
+  RIGHT14_CODE.includes('.onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_RIGHT, half))'), true);
+check('② 两页各自调用 loupeLayer，全源码恰好 2 处且 pane 各异',
+  INDEX.split('this.loupeLayer(').length - 1 === 2 &&
+  INDEX.includes('this.loupeLayer(LOUPE_PANE_LEFT, uri, half);') &&
+  INDEX.includes('this.loupeLayer(LOUPE_PANE_RIGHT, uri, half);'), true);
+check('② onLoupeHover 走 loupePaneAfterHover，移出仅清本页并立即隐藏',
+  LOUPE_HOVER14_CODE.includes('loupePaneAfterHover(this.loupePane, pane, on)') &&
+  LOUPE_HOVER14_CODE.includes('this.loupePane = nextPane;') &&
+  LOUPE_HOVER14_CODE.includes('this.loupeHover = false;') &&
+  LOUPE_HOVER14_CODE.includes('LOUPE_PANE_NONE'), true);
+check('② onLoupeMouse 按 pane 取图、同步激活页、Move 兜底显隐',
+  LOUPE_MOUSE14_CODE.includes('this.hasLoupeImage(pane)') &&
+  LOUPE_MOUSE14_CODE.includes('loupePaneAfterHover(this.loupePane, pane, false)') &&
+  LOUPE_MOUSE14_CODE.includes('this.loupePane = nextPane;') &&
+  LOUPE_MOUSE14_CODE.includes('loupeInFrame(x, y, this.viewBoxW(half), this.frameH())'), true);
+check('② 全屏复位收口在 setFull：进入 / 退出全屏都清 pane / hover / 坐标',
+  SET_FULL14_CODE.includes('loupeResetOnModeChange(this.fullscreen, on)') &&
+  SET_FULL14_CODE.includes('this.loupePane = LOUPE_PANE_NONE;') &&
+  SET_FULL14_CODE.includes('loupeHoverAfterModeChange(this.loupeHover, loupeModeChanged)') &&
+  SET_FULL14_CODE.includes('this.loupeX = 0;') &&
+  SET_FULL14_CODE.includes('this.loupeY = 0;'), true);
+check('② 全屏复位在 this.fullscreen = on 之前（用旧态与新态比较才生效）',
+  SET_FULL14_CODE.indexOf('loupeResetOnModeChange(this.fullscreen, on)') <
+  SET_FULL14_CODE.indexOf('this.fullscreen = on;') &&
+  SET_FULL14_CODE.indexOf('this.fullscreen = on;') >= 0, true);
+check('② 复位不引入永久禁用标志（下一次 hover 可重新激活 → 退出全屏后不失效）',
+  INDEX.includes('loupeDisabled') === false &&
+  INDEX.includes('loupeBlocked') === false &&
+  INDEX.includes('loupePermanentOff') === false &&
+  INDEX.includes('loupeEnabled') === false &&
+  SET_FULL14_CODE.includes('if (on === this.fullscreen)') &&
+  SET_FULL14_CODE.includes('return;'), true);
+check('② 预览 Row 不因 fullscreen 条件移除（全屏态两页放大镜仍生效）',
+  PREVIEW_ROW14_CODE.includes('this.previewImage(this.curItem()!.uri, this.curToken, true)') &&
+  PREVIEW_ROW14_CODE.includes('this.rightPageImage(this.items[this.spreadB].uri, true)') &&
+  PREVIEW_ROW14_CODE.includes('fullscreen') === false, true);
+check('② 放大镜 6cm 圆形几何未退化（圆形裁剪 / 圆心 / 边缘夹界 / Transparent）',
+  LOUPE13_CODE.includes('.width(LOUPE_D_VP)') &&
+  LOUPE13_CODE.includes('.borderRadius(LOUPE_D_VP / 2)') &&
+  LOUPE13_CODE.includes('.clip(true)') &&
+  LOUPE13_CODE.includes('.position({ x: this.loupeLeft(), y: this.loupeTop() })') &&
+  LOUPE13_CODE.includes('.hitTestBehavior(HitTestMode.Transparent)') &&
+  INDEX.includes('loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM)') &&
+  INDEX.includes('return loupeCircleOrigin(this.loupeX, LOUPE_D_VP);'), true);
+check('② 右页放大镜不引入新画质属性（全文 autoResize / HDR 仍恰好 3 处）',
+  LOUPE13_CODE.includes('.autoResize(false)') === false &&
+  LOUPE13_CODE.includes('.dynamicRangeMode(') === false &&
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3, true);
+check('② 移出仍零动画 / 零延迟（两页 hover 链与浮层都无计时器 / 无过渡）',
+  NO_ANIM2.some(s => LOUPE_HOVER14_CODE.includes(s)) === false &&
+  NO_ANIM2.some(s => LOUPE_MOUSE14_CODE.includes(s)) === false &&
+  NO_ANIM2.some(s => PREVIEW13_CODE.includes(s)) === false &&
+  NO_ANIM2.some(s => RIGHT14_CODE.includes(s)) === false, true);
+check('② 第十四轮回归护栏：既有画质 / 顶栏 / ESC / 版本 / 往上层 / 点选滚动 / 预载全未动',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.interpolation(ImageInterpolation.High)').length - 1 >= 3 &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes('回上层') === false &&
+  CODE_LINES.includes('.enabled(') === false &&
+  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  INDEX.includes('const PRELOAD_ALL: boolean = true;') &&
+  TOPBAR_FN.includes('.visibility(this.topToolsVisible ? Visibility.Visible : Visibility.Hidden)') &&
+  QUIT_FN.includes('ability.terminateSelf()') &&
+  INDEX.includes('@State topBarPeek: boolean = false;') &&
+  INDEX.includes('topBarPeekOf(this.topBarPeek, yTop,') &&
+  INDEX.includes('tapScrollAction(row, this.listFirstRow, this.listLastRow,') &&
+  INDEX.split('this.scroller.scrollToIndex(').length - 1 === 3, true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

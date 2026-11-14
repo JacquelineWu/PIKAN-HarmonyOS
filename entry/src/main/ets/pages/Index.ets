@@ -89,7 +89,9 @@ import { FF_GIVEUP, deadTagOf, deadMemoryMatches,
   failFastHint } from '../common/FailFast';
 import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   topBarPeekOf, loupeDiameterVp, loupeCircleOrigin, loupeClampedOffset,
-  loupeInFrame, loupeEligibleOf } from '../common/InteractionPlan';
+  loupeInFrame, loupeEligibleOf, LOUPE_PANE_NONE, LOUPE_PANE_LEFT,
+  LOUPE_PANE_RIGHT, LOUPE_CM_14, loupePaneActiveOf, loupePaneAfterHover,
+  loupeResetOnModeChange, loupeHoverAfterModeChange } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -174,9 +176,11 @@ const TOPBAR_HIDE_MS: number = 2000;
  *  边界微抖不会反复翻转（不闪烁）。显隐都是纯条件渲染，不改主体尺寸、不触发 resize。 */
 const TOPBAR_PEEK_TRIGGER_VP: number = 10;
 const TOPBAR_PEEK_KEEP_VP: number = TOPBAR_H + TOPBAR_KEEP_PX;
-/** 第十三轮：预览图放大镜 —— 直径 3cm（1vp = 1/160 inch，故约 189vp）、局部放大 3 倍。
- *  只作用于预览图片本身；移入显示、移出立即隐藏、边缘夹界不空白。 */
-const LOUPE_CM: number = 3;
+/** 第十四轮：预览图放大镜 —— 直径由 3cm 翻倍到 6cm（1vp = 1/160 inch，故约 378vp）、
+ *  局部放大仍是 3 倍。直径取 InteractionPlan.LOUPE_CM_14 单一真值来源，避免魔数漂移。
+ *  左右并排两页各挂一层、按 pane 独立判定；全屏态同样保留；模式切换时统一复位。
+ *  移入显示、移出立即隐藏、边缘夹界不空白。 */
+const LOUPE_CM: number = LOUPE_CM_14;
 const LOUPE_ZOOM: number = 3;
 const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);
 /** 左栏宽度：展开 / 收起。
@@ -1633,8 +1637,11 @@ struct Index {
    *  只作点选 / 翻页的滚动判据，不参与 UI 渲染，故不用 @State。 */
   private listFirstRow: number = -1;
   private listLastRow: number = -1;
-  /** 第十三轮：预览图放大镜状态。坐标是相对「预览图显示框」的局部坐标；
-   *  loupeHover=false 时浮层完全不渲染（移出立即隐藏、零动画）。 */
+  /** 第十四轮：预览图放大镜状态。loupePane = 当前鼠标所在预览页
+   *  （NONE 无 / LEFT 单页或并排左页 / RIGHT 并排右页）；坐标是相对「该页显示框」
+   *  的局部坐标，两页各自解释自己的坐标，故互不影响。
+   *  loupeHover=false 或 pane 不命中时浮层完全不渲染（移出立即隐藏、零动画）。 */
+  @State loupePane: number = LOUPE_PANE_NONE;
   @State loupeHover: boolean = false;
   @State loupeX: number = 0;
   @State loupeY: number = 0;
@@ -3743,16 +3750,42 @@ struct Index {
     }
   }
 
-  /** 第十三轮：放大镜是否有可显示的图（清晰图 / 过渡图 / 系统兜底 uri 任一）。 */
+  /** 第十三轮：放大镜是否有可显示的图（清晰图 / 过渡图 / 系统兜底 uri 任一）。
+   *  第十四轮起这是「单页 / 并排左页」的判定，右页由 hasLoupeImage 分支处理。 */
   private hasPreviewImage(): boolean {
     return this.viewPixelMap !== undefined || this.lowPixelMap !== undefined || this.viewFailed;
   }
 
-  /** 第十三轮：预览图放大镜的鼠标驱动。
-   *  挂在 previewImage 的 Stack 上，坐标天然相对「预览图显示框」。
-   *  Move 时按坐标兜底判定是否仍在框内（部分 2in1 只派发 Move、不给 enter / leave）；
-   *  onHover(false) 另行同步立即隐藏。只认这一层，左栏 / 右页 / 状态浮层一律不触发。 */
-  private onLoupeMouse(event: MouseEvent, half: boolean): void {
+  /** 第十四轮：按 pane 判定该页是否有可放大内容。
+   *  · 并排右页只看 rightPixelMap（右页刻意不用 uri 兜底，见 rightPageImage）；
+   *  · 单页 / 并排左页沿用 hasPreviewImage（清晰图 / 过渡图 / 系统兜底 uri）。
+   *  两页各判各的，绝不拿左页的图去画右页的放大镜。 */
+  private hasLoupeImage(pane: number): boolean {
+    if (pane === LOUPE_PANE_RIGHT) {
+      return this.rightPixelMap !== undefined;
+    }
+    return this.hasPreviewImage();
+  }
+
+  /** 第十四轮：某页的 hover 收口（移入激活本页 / 移出仅清本页）。
+   *  两页各自挂自己的 onHover，走 loupePaneAfterHover 纯函数：从 A 页直接滑到 B 页时，
+   *  A 迟到的 leave 不会把 B 刚置好的激活页误清 —— 这是双页互不影响的一环。 */
+  private onLoupeHover(on: boolean, pane: number): void {
+    const nextPane: number = loupePaneAfterHover(this.loupePane, pane, on);
+    if (nextPane !== this.loupePane) {
+      this.loupePane = nextPane;
+    }
+    if (!on && nextPane === LOUPE_PANE_NONE) {
+      this.loupeHover = false;
+    }
+  }
+
+  /** 第十四轮：预览图放大镜的鼠标驱动（每页各自一份，pane 由调用方传入）。
+   *  挂在对应预览页的 Stack 上，坐标天然相对「该页显示框」。
+   *  Move 时按坐标兜底判定是否仍在框内（部分 2in1 只派发 Move、不给 enter / leave），
+   *  并同步激活页；onHover(false) 另行同步立即隐藏。
+   *  只认本页这一层，左栏 / 另一页 / 状态浮层一律不触发。 */
+  private onLoupeMouse(event: MouseEvent, pane: number, half: boolean): void {
     if (event.action !== MouseAction.Move) {
       return;
     }
@@ -3760,7 +3793,11 @@ struct Index {
     const y: number = Number(event.y);
     const inside: boolean = x === x && y === y &&
       loupeInFrame(x, y, this.viewBoxW(half), this.frameH());
-    const on: boolean = loupeEligibleOf(inside, this.hasPreviewImage());
+    const on: boolean = loupeEligibleOf(inside, this.hasLoupeImage(pane));
+    const nextPane: number = on ? pane : loupePaneAfterHover(this.loupePane, pane, false);
+    if (nextPane !== this.loupePane) {
+      this.loupePane = nextPane;
+    }
     if (on !== this.loupeHover) {
       this.loupeHover = on;
     }
@@ -6003,6 +6040,18 @@ struct Index {
     if (on === this.fullscreen) {
       return;
     }
+    // 第十四轮：全屏 / 正常模式切换会整块重建布局、画布尺寸与左右页划分，
+    // 残留的放大镜 pane / 坐标 / 悬停态会与之不一致 —— 这正是「退出全屏后
+    // 放大镜失效」的根因。所有切换都从本收口经过，这里统一复位为「无悬停」；
+    // 只清瞬时状态、不设任何永久禁用标志，下一次 onHover(true) / onMouse(Move)
+    // 就会重新激活，故进入全屏、全屏中使用、退出全屏后都能继续正常使用。
+    const loupeModeChanged: boolean = loupeResetOnModeChange(this.fullscreen, on);
+    if (loupeModeChanged) {
+      this.loupePane = LOUPE_PANE_NONE;
+      this.loupeHover = loupeHoverAfterModeChange(this.loupeHover, loupeModeChanged);
+      this.loupeX = 0;
+      this.loupeY = 0;
+    }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
     // 全屏切换会整块隐藏 / 恢复顶栏、状态栏、左栏，固定栏偏移 chrome 已经失效，
@@ -6359,18 +6408,34 @@ struct Index {
       .onClick(() => this.doAction(act))
   }
 
-  /** 第十三轮：预览图放大镜浮层（3cm 圆形 / 3 倍局部 / 跟随光标 / 边缘夹界）。
-   *  只在「鼠标悬停预览图片 + 确有可显示的图」时出现；移出立即隐藏、零动画零延迟。
-   *  圆内放大图 = 主预览显示框整体等比放大 LOUPE_ZOOM 倍（objectFit 仍为 Contain →
+  /** 第十四轮：预览图放大镜浮层（6cm 圆形 / 3 倍局部 / 跟随光标 / 边缘夹界）。
+   *  左右并排两页各调用一次，只按 loupePaneActiveOf 命中当前激活的那一页：
+   *  鼠标在哪页，哪页显示它自己那张图的局部放大，另一页完全不绘制（互不影响）。
+   *  全屏 / 正常模式都用同一份 Builder —— 预览 Row 不因 fullscreen 被移除，
+   *  故全屏态同样保留完整放大镜效果。
+   *  圆内放大图 = 该页显示框整体等比放大 LOUPE_ZOOM 倍（objectFit 仍为 Contain →
    *  与主图逐点对应且不变形），用 loupeClampedOffset 把光标处的图像点对齐圆心，
    *  边缘 clamp 保证圆 (0..d) 始终被放大图覆盖，不空白、不错位。
    *  圆本身用 borderRadius(d/2) + clip(true) 裁出；Transparent 命中模式让浮层不吞鼠标事件，
    *  否则圆一出现就挡住光标、触发 leave → 闪烁。 */
   @Builder
-  loupeLayer(uri: string, half: boolean) {
-    if (loupeEligibleOf(this.loupeHover, this.hasPreviewImage())) {
+  loupeLayer(pane: number, uri: string, half: boolean) {
+    if (loupePaneActiveOf(this.loupePane, pane, this.loupeHover, this.hasLoupeImage(pane))) {
       Stack() {
-        if (this.viewPixelMap !== undefined) {
+        if (pane === LOUPE_PANE_RIGHT) {
+          // 并排右页：只认 rightPixelMap（与右页主图同源，逐点对应）。
+          // 刻意不画 uri 兜底，也不加主画质属性 —— 那三处画质契约要求全源码恰好 3 处，
+          // 放大镜是临时浮层，不参与计数。
+          if (this.rightPixelMap !== undefined) {
+            Image(this.rightPixelMap!)
+              .objectFit(ImageFit.Contain)
+              .interpolation(ImageInterpolation.High)
+              .draggable(false)
+              .width(this.loupeContentW(half))
+              .height(this.loupeContentH())
+              .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+          }
+        } else if (this.viewPixelMap !== undefined) {
           Image(this.viewPixelMap!)
             .objectFit(ImageFit.Contain)
             // 放大镜是「放大显示」的临时浮层，不参与主视图 / 兜底 / 右页那三处
@@ -6472,18 +6537,13 @@ struct Index {
           .opacity(this.lowOpacity)
       }
 
-      // 第十三轮：放大镜浮层排在最后一层（z 序最高），只作用于本预览图片。
-      this.loupeLayer(uri, half);
+      // 第十四轮：放大镜浮层排在最后一层（z 序最高），按左页 pane 独立判定。
+      this.loupeLayer(LOUPE_PANE_LEFT, uri, half);
     }
     .width(this.viewBoxW(half))
     .height(this.frameH())
-    .onHover((on: boolean) => {
-      // 移出预览图片立即隐藏，零动画 / 零延迟 / 无计时器。
-      if (!on) {
-        this.loupeHover = false;
-      }
-    })
-    .onMouse((event: MouseEvent) => this.onLoupeMouse(event, half))
+    .onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_LEFT))
+    .onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_LEFT, half))
   }
 
   /** 对开右页：优先用命中缓存的 PixelMap；未就绪时留中灰占位，不阻塞左页。
@@ -6515,9 +6575,15 @@ struct Index {
           .height(this.frameH())
           .backgroundColor(CANVAS_BG)
       }
+
+      // 第十四轮：右页也挂自己的放大镜浮层（按 RIGHT pane 独立判定、取右页图源）。
+      // 与左页各用各的局部坐标与图源，同一时刻只会命中被悬停的那一页。
+      this.loupeLayer(LOUPE_PANE_RIGHT, uri, half);
     }
     .width(this.viewBoxW(half))
     .height(this.frameH())
+    .onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_RIGHT))
+    .onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_RIGHT, half))
   }
 
   // ------------------------------------------------------------------
