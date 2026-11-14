@@ -93,7 +93,12 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   LOUPE_PANE_RIGHT, LOUPE_CM_14, loupePaneActiveOf, loupePaneAfterHover,
   loupeResetOnModeChange, loupeHoverAfterModeChange,
   LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,
-  loupeVisibleOf } from '../common/InteractionPlan';
+  loupeVisibleOf, ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,
+  escActionOf, shouldCaptureWindowRect, shouldRestoreWindowRect, msSinceFullExitOf,
+  LOUPE_IP_NONE, LOUPE_IP_MEDIUM, LOUPE_IP_HIGH,
+  loupeEffectiveScaleOf, loupeNeedsResampleOf, loupeInterpolationTierOf,
+  loupePixelAlignOf, loupeResampleEdgeOf,
+  loupeResampleStableOf } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -185,6 +190,20 @@ const TOPBAR_PEEK_KEEP_VP: number = TOPBAR_H + TOPBAR_KEEP_PX;
 const LOUPE_CM: number = LOUPE_CM_14;
 const LOUPE_ZOOM: number = 3;
 const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);
+/** 第十六轮：放大镜放大倍率换算用的密度比基准（1vp ≈ 1px 的保守值，与屏幕 dpi 解耦）；
+ *  有效放大倍率 = LOUPE_ZOOM × 主视图 zoom × 该基准，仅用于插值分档判定，不参与几何。 */
+const LOUPE_DENSITY_RATIO: number = 1;
+/** 第十六轮：重采样目标解码边上限（防止超大画布 ×3 放大把解码分辨率推到失控）。
+ *  是 loupeResampleEdgeOf 的 cap；decodePx 只在原图更大时按它降采样，
+ *  原图比它小则按原图分辨率解，故绝大多数相片实际占用远低于该上限。 */
+const LOUPE_RESAMPLE_MAX_EDGE: number = 8192;
+/** 第十六轮：解码边稳定阈值 —— 相邻两档目标边差小于该值就不重解，性能稳定。 */
+const LOUPE_RESAMPLE_STABLE_MIN_DELTA: number = 64;
+/** 第十六轮：退出全屏后的 ESC 冷却期（ms）。真全屏下 ESC 常被窗口管理器先消费，
+ *  系统自行退出沉浸 → 画布缩小触发自愈 setFull(false) → 随后补发 / 迟到的那一次 ESC
+ *  会落到「非全屏」而被误当成「再次 ESC 退出 APP」。冷却期内只吞一次，避免首次 ESC
+ *  直接退出 APP；吞完立即清零，用户紧接着再按一次 ESC 就正常退出 APP。 */
+const FULL_EXIT_ESC_GUARD_MS: number = 400;
 /** 左栏宽度：展开 / 收起。
  *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 往上层 / 选择文件夹）等宽并排且不重叠；
  *  LIST_MAX_W 是上限，避免个别超长档案名把右侧预览区压没。
@@ -1731,6 +1750,27 @@ struct Index {
   private preFullFlipV: boolean = false;
   private preFullStatus: string = '';
   private preFullTopbar: boolean = true;
+  /** 第十六轮：进入全屏前的「普通模式窗口尺寸与位置」内存快照（packWindowRect 口径）。
+   *  这是「本次全屏往返」专用，不落盘、不覆盖重启会话记忆 savedWindowRect；
+   *  退出全屏、窗口形态恢复之后，用它精确 resize + moveWindowTo 还原尺寸位置。 */
+  private preFullRect: string = '';
+  private hasPreFullRect: boolean = false;
+  /** 第十六轮：退出全屏时是否待执行精确 rect 恢复（幂等，用完即清）。 */
+  private restoreRectPending: boolean = false;
+  /** 第十六轮：最近一次「全屏→普通」退出的时刻（供 ESC 冷却判定），0 = 从未退出。
+   *  由 setFull() 下降沿统一设置；onAreaChange 自愈分支也会再置一次表明该路径。
+   *  冷却期只吞一次补发 / 迟到的 ESC，吞掉后即清零，故用户再次按 ESC 立即退出 APP。 */
+  private lastFullExitAt: number = 0;
+
+  // ---- 第十六轮：放大镜 >1:1 重采样专用高分辨率图源 ----
+  /** 按放大后像素需求重新解码的一张 PixelMap，供放大镜圆内绘制（1:1 旁路时不生成）。
+   *  自有、由本类 release；刻意不进 previews 缓存，避免污染 LRU 与解码档位复用判据。 */
+  @State loupeHiPx: image.PixelMap | undefined = undefined;
+  private loupeHiEntry: PreviewEntry | undefined = undefined;
+  private loupeHiUri: string = '';
+  private loupeHiPane: number = LOUPE_PANE_NONE;
+  private loupeHiEdge: number = 0;
+  private loupeHiToken: number = 0;
 
   // ---- 滚轮翻页：去抖 + 合并（见 onWheel / flushWheel 注释）----
   private lastAxisMs: number = 0;     // 最近一次轴事件（滚轮/触控板）的时刻，用于屏蔽「被当成拖拽」的伪平移
@@ -1914,6 +1954,7 @@ struct Index {
     }
     this.clearPreviews();
     this.releaseViewOwned();
+    this.clearLoupeHiRes(); // 第十六轮：页面销毁时释放放大镜专用高清 PixelMap
     this.clearWheel();
     this.clearTopbarTimer();
     this.sizeSeq++; // 作废还在跑的体积补测任务
@@ -3673,6 +3714,13 @@ struct Index {
     const next: boolean = loupeEnabledAfterRightPress(this.loupeEnabled, rightClick);
     if (next !== this.loupeEnabled) {
       this.loupeEnabled = next;
+      // 第十六轮：关闭时立刻释放专用高清图源（不占内存）；开启时若鼠标已在某页上，
+      // 立即按当前档位补解一次，右键一开就能看到最清晰效果，不必先移出再移入。
+      if (!next) {
+        this.clearLoupeHiRes();
+      } else if (this.loupePane !== LOUPE_PANE_NONE && this.loupeHover) {
+        this.ensureLoupeHiRes(this.loupePane);
+      }
     }
   }
 
@@ -3793,6 +3841,10 @@ struct Index {
     if (!on && nextPane === LOUPE_PANE_NONE) {
       this.loupeHover = false;
     }
+    if (on) {
+      // 第十六轮：移入即按 >1:1 档位补解高清图源（1:1 及以下纯函数会直接旁路）。
+      this.ensureLoupeHiRes(pane);
+    }
   }
 
   /** 第十四轮：预览图放大镜的鼠标驱动（每页各自一份，pane 由调用方传入）。
@@ -3819,25 +3871,30 @@ struct Index {
     if (on) {
       this.loupeX = x;
       this.loupeY = y;
+      // 第十六轮：Move 兜底也检查一次目标档位（同图同档零重解，性能稳定）。
+      this.ensureLoupeHiRes(pane);
     }
   }
 
-  /** 放大镜圆内放大图的尺寸：主预览显示框整体等比放大 LOUPE_ZOOM 倍。 */
+  /** 放大镜圆内放大图的尺寸：主预览显示框整体等比放大 LOUPE_ZOOM 倍。
+   *  第十六轮：全部收敛到整像素 —— 浮点尺寸会让 GPU 落在子像素上采样，
+   *  产生边缘粗糙 / 错位；取整后每个显示像素与源像素严格对齐。 */
   private loupeContentW(half: boolean): number {
-    return this.viewBoxW(half) * LOUPE_ZOOM;
+    return loupePixelAlignOf(this.viewBoxW(half) * LOUPE_ZOOM);
   }
 
   private loupeContentH(): number {
-    return this.frameH() * LOUPE_ZOOM;
+    return loupePixelAlignOf(this.frameH() * LOUPE_ZOOM);
   }
 
-  /** 圆内放大图偏移（夹界版）：把光标处的图像点对齐圆心，边缘不空白。 */
+  /** 圆内放大图偏移（夹界版）：把光标处的图像点对齐圆心，边缘不空白。
+   *  取整至多带来 1px 误差，圆本身有 2vp 边框覆盖，圆内始终被放大图铺满。 */
   private loupeOffX(half: boolean): number {
-    return loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM);
+    return loupePixelAlignOf(loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM));
   }
 
   private loupeOffY(): number {
-    return loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM);
+    return loupePixelAlignOf(loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM));
   }
 
   /** 圆形放大镜左上角：圆心严格落在光标处（实时跟随）。 */
@@ -3847,6 +3904,114 @@ struct Index {
 
   private loupeTop(): number {
     return loupeCircleOrigin(this.loupeY, LOUPE_D_VP);
+  }
+
+  // ------------------------------------------------------------------
+  // 第十六轮：放大镜 >1:1 重采样（分档插值 / 高分辨率图源 / 1:1 旁路）
+  // ------------------------------------------------------------------
+
+  /** 有效放大倍率 = 局部 3× × 主视图缩放 × 密度比。
+   *  这是「是否严格超过原图 1:1（100%）」的唯一真值来源，不在 UI 里另算。 */
+  private loupeScale(): number {
+    return loupeEffectiveScaleOf(LOUPE_ZOOM, this.zoom, LOUPE_DENSITY_RATIO);
+  }
+
+  /** 按倍率分档选 ArkUI 插值档：
+   *  ≤1:1 → None（最近邻，旁路：未缩放 / 正好 1:1 / 缩小完全不受影响）；
+   *  1:1 < scale ≤ 2 → High(Cubic)：补足像素、线条清晰、形状颜色不失真；
+   *  scale > 2 → Medium(MipMap)：3 倍放大镜这类高倍改用平滑重采样，
+   *  消锯齿、边缘平滑、不过冲，避免 Cubic 锐化核放大振铃带来的光晕 / 伪影。
+   *  ⚠️ 官方限制：`.interpolation()` 对 PixelMap 图源不生效，故它主要作用于
+   *  `Image(uri)` 兜底分支；PixelMap 分支的画质由下面的高分辨率重解码补足真实像素。 */
+  private loupeInterpolation(): ImageInterpolation {
+    const tier: number = loupeInterpolationTierOf(this.loupeScale());
+    if (tier === LOUPE_IP_NONE) {
+      return ImageInterpolation.None;
+    }
+    if (tier === LOUPE_IP_HIGH) {
+      return ImageInterpolation.High;
+    }
+    if (tier === LOUPE_IP_MEDIUM) {
+      return ImageInterpolation.Medium;
+    }
+    return ImageInterpolation.None;
+  }
+
+  /** 目标解码边 = 主视图解码边 × 局部放大倍率，夹到上限控内存。
+   *  ≤1:1 时 loupeResampleEdgeOf 原样返回 baseEdge（1:1 旁路，不额外解图）。 */
+  private loupeResampleTargetEdge(): number {
+    return loupeResampleEdgeOf(this.viewEdge(), LOUPE_ZOOM, LOUPE_RESAMPLE_MAX_EDGE);
+  }
+
+  /** 当前 pane 对应的档案 uri：左页 = 当前张，右页 = 对开第二张。 */
+  private loupeUriOf(pane: number): string {
+    if (pane === LOUPE_PANE_RIGHT) {
+      const b: number = this.spreadB;
+      return b >= 0 && b < this.items.length ? this.items[b].uri : '';
+    }
+    const it: ImageItem | undefined = this.curItem();
+    return it !== undefined ? it.uri : '';
+  }
+
+  /** 高分辨率图源是否可用于当前页：uri / pane 必须都对上。
+   *  切图或换页时绝不会把上一张的高清图错画到新图上（自动回退既有图源）。 */
+  private loupeHiUsable(uri: string, pane: number): boolean {
+    return this.loupeHiPx !== undefined &&
+      this.loupeHiUri === uri && this.loupeHiPane === pane &&
+      loupeNeedsResampleOf(this.loupeScale());
+  }
+
+  /** >1:1 时按放大后像素需求补解一张高分辨率 PixelMap 给放大镜 —— 本轮画质修复的核心。
+   *  根因：圆内原来画的是「1:1 显示框分辨率」的 viewPixelMap，再硬拉 3 倍 →
+   *  每个源像素被放大成像素块（锯齿 / 像素化 / 边缘粗糙）；而 ArkUI 的
+   *  `.interpolation()` 对 PixelMap 不生效，光换插值档救不了。
+   *  这里改用项目自己的 decodePx()（EXIF 旋转 / ICC / HDR 全链路一致）按目标边重解，
+   *  放大后每个显示像素都有真实源像素；配合整像素对齐，边缘平滑且线条清晰。
+   *  性能稳定：同图同页 + 目标边变化小于阈值时直接复用，鼠标在圆内高频微动
+   *  不反复重解码；代号作废的迟到结果立即释放，`1:1 及以下` 完全旁路。 */
+  private ensureLoupeHiRes(pane: number): void {
+    if (!this.loupeEnabled || !loupeNeedsResampleOf(this.loupeScale())) {
+      return;
+    }
+    const uri: string = this.loupeUriOf(pane);
+    const edge: number = this.loupeResampleTargetEdge();
+    if (uri.length === 0 || edge <= 0) {
+      return;
+    }
+    if (this.loupeHiPx !== undefined && this.loupeHiUri === uri &&
+      this.loupeHiPane === pane &&
+      loupeResampleStableOf(this.loupeHiEdge, edge, LOUPE_RESAMPLE_STABLE_MIN_DELTA)) {
+      return;
+    }
+    this.loupeHiUri = uri;
+    this.loupeHiPane = pane;
+    this.loupeHiEdge = edge;
+    const token: number = ++this.loupeHiToken;
+    this.decodeTo(uri, edge, false).then((e: PreviewEntry | undefined) => {
+      if (token !== this.loupeHiToken) {
+        this.releaseUncachedEntry(e); // 迟到作废结果不接手、不泄漏
+        return;
+      }
+      if (e === undefined) {
+        return; // 解码失败：继续用既有图源兜底，放大镜不会空白
+      }
+      const old: PreviewEntry | undefined = this.loupeHiEntry;
+      this.loupeHiEntry = e;
+      this.loupeHiPx = e.px;
+      this.releaseUncachedEntry(old);
+    });
+  }
+
+  /** 释放高分辨率放大镜图源（关闭开关 / 模式切换 / 页面销毁），并作废旧代号。 */
+  private clearLoupeHiRes(): void {
+    this.loupeHiToken++;
+    const old: PreviewEntry | undefined = this.loupeHiEntry;
+    this.loupeHiEntry = undefined;
+    this.loupeHiPx = undefined;
+    this.loupeHiUri = '';
+    this.loupeHiPane = LOUPE_PANE_NONE;
+    this.loupeHiEdge = 0;
+    this.releaseUncachedEntry(old);
   }
 
   /** fillSizes 补测到体积后同步到左栏行（rows 与 items 可能是不同对象） */
@@ -6051,9 +6216,76 @@ struct Index {
     }
   }
 
+  /** 第十六轮：进入全屏前抓「普通模式窗口尺寸与位置」快照。
+   *  仅 普通→全屏 上升沿 + 自由窗口(FLOATING) 才抓；窗口未就绪 / 最大化态一律不抓，
+   *  退出时就没有快照，自动降级到既有 recover()/EXIT_IMMERSIVE 行为，绝不误缩窗口。
+   *  必须在任何 maximize / 沉浸窗口 API 之前调用 —— setFull 是本轮最早收口。 */
+  private capturePreFullRect(prevFull: boolean, nextFull: boolean): void {
+    if (!prevFull && nextFull) {
+      // 每次进入全屏先清空上一轮残留，避免窗口未就绪时误用到旧快照
+      this.preFullRect = '';
+      this.hasPreFullRect = false;
+      this.restoreRectPending = false;
+    }
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    let floating: boolean = false;
+    if (win !== undefined) {
+      try {
+        floating = win.getWindowStatus() === window.WindowStatusType.FLOATING;
+      } catch (e) {
+        floating = false;
+      }
+    }
+    if (win === undefined || !shouldCaptureWindowRect(prevFull, nextFull, floating)) {
+      return;
+    }
+    try {
+      const r = win.getWindowProperties().windowRect;
+      const packed: string = packWindowRect({
+        left: r.left, top: r.top, width: r.width, height: r.height
+      });
+      if (windowRectUsable(parseWindowRect(packed), WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
+        this.preFullRect = packed;
+        this.hasPreFullRect = true;
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'fullRect: capture failed');
+    }
+  }
+
+  /** 第十六轮：退出全屏、窗口形态恢复之后，按快照精确还原普通模式的尺寸与位置。
+   *  每步独立 try/catch，某机型不支持只记日志；用完立即清空快照，保证幂等。 */
+  private async restorePreFullRect(win: window.Window): Promise<void> {
+    this.restoreRectPending = false;
+    const rect: WindowRect | undefined = parseWindowRect(this.preFullRect);
+    this.hasPreFullRect = false;
+    this.preFullRect = '';
+    if (rect === undefined ||
+      !windowRectUsable(rect, WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
+      return;
+    }
+    try {
+      await win.resize(rect.width, rect.height);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'fullRect: resize failed');
+    }
+    try {
+      await win.moveWindowTo(rect.left, rect.top);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'fullRect: moveWindowTo failed');
+    }
+  }
+
   private setFull(on: boolean): void {
     if (on === this.fullscreen) {
       return;
+    }
+    const prevFull: boolean = this.fullscreen;
+    // 第十六轮：上升沿抓「进入全屏前的窗口尺寸与位置」快照（须在任何窗口 API 之前）；
+    //   下降沿标记「待精确恢复」。两者都由 InteractionPlan 纯函数判据收口。
+    this.capturePreFullRect(prevFull, on);
+    if (shouldRestoreWindowRect(prevFull, on, this.hasPreFullRect, this.preFullRect.length > 0)) {
+      this.restoreRectPending = true;
     }
     // 第十四轮：全屏 / 正常模式切换会整块重建布局、画布尺寸与左右页划分，
     // 残留的放大镜 pane / 坐标 / 悬停态会与之不一致 —— 这正是「退出全屏后
@@ -6066,6 +6298,13 @@ struct Index {
       this.loupeHover = loupeHoverAfterModeChange(this.loupeHover, loupeModeChanged);
       this.loupeX = 0;
       this.loupeY = 0;
+      // 第十六轮：画布尺寸变了，原目标解码边失效 → 释放高清图源，下次移入按新画布重解。
+      this.clearLoupeHiRes();
+    }
+    // 第十六轮：记录「全屏→普通」的下降沿时刻，供 ESC 冷却期吞掉系统补发 / 迟到的按键。
+    // 覆盖全部退出路径（ESC / 双击 / F11 / 系统自愈），不只自愈一条。
+    if (prevFull && !on) {
+      this.lastFullExitAt = Date.now();
     }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
@@ -6317,6 +6556,11 @@ struct Index {
       } catch (e) {
         hilog.warn(DOMAIN, TAG, 'fullscreen: title/dock hover restore failed');
       }
+      // 第十六轮：窗口形态恢复之后，按进入全屏前的快照精确还原普通模式尺寸与位置。
+      // 放在 recover()/EXIT_IMMERSIVE 之后，避免被最大化形态覆盖；快照用完即清。
+      if (this.restoreRectPending) {
+        await this.restorePreFullRect(win);
+      }
     }
   }
 
@@ -6387,16 +6631,25 @@ struct Index {
       case KeyCode.KEYCODE_F11:
         this.toggleFull();
         break;
-      case KeyCode.KEYCODE_ESCAPE:
-        if (this.fullscreen) {
-          // 第十一轮确认：全屏态保持原有全屏交互，这里绝不退出 APP。
-          // 2026-11-11 第四轮：ESC 与双击 / F11 **完全同一个入口** toggleFull()，
-          // 不再单独写 setFull(false) —— 两条路径分叉正是「ESC 效果跟双击不一样」的来源。
+      case KeyCode.KEYCODE_ESCAPE: {
+        // 第十六轮：**ESC 响应按当前窗口状态区分**，唯一真值来源是纯函数 escActionOf。
+        //  · 全屏 → EXIT_FULL：只退出全屏并恢复进入前的窗口尺寸 / 位置，绝不退出 APP；
+        //  · 非全屏 + 刚退出全屏的冷却期内 → NONE：真全屏下 ESC 常被窗口管理器先消费，
+        //    系统自行退出沉浸后画布缩小触发自愈 setFull(false)，随后补发 / 迟到的那一次
+        //    ESC 会落到「非全屏」；不拦截就会被当成「再次 ESC」直接退出 APP；
+        //  · 其余非全屏 → QUIT_APP：返回普通模式后再次按 ESC 才退出 APP。
+        //  冷却只吞一次（吞后立即清零），不会把用户紧接着的第二次 ESC 也吞掉。
+        const escAct: number = escActionOf(this.fullscreen,
+          msSinceFullExitOf(Date.now(), this.lastFullExitAt), FULL_EXIT_ESC_GUARD_MS);
+        if (escAct === ESC_ACT_EXIT_FULL) {
           this.toggleFull();
-        } else {
+        } else if (escAct === ESC_ACT_QUIT_APP) {
           this.quitApp();
+        } else if (escAct === ESC_ACT_NONE) {
+          this.lastFullExitAt = 0; // 吞掉这一次补发 / 迟到 ESC，冷却随即结束
         }
         break;
+      }
       default:
         break;
     }
@@ -6440,20 +6693,34 @@ struct Index {
    *  与主图逐点对应且不变形），用 loupeClampedOffset 把光标处的图像点对齐圆心，
    *  边缘 clamp 保证圆 (0..d) 始终被放大图覆盖，不空白、不错位。
    *  圆本身用 borderRadius(d/2) + clip(true) 裁出；Transparent 命中模式让浮层不吞鼠标事件，
-   *  否则圆一出现就挡住光标、触发 leave → 闪烁。 */
+   *  否则圆一出现就挡住光标、触发 leave → 闪烁。
+   *  第十六轮：>1:1 时优先画「按放大后像素需求重解码」的高分辨率图源（loupeHiPx），
+   *  圆内放大图的尺寸 / 偏移全部整像素对齐，插值档按有效倍率分档；≤1:1 完全旁路，
+   *  既不额外解码也不改插值，未缩放 / 1:1 显示不受影响。 */
   @Builder
   loupeLayer(pane: number, uri: string, half: boolean) {
     if (loupeVisibleOf(this.loupeEnabled, this.loupePane, pane,
       this.loupeHover, this.hasLoupeImage(pane))) {
       Stack() {
-        if (pane === LOUPE_PANE_RIGHT) {
+        if (this.loupeHiUsable(uri, pane)) {
+          // 第十六轮：>1:1 时优先用「按放大后像素需求重解码」的高分辨率图源。
+          // 真实像素补足 → 无像素块 / 无锯齿；objectFit(Contain) 保证与主图逐点对应、不变形。
+          // 官方 .interpolation() 对 PixelMap 不生效，这里靠源分辨率而非插值档取胜。
+          Image(this.loupeHiPx!)
+            .objectFit(ImageFit.Contain)
+            .interpolation(this.loupeInterpolation())
+            .draggable(false)
+            .width(this.loupeContentW(half))
+            .height(this.loupeContentH())
+            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+        } else if (pane === LOUPE_PANE_RIGHT) {
           // 并排右页：只认 rightPixelMap（与右页主图同源，逐点对应）。
           // 刻意不画 uri 兜底，也不加主画质属性 —— 那三处画质契约要求全源码恰好 3 处，
           // 放大镜是临时浮层，不参与计数。
           if (this.rightPixelMap !== undefined) {
             Image(this.rightPixelMap!)
               .objectFit(ImageFit.Contain)
-              .interpolation(ImageInterpolation.High)
+              .interpolation(this.loupeInterpolation())
               .draggable(false)
               .width(this.loupeContentW(half))
               .height(this.loupeContentH())
@@ -6463,8 +6730,8 @@ struct Index {
           Image(this.viewPixelMap!)
             .objectFit(ImageFit.Contain)
             // 放大镜是「放大显示」的临时浮层，不参与主视图 / 兜底 / 右页那三处
-            // autoResize(false) 的画质契约计数；High 插值保证放大后仍清晰。
-            .interpolation(ImageInterpolation.High)
+            // autoResize(false) 的画质契约计数；插值按倍率分档取最佳视觉。
+            .interpolation(this.loupeInterpolation())
             .draggable(false)
             .width(this.loupeContentW(half))
             .height(this.loupeContentH())
@@ -6472,7 +6739,7 @@ struct Index {
         } else if (this.lowPixelMap !== undefined) {
           Image(this.lowPixelMap!)
             .objectFit(ImageFit.Contain)
-            .interpolation(ImageInterpolation.High)
+            .interpolation(this.loupeInterpolation())
             .draggable(false)
             .width(this.loupeContentW(half))
             .height(this.loupeContentH())
@@ -6480,7 +6747,7 @@ struct Index {
         } else {
           Image(uri)
             .objectFit(ImageFit.Contain)
-            .interpolation(ImageInterpolation.High)
+            .interpolation(this.loupeInterpolation())
             .draggable(false)
             .width(this.loupeContentW(half))
             .height(this.loupeContentH())
@@ -7039,6 +7306,9 @@ struct Index {
                 FULL_EXIT_SHRINK_RATIO)) {
               this.canvasW = w;
               this.canvasH = h;
+              // 第十六轮：这是「系统自行退出沉浸」的自愈路径 —— 记时刻供 ESC 冷却判定，
+              // 吞掉随后补发 / 迟到的那一次 ESC，避免首次 ESC 直接退出 APP。
+              this.lastFullExitAt = Date.now();
               this.setFull(false);
               return;
             }

@@ -30,7 +30,7 @@
 | 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` **恒亮恒可点，永不 grey out / 永不禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
-| 鼠标键 | **右键 toggle 放大镜开关**（预设关闭，见第十五轮）、**双击切换全屏**；左键单击不放大（第七轮起）、右键拖拽平移；双击档案名同样切换全屏 |
+| 鼠标键 | **右键 toggle 放大镜开关**（预设关闭，见第十五轮）、**双击切换全屏**；左键单击不放大（第七轮起）、右键拖拽平移；双击档案名同样切换全屏。**放大镜放大画质见第十六轮**：>1:1 时按放大后像素需求重解码高清图源补足真实像素 + 按倍率分档插值 + 整像素对齐，消锯齿 / 像素化 / 边缘粗糙，1:1 显示不受影响 |
 | 缩放 | 滚轮(Ctrl) / 双指捏合 / 键盘 `↑` `↓` / 左键放大 ×1.5；右下角角标 **100% = 原图像素 1:1**（ACDSee / Photoshop 口径，适应窗口通常 13%~30%）。**11-10 起取消 `＋` `－` 按钮** |
 | 平移 / 旋转 / 镜像 | 拖拽画布 / `R` 右旋、`Shift+R` 左旋 / `Shift+H` 水平、`Shift+V` 垂直（可叠加）。**11-10 起取消 `左旋` `右旋` `镜像H` `镜像V` 按钮** |
 | 复位 / 1:1 | 键盘 `0` 复位适应；`F` 切 1:1（**第十五轮起右键不再复位，改为 toggle 放大镜**）。**11-10 起取消 `适应` `1:1` 按钮** |
@@ -39,12 +39,12 @@
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
-| 关闭应用 | **`Esc`**（非全屏时；全屏下 `Esc` 先退全屏，再按一次才关闭） |
+| 关闭应用 | **`Esc`** 按当前窗口状态区分（第十六轮 `escActionOf`）：全屏下首次 `Esc` 先退全屏并恢复进全屏前的窗口尺寸位置（**绝不退出 APP**），返回普通模式后再按一次才关闭；系统自愈退出全屏后补发的迟到 ESC 被 400ms 冷却吞掉，不会误退出 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
-| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
+| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十六轮**：进全屏前抓普通模式窗口尺寸位置内存快照，退出时 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
 | 色彩 / HDR / EXIF | 解码时按 EXIF Orientation 自动摆正（含 4 种镜像）；识别内嵌 ICC 映射到的标准色彩空间（sRGB / Display P3 / BT.2020…）并显示；HDR 图按 HDR 解码 + 显示端 HIGH 动态范围，平台不支持时自动降 SDR。**平台边界**：HarmonyOS 26 没有「从 ICC profile 字节流构造色彩空间」API，详见专章 |
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
@@ -182,6 +182,12 @@ title bar / dock bar」。**即使窗口已经是最大化态也要再调一次*
 
 `Esc` 是**两级**的：全屏时先退全屏，非全屏时才真正退出应用 ——
 否则在全屏下按一次 Esc 就整个退出，等于把「退全屏」这条路堵死了。
+
+**第十六轮**：ESC 由纯函数 `escActionOf(fullscreen, sinceExitMs, guardMs)` 按当前窗口状态分派；
+`setFull()` 下降沿记 `lastFullExitAt`，覆盖 ESC / 双击 / F11 / 系统自愈全部退出路径，
+用 400ms 冷却吞掉真全屏下「系统先消费 ESC → 自愈退全屏 → 补发迟到 ESC」那一次，
+避免首次 ESC 落到非全屏分支被误当成「再次 ESC」直接退出 APP（详见第十六轮章节）。
+退全屏还会按进全屏前的 `preFullRect` 快照精确 `resize` + `moveWindowTo` 还原窗口尺寸位置。
 
 退出走 `UIAbilityContext.terminateSelf()`：
 
@@ -525,6 +531,82 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第十六轮：全屏往返窗口几何 / ESC 分状态 / 放大镜 >1:1 重采样（2026-11-15）
+
+两件事：① 双击进全屏保留普通模式的窗口尺寸与位置，ESC 首次退全屏并精确还原、
+再次 ESC 才退出 APP；② 修复放大镜放大后的锯齿 / 像素化 / 边缘粗糙，>1:1 才补足像素、
+消除锯齿且边缘平滑清晰、避免模糊 / 光晕 / 伪影，1:1 显示不受影响、性能稳定。
+
+### 诉求
+
+1. 普通模式双击进全屏时保留进入前的窗口尺寸和位置；全屏首次 ESC 退出全屏、返回普通模式
+   并恢复该尺寸位置；返回普通模式后再次 ESC 退出 APP；ESC 按当前窗口状态区分，
+   避免首次 ESC 直接退出 APP。
+2. 放大镜放大后的锯齿 / 像素化 / 边缘粗糙：>1:1 时用合适的插值 / 重采样补足像素，
+   消锯齿 + 边缘平滑 + 线条清晰 + 形状颜色不失真，避免明显模糊 / 光晕 / 伪影，
+   兼容现有交互与不同倍率，未缩放 / 1:1 显示不受影响，性能稳定。
+
+### 根因
+
+| 项 | 根因 |
+|---|---|
+| 首次 ESC 直接退出 APP | 真全屏下 ESC 常被**窗口管理器先消费**：系统自行退出沉浸 → 画布缩小触发自愈 `setFull(false)` → 随后补发 / 迟到的那一次 ESC 落到「非全屏」分支，被当成「再次 ESC」直接 `quitApp()` |
+| 退出全屏窗口尺寸位置错 | 旧逻辑只靠 `recover()` / `maximize(EXIT_IMMERSIVE)` 依赖窗口管理器记忆形态，**进全屏前没有自己抓 rect 快照**，无法精确还原普通模式的尺寸位置 |
+| 放大镜锯齿 / 像素化 | 圆内原来画的是「按 1:1 显示框分辨率解码」的 `viewPixelMap`，再硬拉 3 倍 → 每个源像素被放大成像素块；且 **ArkUI `.interpolation()` 对 `PixelMap` 图源不生效**，光换插值档救不了 |
+| 边缘粗糙 / 错位 | 放大镜尺寸 / 圆心 / 偏移是浮点，GPU 落在子像素上采样，边缘发虚、粗糙 |
+
+### 做法（窗口 / ESC）
+
+| 环节 | 改动 |
+|---|---|
+| 纯函数 | `InteractionPlan.ts` 新增 `escActionOf(fullscreen, sinceExitMs, guardMs)` → `ESC_ACT_NONE / EXIT_FULL / QUIT_APP`；`shouldCaptureWindowRect` / `shouldRestoreWindowRect` 沿判据；`msSinceFullExitOf` |
+| 抓快照 | 进全屏上升沿 + 自由窗口(FLOATING) 才 `capturePreFullRect()`：`getWindowProperties().windowRect` → `packWindowRect` + `windowRectUsable` 校验，存**内存** `preFullRect`。不落盘、不覆盖重启会话记忆 `savedWindowRect`；最大化态 / 窗口未就绪不抓（降级既有形态恢复，绝不误缩） |
+| 精确恢复 | 退全屏下降沿标记 `restoreRectPending`，`applyWindowFullScreen(false)` 在 `recover()` / `EXIT_IMMERSIVE` **之后** `restorePreFullRect(win)`：`await win.resize(w,h)` + `await win.moveWindowTo(left,top)`，每步独立 try/catch，用完即清（幂等）。排在形态恢复之后才不会被最大化覆盖 |
+| ESC 分派 | `onKey` 的 ESC case 由 `escActionOf(this.fullscreen, msSinceFullExitOf(Date.now(), lastFullExitAt), 400)` **唯一真值来源**驱动：全屏 → `toggleFull()`（绝不退出 APP）；非全屏 + 冷却期内 → `NONE`（吞一次补发 ESC 并把 `lastFullExitAt` 清零）；其余非全屏 → `quitApp()` |
+| 冷却覆盖 | `setFull()` 下降沿统一记 `lastFullExitAt`，覆盖 **ESC / 双击 / F11 / 系统自愈**全部退出路径；冷却只吞一次，用户紧接着第二次 ESC 立即退出 APP |
+
+### 做法（放大镜重采样）
+
+| 环节 | 改动 |
+|---|---|
+| 纯函数 | `loupeEffectiveScaleOf`（有效倍率 = 局部 3× × 主视图 zoom × 密度比）、`loupeNeedsResampleOf`（严格 >1:1 才重采样）、`loupeInterpolationTierOf`（≤1:1→NONE / 1~2×→HIGH / >2×→MEDIUM）、`loupePixelAlignOf`、`loupeResampleEdgeOf`、`loupeResampleStableOf` |
+| **补足真实像素**（核心） | `>1:1` 时用项目自己的 `decodeTo(uri, edge, false)`（EXIF 旋转 / ICC / HDR 全链路一致）按 `loupeResampleTargetEdge() = 主视图解码边 × 3`（夹 `8192` 上限控内存）**重解一张高清 `loupeHiPx`**；放大后每个显示像素都有真实源像素，从根上消除像素化 / 锯齿。官方 `.interpolation()` 对 PixelMap 不生效，靠源分辨率而非插值档取胜 |
+| 分档插值 | `loupeInterpolation()` 按有效倍率映射 `ImageInterpolation`：≤1:1 → `None`（旁路）、1~2× → `High`(Cubic 保线条清晰)、>2× → `Medium`(平滑重采样，避免 Cubic 锐化核高倍放大欠采样源的过冲光晕 / 振铃伪影) |
+| 整像素对齐 | `loupeContentW/H`、`loupeOffX/Y` 全部 `loupePixelAlignOf` 收敛到整像素，消除子像素采样错位导致的边缘粗糙 |
+| 不失真 | `objectFit(ImageFit.Contain)` 等比逐点对应、不变形；不改主视图三处 `autoResize(false)` / `dynamicRangeMode` / `High` 画质 |
+| 1:1 旁路 | `loupeNeedsResampleOf` 为 false 时不额外解码、不改插值档，未缩放 / 正好 1:1 / 缩小显示完全不受影响 |
+| 性能稳定 | `loupeResampleStableOf`（目标边差 <64 复用上一张，鼠标高频微动不反复重解码）；`loupeHiToken` 代号作废迟到结果并 `releaseUncachedEntry` 释放（不泄漏）；`loupeHiUri`+`loupeHiPane` 双重校验，切图换页绝不把上一张错画到新图上；`loupeHiPx` 刻意不进 `previews` LRU 缓存 |
+| 生命周期 | hover 移入 / `onMouse(Move)` / 右键开启触发 `ensureLoupeHiRes()`；关闭开关 / `setFull` 模式切换 / `aboutToDisappear` 页面销毁 `clearLoupeHiRes()` 释放并作废旧代号 |
+
+### 行为
+
+- 普通模式双击进全屏：先存尺寸位置；全屏首次 ESC 退出全屏、恢复该尺寸位置，**绝不退出 APP**；
+  返回普通模式后再次 ESC 才退出 APP。系统自愈退出沉浸后补发的 ESC 被 400ms 冷却吞掉，不会误退出。
+- 放大镜：`>1:1` 时圆内用高清重解码图源 + 分档插值 + 整像素对齐，消锯齿 / 像素化 / 边缘粗糙，
+  边缘平滑、线条清晰、形状颜色不失真，无明显模糊 / 光晕 / 伪影；1:1 及以下完全不受影响。
+- 其余交互不变：右键 toggle、6cm 双页独立、全屏保留、退出全屏不失效、点选零滚动、
+  顶栏贴顶唤出、hover 缩略图、画质三处、resize、缓存全部保持。
+
+### 验证
+
+- `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 1116 passed, 0 failed**
+  （1081 → 1116，新增 35 条第十六轮契约；改写 4 条第十四 / 十五轮旧断言到新接线，
+  另 2 条因 `loupeClampedOffset` 换行导致切片失效的旧断言，把源码改回单行后原样通过）。
+- `git diff --check` / 剥离字符串注释后括号净平衡 HEAD=CUR 全 0 / `node --check` 全绿；
+  版本仍 `1.0.7` / `7`，`AppScope/app.json5` 未改。
+- 计数型护栏：`.autoResize(false)` 3 处、`.dynamicRangeMode(` 3 处、
+  `.interpolation(ImageInterpolation.High)` 3 处（主视图 / 兜底 / 右页）。
+
+### 待用户侧确认（DevEco Studio 编译 + 实机）
+
+1. 双击进全屏 → 全屏首次 ESC 退出全屏并恢复进全屏前的窗口大小与位置；再次 ESC 退出 APP。
+2. 真全屏（系统消费 ESC 的场景）下首次 ESC 不直接退出 APP。
+3. 放大镜放大后无锯齿 / 像素化 / 边缘粗糙，边缘平滑、线条清晰、无模糊 / 光晕 / 伪影；
+   1:1 / 缩小显示画质不变；鼠标在圆内高频移动不掉帧、切图换页不串图。
+
+**本次仍未编译 HAP / 未放桌面 / 未跑 `build.sh` / 未升版本 / 未 push**。
+
 
 ## 第十五轮：放大镜预设关闭 / 鼠标右键 toggle 开关（2026-11-15）
 

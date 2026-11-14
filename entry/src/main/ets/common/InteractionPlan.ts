@@ -5,7 +5,10 @@
  *  ② 顶部栏「贴顶唤出」：滞回判定，默认完全隐藏、浮层不占布局，切换稳定不闪烁；
  *  ③ 预览图「放大镜」：圆形 / 3 倍局部，cm→vp 换算、圆心与内图偏移几何；
  *  ④ 第十四轮放大镜增强：6cm 直径、左右并排双页独立、全屏切换复位；
- *  ⑤ 第十五轮放大镜总开关：预设关闭、鼠标右键 toggle。
+ *  ⑤ 第十五轮放大镜总开关：预设关闭、鼠标右键 toggle；
+ *  ⑥ 第十六轮窗口模式：ESC 按当前窗口状态分派、全屏往返窗口几何保存 / 恢复；
+ *  ⑦ 第十六轮放大镜重采样：>1:1 才分档插值 + 按放大倍率重解码补足真实像素、
+ *    整数像素对齐、1:1 旁路；≤1:1 完全不触碰既有显示路径。
  *
  * 只做数值判定，不碰任何 SDK / IO / 状态，便于静态契约测试直接 import。
  */
@@ -242,4 +245,151 @@ export function loupeEnabledAfterRightPress(wasEnabled: boolean,
 export function loupeVisibleOf(enabled: boolean, activePane: number, pane: number,
   hover: boolean, hasImage: boolean): boolean {
   return enabled && loupePaneActiveOf(activePane, pane, hover, hasImage);
+}
+
+// ==================================================================
+// ⑥ 第十六轮：窗口模式 ESC 分派 / 全屏往返窗口几何保存与恢复
+// ==================================================================
+
+/** ESC 动作码（脱离 ArkUI 的语义常量，供 onKey 分派）。 */
+export const ESC_ACT_NONE: number = 0;        // 忽略（刚退出全屏冷却期内的补发 / 迟到按键）
+export const ESC_ACT_EXIT_FULL: number = 1;   // 退出全屏、返回普通模式、恢复窗口尺寸与位置
+export const ESC_ACT_QUIT_APP: number = 2;    // 退出 APP
+
+/** ESC 动作的唯一真值来源：**按当前窗口状态区分**。
+ *  · 全屏态 → 恒 EXIT_FULL：全屏首次 ESC 只退出全屏并恢复进入前的窗口尺寸/位置，
+ *    绝不退出 APP —— 这是「避免首次 ESC 直接退出 APP」的核心；
+ *  · 非全屏且刚退出全屏的冷却期内（sinceExitMs 落在 [0, guardMs)）→ NONE：
+ *    真全屏下 ESC 常被窗口管理器先消费，系统自行退出沉浸后由画布缩小触发
+ *    自愈 setFull(false)，随后补发 / 迟到的那一次 ESC 会落到「非全屏」，
+ *    若不拦截就会被当成「普通模式再次 ESC」而直接退出 APP；
+ *  · 其余非全屏态 → QUIT_APP：返回普通模式后再次按 ESC 才退出 APP。
+ *  sinceExitMs < 0 表示从未退出过全屏（无冷却）；guardMs <= 0 表示关闭冷却。
+ *  冷却只吞「刚退出全屏这一瞬」的按键，不改变正常模式 ESC 退出 APP 的行为。 */
+export function escActionOf(fullscreen: boolean, sinceExitMs: number,
+  guardMs: number): number {
+  if (fullscreen) {
+    return ESC_ACT_EXIT_FULL;
+  }
+  if (guardMs > 0 && sinceExitMs >= 0 && sinceExitMs < guardMs) {
+    return ESC_ACT_NONE;
+  }
+  return ESC_ACT_QUIT_APP;
+}
+
+/** 进入全屏时是否该保存「普通模式窗口尺寸与位置」快照：
+ *  仅在 非全屏→全屏 的上升沿、且窗口是自由窗口（floating，有可精确恢复的 rect）时保存。
+ *  已是最大化 / 系统全屏形态没有「普通模式几何」可存，交给既有 maximize(EXIT_IMMERSIVE)
+ *  处理即可，不保存也不会误缩。 */
+export function shouldCaptureWindowRect(prevFull: boolean, nextFull: boolean,
+  floating: boolean): boolean {
+  return !prevFull && nextFull && floating;
+}
+
+/** 退出全屏时是否该按快照精确恢复窗口尺寸与位置：
+ *  仅在 全屏→普通 的下降沿、且确有可用快照（hasSnapshot + rectUsable）时恢复。
+ *  没有快照（例如窗口未就绪 / 进入前是最大化）就保持既有 recover()/EXIT_IMMERSIVE 结果，
+ *  绝不拿空 rect 去 resize / moveWindowTo。 */
+export function shouldRestoreWindowRect(prevFull: boolean, nextFull: boolean,
+  hasSnapshot: boolean, rectUsable: boolean): boolean {
+  return prevFull && !nextFull && hasSnapshot && rectUsable;
+}
+
+/** 从上次退出全屏到现在的毫秒差：lastExitAt<=0（从未退出）返回 -1（无冷却）。
+ *  纯数值，调用方传当前时刻，便于静态契约测试注入任意时间。 */
+export function msSinceFullExitOf(now: number, lastExitAt: number): number {
+  if (lastExitAt <= 0 || !(now === now) || !(lastExitAt === lastExitAt)) {
+    return -1;
+  }
+  return now - lastExitAt;
+}
+
+// ==================================================================
+// ⑦ 第十六轮：放大镜 >1:1 重采样（分档插值 / 整数对齐 / 1:1 旁路）
+// ==================================================================
+
+/** 1:1（100%）基准：显示倍率不超过它时不做任何额外重采样。 */
+export const LOUPE_RESAMPLE_1X: number = 1;
+/** Cubic(High) 锐利档的最大有效倍率：不超过它用 High 保线条清晰，超过它改用 Medium 平滑档，
+ *  避免高倍放大欠采样源时 Cubic 锐化核放大振铃 / 过冲（光晕、边缘粗糙、伪影）。 */
+export const LOUPE_CUBIC_MAX_SCALE: number = 2;
+
+/** 图像插值档（脱离 SDK 的语义常量，Index.ets 映射到 ImageInterpolation）。
+ *  按 HarmonyOS ArkUI 官方枚举：None=最近邻、Low=双线性、Medium=MipMap、High=Cubic。
+ *  名字直接表达「该倍率下该用哪一档插值」，helper 只做 number → 枚举的映射。
+ *  ⚠️ 官方文档明确：`.interpolation()` 对 **PixelMap 资源不生效**（只作用于放大时
+ *  由组件自行解码的图源）。所以本轮不能只改插值档 —— 还必须给放大镜换成「按放大后
+ *  像素需求重新解码的高分辨率 PixelMap」（见 Index.ets 的 loupeHiPx 链），
+ *  否则 3 倍拉伸的仍是 1:1 显示框位图，锯齿 / 像素化一个都不会少。 */
+export const LOUPE_IP_NONE: number = 0;      // ≤1:1：最近邻 / 不插值（旁路，1:1 显示不受影响）
+export const LOUPE_IP_HIGH: number = 1;      // 1~2×：High(Cubic) 锐利重采样，补足像素、线条清晰
+export const LOUPE_IP_MEDIUM: number = 2;    // >2×：Medium(MipMap) 平滑重采样，抑制 Cubic 过冲光晕 / 伪影
+
+/** 放大镜「有效放大倍率」= 局部放大倍率 × 主视图缩放 × 设备像素密度比。
+ *  三者任一非法（<=0 / NaN）都按 1 处理，绝不把脏值传进档位判定。
+ *  这是「当图案放大倍率超过原图 1:1 时」的判定真值来源。 */
+export function loupeEffectiveScaleOf(loupeZoom: number, viewZoom: number,
+  densityRatio: number): number {
+  const z: number = loupeZoom > 0 && loupeZoom === loupeZoom ? loupeZoom : 1;
+  const v: number = viewZoom > 0 && viewZoom === viewZoom ? viewZoom : 1;
+  const d: number = densityRatio > 0 && densityRatio === densityRatio ? densityRatio : 1;
+  return z * v * d;
+}
+
+/** 是否需要重采样补足像素：仅当有效放大倍率严格 > 1:1（100%）。
+ *  ≤1:1（未缩放 / 正好 1:1 / 缩小）一律 false —— 保持原样、不引入任何模糊 / 光晕 / 伪影。 */
+export function loupeNeedsResampleOf(scale: number): boolean {
+  return scale === scale && scale > LOUPE_RESAMPLE_1X;
+}
+
+/** 按有效放大倍率分档选插值算法（消除锯齿 + 边缘平滑 + 清晰 + 不失真 + 不模糊不光晕）：
+ *  · scale <= 1:1 → NONE：逐像素对应，未缩放 / 1:1 显示完全不受影响（绝不触碰）；
+ *  · 1:1 < scale <= 2 → HIGH：Cubic 高质量重采样补足像素，线条清晰、形状颜色不失真；
+ *    此倍率放大温和，Cubic 的锐化核不过冲，无明显光晕 / 伪影；
+ *  · scale > 2 → MEDIUM：3 倍放大镜这类高倍放大改用平滑重采样 —— 高倍下把
+ *    欠采样源（1:1 显示框分辨率 PixelMap）拉大时，Cubic 锐化核会放大振铃 / 过冲，
+ *    产生光晕、边缘粗糙与伪影；Medium 平滑插值消锯齿、边缘平滑、不过冲。
+ *  配合 objectFit(Contain) 等比不变形 + 整数像素对齐消除子像素错位导致的边缘粗糙。
+ *  分档让不同倍率各取所需，1:1 及以下绝不改动画质。 */
+export function loupeInterpolationTierOf(scale: number): number {
+  if (!loupeNeedsResampleOf(scale)) {
+    return LOUPE_IP_NONE;
+  }
+  return scale <= LOUPE_CUBIC_MAX_SCALE ? LOUPE_IP_HIGH : LOUPE_IP_MEDIUM;
+}
+
+/** 像素对齐：把浮点尺寸 / 坐标收敛到整像素，消除子像素采样带来的边缘粗糙与错位。
+ *  尺寸、圆心、负向偏移（放大镜偏移常为负）一律取整；仅 NaN 原样返回由调用方兜底。 */
+export function loupePixelAlignOf(px: number): number {
+  if (!(px === px)) {
+    return px;
+  }
+  return Math.round(px);
+}
+
+/** 重采样目标解码边：>1:1 时按倍率把解码边放大到「放大后显示像素需求」，并夹到 cap，
+ *  让放大镜拿到足量**真实像素**（而不是把 1:1 显示框的 PixelMap 硬拉大）。
+ *  ≤1:1 时原样返回 baseEdge（不改变既有 1:1 / 缩小显示路径）。
+ *  cap <= 0 视为无上限；baseEdge 非法返回 0，绝不让调用方 resize 到非法尺寸。 */
+export function loupeResampleEdgeOf(baseEdge: number, scale: number,
+  cap: number): number {
+  const base: number = baseEdge > 0 && baseEdge === baseEdge ? baseEdge : 0;
+  if (base <= 0 || !loupeNeedsResampleOf(scale)) {
+    return base;
+  }
+  const want: number = Math.ceil(base * scale);
+  const c: number = cap > 0 && cap === cap ? cap : 0;
+  return c > 0 ? Math.min(want, c) : want;
+}
+
+/** 重采样目标是否「稳定」：目标解码边相对上一档变化 < minDelta 时返回 true，
+ *  表示沿用上一张高分辨率图、不重新解码 —— 鼠标在放大镜内高频微动也不会反复重解码 /
+ *  重建 PixelMap，性能稳定。prevEdge<=0（首帧 / 还没有上一档）返回 false，必须解一次。 */
+export function loupeResampleStableOf(prevEdge: number, nextEdge: number,
+  minDelta: number): boolean {
+  if (prevEdge <= 0) {
+    return false;
+  }
+  const d: number = minDelta > 0 ? minDelta : 1;
+  return Math.abs(nextEdge - prevEdge) < d;
 }

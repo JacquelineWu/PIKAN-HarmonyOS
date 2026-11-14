@@ -68,7 +68,13 @@ import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
   LOUPE_CM_14, LOUPE_D_VP_14, loupePaneActiveOf, loupePaneAfterHover,
   loupeResetOnModeChange, loupeHoverAfterModeChange,
   LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,
-  loupeVisibleOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
+  loupeVisibleOf, ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,
+  escActionOf, shouldCaptureWindowRect, shouldRestoreWindowRect,
+  msSinceFullExitOf, LOUPE_RESAMPLE_1X, LOUPE_CUBIC_MAX_SCALE,
+  LOUPE_IP_NONE, LOUPE_IP_HIGH, LOUPE_IP_MEDIUM,
+  loupeEffectiveScaleOf, loupeNeedsResampleOf, loupeInterpolationTierOf,
+  loupePixelAlignOf, loupeResampleEdgeOf,
+  loupeResampleStableOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -1519,8 +1525,9 @@ console.log('--- 源码静态契约：① ESC 对齐双击 + 全屏沉浸自愈 
 const ONKEY_FN = INDEX.slice(INDEX.indexOf('private onKey(event: KeyEvent): void {'),
   INDEX.indexOf('// ------------------------------------------------------------------\n  // UI 片段',
     INDEX.indexOf('private onKey(event: KeyEvent): void {')));
-check('① ESC 与双击/F11 同走 toggleFull()（不再单独 setFull(false)）',
-  /case KeyCode\.KEYCODE_ESCAPE:[\s\S]{0,220}if \(this\.fullscreen\) \{[\s\S]{0,220}this\.toggleFull\(\);/.test(ONKEY_FN) &&
+check('① ESC 与双击/F11 同走 toggleFull()（第十六轮改按 escActionOf 分派，入口仍不分叉）',
+  ONKEY_FN.includes('const escAct: number = escActionOf(this.fullscreen,') &&
+  /if \(escAct === ESC_ACT_EXIT_FULL\) \{\s*this\.toggleFull\(\);/.test(ONKEY_FN) &&
   /this\.toggleFull\(\);/.test(ONKEY_FN) &&
   /case KeyCode\.KEYCODE_F11:\s*this\.toggleFull\(\);/.test(ONKEY_FN), true);
 check('① onAreaChange 全屏态画布缩小 → 自愈 setFull(false) 恢复完整界面',
@@ -2389,13 +2396,18 @@ check('③ hover 缩略图 builder 内无淡入淡出 / 过渡动画',
   /\.opacity\(|\.transition\(|animateTo/.test(HOVER_THUMB_FN) === false, true);
 
 // ④ ESC：仅非全屏退出 APP，全屏保持原全屏交互
-check('④ ESC 全屏态仍走 toggleFull()、非全屏态才 quitApp()',
-  /case KeyCode\.KEYCODE_ESCAPE:[\s\S]{0,320}if \(this\.fullscreen\) \{[\s\S]{0,320}this\.toggleFull\(\);[\s\S]{0,80}\} else \{[\s\S]{0,80}this\.quitApp\(\);/.test(ESC_FN), true);
+check('④ ESC 全屏态仍走 toggleFull()、非全屏态才 quitApp()（第十六轮按窗口状态分派）',
+  ESC_FN.includes('const escAct: number = escActionOf(this.fullscreen,') &&
+  ESC_FN.includes('if (escAct === ESC_ACT_EXIT_FULL) {') &&
+  ESC_CODE.includes('this.toggleFull();') &&
+  ESC_FN.includes('else if (escAct === ESC_ACT_QUIT_APP) {') &&
+  ESC_CODE.includes('this.quitApp();'), true);
 check('④ quitApp 内确实是 terminateSelf 退出应用',
   /ability\.terminateSelf\(\)/.test(QUIT_FN), true);
 check('④ 全屏分支里绝不调用 quitApp（不与全屏还原冲突）',
   /if \(this\.fullscreen\) \{[^}]*quitApp/.test(ESC_CODE) === false &&
-  /\} else \{\s*this\.quitApp\(\);/.test(ESC_CODE), true);
+  /if \(escAct === ESC_ACT_EXIT_FULL\) \{[^}]*toggleFull/.test(ESC_CODE) &&
+  /else if \(escAct === ESC_ACT_QUIT_APP\) \{\s*this\.quitApp\(\);/.test(ESC_CODE), true);
 
 // 回归护栏：本轮四条改动不得破坏既有交互 / 版本
 check('第十一轮回归护栏：版本未升 / 往上层恒亮 / 不禁用 / 不弹 picker / 全量预载',
@@ -2692,9 +2704,9 @@ check('②-c 圆心跟随光标 + 边缘夹界偏移（圆内不空白）',
   INDEX.includes('loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM)') &&
   INDEX.includes('loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM)') &&
   INDEX.includes('return loupeCircleOrigin(this.loupeX, LOUPE_D_VP);'), true);
-check('②-c 圆内放大图 4 个源（左页 3 + 右页 1）都 objectFit(Contain) + High（对应且不变形）',
-  LOUPE13_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 4 &&
-  LOUPE13_CODE.split('.interpolation(ImageInterpolation.High)').length - 1 === 4, true);
+check('②-c 圆内放大图 5 个源（第十六轮高清重解码 + 左页 3 + 右页 1）都 objectFit(Contain) + 分档插值（对应且不变形）',
+  LOUPE13_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 5 &&
+  LOUPE13_CODE.split('.interpolation(this.loupeInterpolation())').length - 1 === 5, true);
 check('②-c 左页按 LEFT pane 独立接线（第十四轮：两页各挂一层，左页不引用右页）',
   PREVIEW13_CODE.includes('this.loupeLayer(LOUPE_PANE_LEFT, uri, half);') &&
   PREVIEW13_CODE.includes('.onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_LEFT))') &&
@@ -3008,6 +3020,180 @@ check('② 第十五轮回归护栏：鼠标 / 全屏 / 画质 / 版本 / 顶栏
   INDEX.includes('回上层') === false &&
   INDEX.includes('@State topBarPeek: boolean = false;') &&
   INDEX.includes('topBarPeekOf(this.topBarPeek, yTop,'), true);
+
+// ==================== 第十六轮：ESC 分状态 + 全屏往返几何 + 放大镜 >1:1 重采样 ====================
+console.log('--- 第十六轮 ①：InteractionPlan.ts 纯函数（ESC / 窗口几何 / 分档重采样） ---');
+check('① ESC 动作码三个互异（NONE / EXIT_FULL / QUIT_APP）',
+  ESC_ACT_NONE === 0 && ESC_ACT_EXIT_FULL === 1 && ESC_ACT_QUIT_APP === 2, true);
+check('① 全屏首次 ESC 恒 EXIT_FULL（永不退出 APP，冷却不影响全屏分支）',
+  escActionOf(true, 5000, 400) === ESC_ACT_EXIT_FULL &&
+  escActionOf(true, 100, 400) === ESC_ACT_EXIT_FULL, true);
+check('① 非全屏从未退出过全屏 / 冷却已过 → QUIT_APP',
+  escActionOf(false, -1, 400) === ESC_ACT_QUIT_APP &&
+  escActionOf(false, 5000, 400) === ESC_ACT_QUIT_APP &&
+  escActionOf(false, 400, 400) === ESC_ACT_QUIT_APP, true);
+check('① 非全屏冷却期内 → NONE（吞掉系统补发 / 迟到的 ESC）',
+  escActionOf(false, 100, 400) === ESC_ACT_NONE &&
+  escActionOf(false, 0, 400) === ESC_ACT_NONE, true);
+check('① guardMs<=0 关闭冷却，非全屏恒 QUIT_APP',
+  escActionOf(false, 100, 0) === ESC_ACT_QUIT_APP, true);
+check('① msSinceFullExitOf：从未退出返回 -1、正常求差、NaN 防护',
+  msSinceFullExitOf(1000, 0) === -1 &&
+  msSinceFullExitOf(1000, 200) === 800 &&
+  msSinceFullExitOf(NaN, 200) === -1, true);
+check('① 只在「非全屏→全屏 上升沿 + 自由窗口」抓 rect 快照',
+  shouldCaptureWindowRect(false, true, true) === true &&
+  shouldCaptureWindowRect(true, true, true) === false &&
+  shouldCaptureWindowRect(false, true, false) === false &&
+  shouldCaptureWindowRect(false, false, true) === false, true);
+check('① 只在「全屏→普通 下降沿 + 快照可用」精确恢复 rect',
+  shouldRestoreWindowRect(true, false, true, true) === true &&
+  shouldRestoreWindowRect(true, false, false, true) === false &&
+  shouldRestoreWindowRect(true, false, true, false) === false &&
+  shouldRestoreWindowRect(false, false, true, true) === false &&
+  shouldRestoreWindowRect(true, true, true, true) === false, true);
+check('① 1:1 基准 / Cubic 档上限常量就位',
+  LOUPE_RESAMPLE_1X === 1 && LOUPE_CUBIC_MAX_SCALE === 2, true);
+check('① 有效放大倍率 = 局部 3× × 主视图缩放 × 密度比，脏值按 1 处理',
+  loupeEffectiveScaleOf(3, 1, 1) === 3 &&
+  Math.abs(loupeEffectiveScaleOf(3, 0.3, 1) - 0.9) < 1e-9 &&
+  loupeEffectiveScaleOf(0, NaN, -1) === 1, true);
+check('① >1:1 才重采样：正好 1:1 / 缩小 / NaN 全部旁路',
+  loupeNeedsResampleOf(1) === false &&
+  loupeNeedsResampleOf(0.5) === false &&
+  loupeNeedsResampleOf(NaN) === false &&
+  loupeNeedsResampleOf(1.0001) === true &&
+  loupeNeedsResampleOf(3) === true, true);
+check('① 分档：≤1:1→NONE、1~2×→HIGH(Cubic)、>2×→MEDIUM(平滑抑制过冲光晕)',
+  loupeInterpolationTierOf(1) === LOUPE_IP_NONE &&
+  loupeInterpolationTierOf(1.5) === LOUPE_IP_HIGH &&
+  loupeInterpolationTierOf(2) === LOUPE_IP_HIGH &&
+  loupeInterpolationTierOf(2.01) === LOUPE_IP_MEDIUM &&
+  loupeInterpolationTierOf(3) === LOUPE_IP_MEDIUM, true);
+check('① 整像素对齐：正 / 负 / 零 / NaN 都收敛不产生子像素采样',
+  loupePixelAlignOf(189.6) === 190 &&
+  loupePixelAlignOf(-2.4) === -2 &&
+  loupePixelAlignOf(0) === 0 &&
+  Number.isNaN(loupePixelAlignOf(NaN)), true);
+check('① 目标解码边：>1:1 按倍率放大、夹 cap、≤1:1 原样旁路、非法 base 返回 0',
+  loupeResampleEdgeOf(1000, 3, 8192) === 3000 &&
+  loupeResampleEdgeOf(1000, 3, 2000) === 2000 &&
+  loupeResampleEdgeOf(1000, 1, 8192) === 1000 &&
+  loupeResampleEdgeOf(-5, 3, 8192) === 0, true);
+check('① 解码边稳定性：首帧必须解、微变复用、大变重解、minDelta 兜底',
+  loupeResampleStableOf(0, 100, 64) === false &&
+  loupeResampleStableOf(100, 130, 64) === true &&
+  loupeResampleStableOf(100, 200, 64) === false &&
+  loupeResampleStableOf(100, 100, 0) === true, true);
+
+console.log('--- 第十六轮 ②：Index.ets 源码静态契约（窗口几何 / ESC / 重采样 / 回归护栏） ---');
+const SET_FULL16_CODE = stripComments(SET_FULL_FN);
+const ONKEY16_CODE = stripComments(ONKEY_FN);
+const APPLY_WIN16_FN = INDEX.slice(INDEX.indexOf('private async applyWindowFullScreen('),
+  INDEX.indexOf('private onKey(event: KeyEvent): void {'));
+const APPLY_WIN16_CODE = stripComments(APPLY_WIN16_FN);
+const LOUPE_HELP16_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('  private loupeScale('), INDEX.indexOf('  /** fillSizes')));
+const CAPTURE16_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('  private capturePreFullRect('), INDEX.indexOf('  private setFull(')));
+const LOUPE16_CODE = stripComments(LOUPE13_CODE);
+
+check('② 第十六轮纯函数 / 常量全部 import 到 Index.ets',
+  INDEX.includes('ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,') &&
+  INDEX.includes('shouldCaptureWindowRect, shouldRestoreWindowRect, msSinceFullExitOf,') &&
+  INDEX.includes('loupeResampleEdgeOf,') && INDEX.includes('loupeResampleStableOf'), true);
+check('② 四个新常量就位（密度比 / 解码边上限 / 稳定阈值 / ESC 冷却）',
+  INDEX.includes('const LOUPE_DENSITY_RATIO: number = 1;') &&
+  INDEX.includes('const LOUPE_RESAMPLE_MAX_EDGE: number = 8192;') &&
+  INDEX.includes('const LOUPE_RESAMPLE_STABLE_MIN_DELTA: number = 64;') &&
+  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS: number = 400;'), true);
+check('② 进入全屏前抓 rect：走 shouldCaptureWindowRect + packWindowRect + 可用性校验',
+  CAPTURE16_CODE.includes('shouldCaptureWindowRect(prevFull, nextFull, floating)') &&
+  CAPTURE16_CODE.includes('packWindowRect({') &&
+  CAPTURE16_CODE.includes('windowRectUsable(parseWindowRect(packed)') &&
+  CAPTURE16_CODE.includes('win.getWindowProperties().windowRect'), true);
+check('② 快照只在内存、不落盘、不覆盖重启会话记忆（无 prefs / putSync / flushSync）',
+  CAPTURE16_CODE.includes('putSync') === false &&
+  CAPTURE16_CODE.includes('flushSync') === false &&
+  CAPTURE16_CODE.includes('WIN_KEY_RECT') === false, true);
+check('② 退出全屏按快照精确 resize + moveWindowTo（每步独立 try）',
+  APPLY_WIN16_CODE.includes('await this.restorePreFullRect(win);') &&
+  INDEX.includes('await win.resize(rect.width, rect.height);') &&
+  INDEX.includes('await win.moveWindowTo(rect.left, rect.top);') &&
+  INDEX.includes('this.restoreRectPending = false;'), true);
+check('② 精确恢复排在 recover()/EXIT_IMMERSIVE 之后（不被最大化形态覆盖）',
+  APPLY_WIN16_CODE.indexOf('await win.recover();') >= 0 &&
+  APPLY_WIN16_CODE.indexOf('EXIT_IMMERSIVE') > APPLY_WIN16_CODE.indexOf('await win.recover();') &&
+  APPLY_WIN16_CODE.indexOf('await this.restorePreFullRect(win);') >
+    APPLY_WIN16_CODE.indexOf('EXIT_IMMERSIVE'), true);
+check('② setFull() 下降沿记时刻 + 模式切换释放高清图源 + 上升沿判据收口',
+  SET_FULL16_CODE.includes('this.capturePreFullRect(prevFull, on);') &&
+  SET_FULL16_CODE.includes('shouldRestoreWindowRect(prevFull, on,') &&
+  SET_FULL16_CODE.includes('if (prevFull && !on) {') &&
+  SET_FULL16_CODE.includes('this.lastFullExitAt = Date.now();') &&
+  SET_FULL16_CODE.includes('this.clearLoupeHiRes();'), true);
+check('② ESC 按当前窗口状态分派（escActionOf(this.fullscreen, …) 为唯一真值来源）',
+  ONKEY16_CODE.includes('escActionOf(this.fullscreen,') &&
+  ONKEY16_CODE.includes('msSinceFullExitOf(Date.now(), this.lastFullExitAt)') &&
+  ONKEY16_CODE.includes('ESC_ACT_EXIT_FULL') && ONKEY16_CODE.includes('ESC_ACT_QUIT_APP') &&
+  ONKEY16_CODE.includes('escAct === ESC_ACT_NONE') &&
+  ONKEY16_CODE.includes('if (this.fullscreen) {') === false, true);
+check('② ESC 冷却只吞一次（NONE 分支清零），第二次 ESC 立即退出 APP',
+  ONKEY16_CODE.includes('this.lastFullExitAt = 0;'), true);
+check('② 系统自愈退出沉浸分支也记时刻（补发 ESC 不会落到 quitApp）',
+  /this\.lastFullExitAt = Date\.now\(\);\s*this\.setFull\(false\);/.test(INDEX), true);
+check('② 全屏快照字段就位（本次往返专用，用完即清）',
+  INDEX.includes('private preFullRect: string') &&
+  INDEX.includes('private hasPreFullRect: boolean') &&
+  INDEX.includes('private restoreRectPending: boolean') &&
+  INDEX.includes('private lastFullExitAt: number'), true);
+check('② loupeInterpolation 三档映射完整（None / Medium / High）',
+  LOUPE_HELP16_CODE.includes('return ImageInterpolation.None;') &&
+  LOUPE_HELP16_CODE.includes('return ImageInterpolation.Medium;') &&
+  LOUPE_HELP16_CODE.includes('return ImageInterpolation.High;') &&
+  LOUPE_HELP16_CODE.includes('loupeInterpolationTierOf(this.loupeScale())'), true);
+check('② 高分辨率图源链：按倍率重解码 + 整像素对齐 + 1:1 旁路 + 性能稳定',
+  LOUPE_HELP16_CODE.includes('loupeResampleEdgeOf(this.viewEdge(), LOUPE_ZOOM, LOUPE_RESAMPLE_MAX_EDGE)') &&
+  LOUPE_HELP16_CODE.includes('loupeNeedsResampleOf(this.loupeScale())') &&
+  LOUPE_HELP16_CODE.includes('loupeResampleStableOf(this.loupeHiEdge, edge,') &&
+  LOUPE_HELP16_CODE.includes('this.decodeTo(uri, edge, false)') &&
+  LOUPE_HELP16_CODE.includes('this.releaseUncachedEntry(old)'), true);
+check('② 高清图源 uri/pane 双重校验：切图换页不把上一张错画到新图上',
+  LOUPE_HELP16_CODE.includes('this.loupeHiUri === uri && this.loupeHiPane === pane') &&
+  LOUPE_HELP16_CODE.includes('private loupeUriOf(pane: number): string') &&
+  LOUPE_HELP16_CODE.includes('LOUPE_PANE_RIGHT'), true);
+check('② 迟到作废结果按 token 丢弃并释放（不泄漏 PixelMap）',
+  LOUPE_HELP16_CODE.includes('if (token !== this.loupeHiToken)') &&
+  LOUPE_HELP16_CODE.includes('this.releaseUncachedEntry(e); // 迟到作废结果不接手、不泄漏'), true);
+check('② loupeLayer 高清分支排在最前，且 5 个源统一走分档插值',
+  LOUPE16_CODE.includes('if (this.loupeHiUsable(uri, pane))') &&
+  LOUPE16_CODE.indexOf('if (this.loupeHiUsable(uri, pane))') <
+    LOUPE16_CODE.indexOf('if (pane === LOUPE_PANE_RIGHT)') &&
+  LOUPE16_CODE.split('.interpolation(this.loupeInterpolation())').length - 1 === 5, true);
+check('② 圆内尺寸 / 偏移全部整像素对齐（消除子像素采样导致的边缘粗糙）',
+  INDEX.includes('return loupePixelAlignOf(this.viewBoxW(half) * LOUPE_ZOOM);') &&
+  INDEX.includes('return loupePixelAlignOf(this.frameH() * LOUPE_ZOOM);') &&
+  INDEX.includes('loupePixelAlignOf(loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM))') &&
+  INDEX.includes('loupePixelAlignOf(loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM))'), true);
+check('② 触发点齐全：hover / Move / 右键开启 / 关闭释放 / 模式切换 / 页面销毁',
+  INDEX.includes('this.ensureLoupeHiRes(pane);') &&
+  INDEX.includes('this.ensureLoupeHiRes(this.loupePane);') &&
+  INDEX.includes('this.clearLoupeHiRes(); // 第十六轮：页面销毁时释放放大镜专用高清 PixelMap'), true);
+check('② 放大镜链无动画 / 无计时器（沿用零延迟交互）',
+  NO_ANIM.some(s => LOUPE_HELP16_CODE.includes(s)) === false &&
+  NO_ANIM2.some(s => LOUPE_HOVER14_CODE.includes(s)) === false &&
+  NO_ANIM2.some(s => LOUPE_MOUSE14_CODE.includes(s)) === false, true);
+check('② 第十六轮回归护栏：三处画质计数 / 版本 / 往上层 / 右键 toggle / 顶栏滞回全未动',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  INDEX.split('.interpolation(ImageInterpolation.High)').length - 1 >= 3 &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes('回上层') === false &&
+  INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
+  INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  INDEX.includes('this.toolBtn(\'往上层\', \'up\', true)') &&
+  INDEX.includes('@State topBarPeek: boolean = false;') &&
+  INDEX.includes('quitApp()') && INDEX.includes('ability.terminateSelf()'), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
