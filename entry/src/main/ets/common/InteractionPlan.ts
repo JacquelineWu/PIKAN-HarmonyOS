@@ -4,7 +4,8 @@
  *  ① 档案列表「点选零自动滚动」：默认不动列表，仅边界档案例外；
  *  ② 顶部栏「贴顶唤出」：滞回判定，默认完全隐藏、浮层不占布局，切换稳定不闪烁；
  *  ③ 预览图「放大镜」：圆形 / 3 倍局部，cm→vp 换算、圆心与内图偏移几何；
- *  ④ 第十四轮放大镜增强：6cm 直径、左右并排双页独立、全屏切换复位。
+ *  ④ 第十四轮放大镜增强：6cm 直径、左右并排双页独立、全屏切换复位；
+ *  ⑤ 第十五轮放大镜总开关：预设关闭、鼠标右键 toggle。
  *
  * 只做数值判定，不碰任何 SDK / IO / 状态，便于静态契约测试直接 import。
  */
@@ -218,4 +219,27 @@ export function loupeResetOnModeChange(prevFull: boolean,
 export function loupeHoverAfterModeChange(wasHover: boolean,
   modeChanged: boolean): boolean {
   return modeChanged ? false : wasHover;
+}
+
+// ==================================================================
+// ⑤ 第十五轮：放大镜总开关（预设关闭 / 鼠标右键 toggle）
+// ==================================================================
+
+/** 放大镜总开关预设值：默认关闭，须由鼠标右键显式开启。
+ *  UI 侧 @State 取它作初值，避免两处写死布尔字面量。 */
+export const LOUPE_DEFAULT_ENABLED: boolean = false;
+
+/** 右键 toggle 后的总开关：仅「右键点击」翻转一次；
+ *  左键 / 抬起 / 移动 / 悬停 / 拖拽一律保持原状，不误触、不重复翻转。 */
+export function loupeEnabledAfterRightPress(wasEnabled: boolean,
+  rightPress: boolean): boolean {
+  return rightPress ? !wasEnabled : wasEnabled;
+}
+
+/** 放大镜最终是否绘制：总开关 + 双页独立激活 + 悬停 + 该页有图，四者缺一不可。
+ *  总开关关闭时 loupeHover / loupePane / 坐标仍照常由鼠标事件维护（不复位），
+ *  所以右键一开启就能立即显示当前页的放大内容，不必先移出再移入。 */
+export function loupeVisibleOf(enabled: boolean, activePane: number, pane: number,
+  hover: boolean, hasImage: boolean): boolean {
+  return enabled && loupePaneActiveOf(activePane, pane, hover, hasImage);
 }

@@ -91,7 +91,9 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   topBarPeekOf, loupeDiameterVp, loupeCircleOrigin, loupeClampedOffset,
   loupeInFrame, loupeEligibleOf, LOUPE_PANE_NONE, LOUPE_PANE_LEFT,
   LOUPE_PANE_RIGHT, LOUPE_CM_14, loupePaneActiveOf, loupePaneAfterHover,
-  loupeResetOnModeChange, loupeHoverAfterModeChange } from '../common/InteractionPlan';
+  loupeResetOnModeChange, loupeHoverAfterModeChange,
+  LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,
+  loupeVisibleOf } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -223,7 +225,7 @@ const SCAN_CAP: number = 20000;
 /** 鼠标键缩放倍率（旧配置，第七轮起**停用**）：左键放大 50%（×1.5）。
  *  用户要求「取消左 click 放大功能，仅保留双击进入全屏」→ onMouseButton 不再调用
  *  zoomAt(ZOOM_LEFT)。两个常量保留只为兼容旧配置与文档，当前路径均不使用。
- *  右键仍为「还原」（回到适应窗口并归位）—— 与 ACDSee 一致。 */
+ *  第十五轮起右键改为「toggle 放大镜总开关」（原「还原」按用户要求移除）。 */
 const ZOOM_LEFT: number = 1.5;
 const ZOOM_RIGHT: number = 2.0;
 /** 按下到抬起若移动超过该距离（vp）就判定为「拖拽平移」，不触发点击 */
@@ -1637,6 +1639,10 @@ struct Index {
    *  只作点选 / 翻页的滚动判据，不参与 UI 渲染，故不用 @State。 */
   private listFirstRow: number = -1;
   private listLastRow: number = -1;
+  /** 第十五轮：放大镜总开关，预设关闭（鼠标右键 toggle 开启 / 关闭）。
+   *  关闭时仍照常维护 loupePane / loupeHover / 坐标，只是不绘制浮层，
+   *  因此右键开启后无需重新移入即可立即显示当前页放大内容。 */
+  @State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;
   /** 第十四轮：预览图放大镜状态。loupePane = 当前鼠标所在预览页
    *  （NONE 无 / LEFT 单页或并排左页 / RIGHT 并排右页）；坐标是相对「该页显示框」
    *  的局部坐标，两页各自解释自己的坐标，故互不影响。
@@ -3612,10 +3618,11 @@ struct Index {
     this.status = '缩放 ' + this.zoomPercentText();
   }
 
-  /** 鼠标按键（第七轮：取消左键放大，只保留双击进全屏）：
-   *  左键 = **不缩放**（单击只当作双击的第一下，视图保持原样）；右键 = 还原（适应窗口并归位）；
+  /** 鼠标按键（第七轮：取消左键放大；第十五轮：右键改为 toggle 放大镜）：
+   *  左键 = **不缩放**（单击只当作双击的第一下，视图保持原样）；
+   *  右键点击 = toggle 放大镜总开关（原「还原视图」按用户要求移除，复位仍走键盘 0 / F）；
    *  双击 = 切换全屏，由 TapGesture(count: 2) 收口。
-   *  用「按下→抬起位移」区分点击与拖拽：拖拽是平移手势，不应顺带触发缩放。 */
+   *  用「按下→抬起位移」区分点击与拖拽：拖拽是平移手势，不应顺带触发点击语义。 */
   private onMouseButton(event: MouseEvent): void {
     if (event.action === MouseAction.Press) {
       this.pressBtn = event.button;
@@ -3644,10 +3651,9 @@ struct Index {
         return; // 拖拽平移，不算点击
       }
       if (btn === MouseButton.Right) {
-        // 右键 = 还原（Win64：复位视图 + 归位）
-        this.resetView();
-        this.status = '已还原（适应窗口）';
-        this.clickSnapZoom = -1; // 不需要给双击撤销
+        // 第十五轮：右键点击 = toggle 放大镜总开关（原「还原视图」按用户要求移除）。
+        // 仍位于 !moved 判定之后：右键拖拽是平移手势，不得顺带翻转开关。
+        this.applyLoupeToggle(true);
         return;
       }
       if (btn !== MouseButton.Left) {
@@ -3658,6 +3664,15 @@ struct Index {
       // 双击第一下不会改变视图，onDoubleTapCanvas / undoLastClickZoom 也无需回退任何缩放。
       this.clickSnapZoom = -1;
       this.clickSnapAt = Date.now();
+    }
+  }
+
+  /** 第十五轮：右键 toggle 放大镜总开关（纯函数驱动，预设关闭）。
+   *  非右键事件一律保持原状；只在真正翻转时写 @State，避免每次 Move 触发无效刷新。 */
+  private applyLoupeToggle(rightClick: boolean): void {
+    const next: boolean = loupeEnabledAfterRightPress(this.loupeEnabled, rightClick);
+    if (next !== this.loupeEnabled) {
+      this.loupeEnabled = next;
     }
   }
 
@@ -6114,6 +6129,12 @@ struct Index {
    *    留着 SHOW_FULLSCREEN_CHROME 开关：改回 true 就能恢复旧的唤出式工具条。
    *  y 是相对根 Stack 的坐标。 */
   private onRootMouse(event: MouseEvent): void {
+    // 第十五轮：右键 toggle 放大镜（非预览区的兜底，左栏 / 空白处也能切换）。
+    // 预览区右键 Press 已被 onMouseButton 的 stopPropagation 拦下，只由它自己的
+    // Release 分支翻转一次；根容器只认 Press，故两处不会重复翻转。
+    if (event.action === MouseAction.Press) {
+      this.applyLoupeToggle(event.button === MouseButton.Right);
+    }
     if (!this.fullscreen && event.action === MouseAction.Move) {
       const yTop: number = Number(event.y);
       if (yTop === yTop) {
@@ -6409,7 +6430,9 @@ struct Index {
   }
 
   /** 第十四轮：预览图放大镜浮层（6cm 圆形 / 3 倍局部 / 跟随光标 / 边缘夹界）。
-   *  左右并排两页各调用一次，只按 loupePaneActiveOf 命中当前激活的那一页：
+   *  第十五轮：总开关 loupeEnabled 预设关闭，右键 toggle 后才绘制；关闭时
+   *  loupePane / loupeHover / 坐标仍照常维护，开启即可立即显示，无需重新移入。
+   *  左右并排两页各调用一次，按 loupeVisibleOf 命中当前激活的那一页：
    *  鼠标在哪页，哪页显示它自己那张图的局部放大，另一页完全不绘制（互不影响）。
    *  全屏 / 正常模式都用同一份 Builder —— 预览 Row 不因 fullscreen 被移除，
    *  故全屏态同样保留完整放大镜效果。
@@ -6420,7 +6443,8 @@ struct Index {
    *  否则圆一出现就挡住光标、触发 leave → 闪烁。 */
   @Builder
   loupeLayer(pane: number, uri: string, half: boolean) {
-    if (loupePaneActiveOf(this.loupePane, pane, this.loupeHover, this.hasLoupeImage(pane))) {
+    if (loupeVisibleOf(this.loupeEnabled, this.loupePane, pane,
+      this.loupeHover, this.hasLoupeImage(pane))) {
       Stack() {
         if (pane === LOUPE_PANE_RIGHT) {
           // 并排右页：只认 rightPixelMap（与右页主图同源，逐点对应）。
@@ -6837,7 +6861,7 @@ struct Index {
                 .fontSize(13)
                 .fontColor('#5a6272')
                 .margin({ top: 12 })
-              Text('双击进入全屏 · 右键还原 · 拖拽平移')
+              Text('双击进入全屏 · 右键放大镜 · 拖拽平移')
                 .fontSize(11)
                 .fontColor('#454c5a')
                 .margin({ top: 6 })
@@ -7058,7 +7082,7 @@ struct Index {
           // 约定：向上滚（负值）＝ 上一张；若实机方向相反，把下面的 v < 0 改成 v > 0
           this.onWheel(v < 0 ? -1 : 1);
         })
-        // 左键不放大（第七轮）/ 右键还原 / 双击切换全屏
+        // 左键不放大（第七轮）/ 右键 toggle 放大镜（第十五轮）/ 双击切换全屏
         .onMouse((event: MouseEvent) => {
           this.onMouseButton(event);
         })

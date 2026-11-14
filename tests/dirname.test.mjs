@@ -24,7 +24,8 @@
  * 第十一轮「版本号归位最顶部 / 第二栏悬停显隐 / hover 零延迟零动画 / ESC 非全屏退出」、
  * 第十二轮「切换 NAS 目录时 pumpAll 换源竞态崩溃（Cannot read property uri of undefined）」、
  * 第十三轮「点选零自动滚动 / 整栏贴顶唤出 / 预览图 3cm 3 倍放大镜」、
- * 第十四轮「放大镜 6cm / 左右并排双页独立 / 全屏保留 / 退出全屏后不失效」。
+ * 第十四轮「放大镜 6cm / 左右并排双页独立 / 全屏保留 / 退出全屏后不失效」、
+ * 第十五轮「放大镜预设关闭 / 鼠标右键 toggle 开关」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -65,7 +66,9 @@ import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
   loupeImageOffset, loupeClampedOffset, loupeInFrame,
   loupeEligibleOf, LOUPE_PANE_NONE, LOUPE_PANE_LEFT, LOUPE_PANE_RIGHT,
   LOUPE_CM_14, LOUPE_D_VP_14, loupePaneActiveOf, loupePaneAfterHover,
-  loupeResetOnModeChange, loupeHoverAfterModeChange } from '../entry/src/main/ets/common/InteractionPlan.ts';
+  loupeResetOnModeChange, loupeHoverAfterModeChange,
+  LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,
+  loupeVisibleOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -2623,6 +2626,12 @@ const SET_FULL14_CODE = stripComments(SET_FULL_FN);
 const PREVIEW_ROW14_START = INDEX.indexOf('// ---------- 右侧：大图预览');
 const PREVIEW_ROW14_CODE = stripComments(INDEX.slice(PREVIEW_ROW14_START,
   INDEX.indexOf('.rotate({ angle: this.rot })', PREVIEW_ROW14_START)));
+// 第十五轮切片：鼠标按键收口 / toggle helper / 根容器鼠标事件
+const MOUSEBTN15_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('private onMouseButton('), INDEX.indexOf('private applyLoupeToggle(')));
+const TOGGLE15_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('private applyLoupeToggle('), INDEX.indexOf('private onDoubleTapCanvas(')));
+const ROOTMOUSE15_CODE = stripComments(ROOTMOUSE_FN);
 
 check('②-a select() 两处裸 scrollToIndex 全部收口到 scrollOnTap',
   SELECT13_FN.includes('this.scroller.scrollToIndex(') === false &&
@@ -2812,9 +2821,10 @@ check('② hasLoupeImage 按 pane 分流：右页只看 rightPixelMap，左页�
   HAS_LOUPE14_CODE.includes('pane === LOUPE_PANE_RIGHT') &&
   HAS_LOUPE14_CODE.includes('this.rightPixelMap !== undefined') &&
   HAS_LOUPE14_CODE.includes('return this.hasPreviewImage();'), true);
-check('② loupeLayer 只按 loupePaneActiveOf 命中当前激活页（双页互不影响）',
+check('② loupeLayer 按 loupeVisibleOf 命中激活页（第十五轮：总开关 + 双页独立）',
   LOUPE13_CODE.includes('loupeLayer(pane: number, uri: string, half: boolean)') &&
-  LOUPE13_CODE.includes('loupePaneActiveOf(this.loupePane, pane, this.loupeHover, this.hasLoupeImage(pane))') &&
+  LOUPE13_CODE.includes('loupeVisibleOf(this.loupeEnabled, this.loupePane, pane,') &&
+  LOUPE13_CODE.includes('this.loupeHover, this.hasLoupeImage(pane)))') &&
   LOUPE13_CODE.includes('loupeEligibleOf(this.loupeHover,') === false, true);
 check('② loupeLayer 右页分支只取 rightPixelMap（不误用左页图源）',
   LOUPE13_CODE.includes('if (pane === LOUPE_PANE_RIGHT)') &&
@@ -2851,11 +2861,11 @@ check('② 全屏复位在 this.fullscreen = on 之前（用旧态与新态比�
   SET_FULL14_CODE.indexOf('loupeResetOnModeChange(this.fullscreen, on)') <
   SET_FULL14_CODE.indexOf('this.fullscreen = on;') &&
   SET_FULL14_CODE.indexOf('this.fullscreen = on;') >= 0, true);
-check('② 复位不引入永久禁用标志（下一次 hover 可重新激活 → 退出全屏后不失效）',
+check('② 全屏复位只清瞬时状态、不动总开关（下一次 hover 可重新激活 → 退出全屏后不失效）',
   INDEX.includes('loupeDisabled') === false &&
   INDEX.includes('loupeBlocked') === false &&
   INDEX.includes('loupePermanentOff') === false &&
-  INDEX.includes('loupeEnabled') === false &&
+  SET_FULL14_CODE.includes('loupeEnabled') === false &&
   SET_FULL14_CODE.includes('if (on === this.fullscreen)') &&
   SET_FULL14_CODE.includes('return;'), true);
 check('② 预览 Row 不因 fullscreen 条件移除（全屏态两页放大镜仍生效）',
@@ -2894,6 +2904,110 @@ check('② 第十四轮回归护栏：既有画质 / 顶栏 / ESC / 版本 / 往
   INDEX.includes('topBarPeekOf(this.topBarPeek, yTop,') &&
   INDEX.includes('tapScrollAction(row, this.listFirstRow, this.listLastRow,') &&
   INDEX.split('this.scroller.scrollToIndex(').length - 1 === 3, true);
+
+// ==================== 第十五轮：放大镜预设关闭 / 鼠标右键 toggle 开关 ====================
+console.log('--- 第十五轮 ①：InteractionPlan.ts 纯函数（预设关闭 / 右键 toggle / 总开关判定） ---');
+check('① 预设关闭：LOUPE_DEFAULT_ENABLED 恒为 false',
+  LOUPE_DEFAULT_ENABLED === false, true);
+check('① 右键 toggle：关→开、开→关，一次点击只翻转一次',
+  loupeEnabledAfterRightPress(false, true) === true &&
+  loupeEnabledAfterRightPress(true, true) === false &&
+  loupeEnabledAfterRightPress(false, true) === true, true);
+check('① 非右键事件一律保持原状（左键 / 抬起 / 移动 / 拖拽不误触）',
+  loupeEnabledAfterRightPress(false, false) === false &&
+  loupeEnabledAfterRightPress(true, false) === true, true);
+check('① toggle 序列：默认关 → 开 → 关 → 开（稳定不抖动）',
+  (() => {
+    let v = LOUPE_DEFAULT_ENABLED;
+    for (let i = 0; i < 3; i++) { v = loupeEnabledAfterRightPress(v, true); }
+    return v === true && LOUPE_DEFAULT_ENABLED === false;
+  })(), true);
+check('① 总开关关闭时一律不绘制（各种 pane / 悬停 / 有图组合都不画）',
+  loupeVisibleOf(false, LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, true, true) === false &&
+  loupeVisibleOf(false, LOUPE_PANE_RIGHT, LOUPE_PANE_RIGHT, true, true) === false &&
+  loupeVisibleOf(false, LOUPE_PANE_NONE, LOUPE_PANE_LEFT, true, true) === false &&
+  loupeVisibleOf(false, LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, false, false) === false, true);
+check('① 总开关开启后等价于第十四轮 pane 判定（双页独立不变）',
+  loupeVisibleOf(true, LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, true, true) === true &&
+  loupeVisibleOf(true, LOUPE_PANE_LEFT, LOUPE_PANE_RIGHT, true, true) === false &&
+  loupeVisibleOf(true, LOUPE_PANE_RIGHT, LOUPE_PANE_RIGHT, true, true) === true &&
+  loupeVisibleOf(true, LOUPE_PANE_RIGHT, LOUPE_PANE_LEFT, true, true) === false, true);
+check('① 开启后仍需悬停 + 该页有图（不因开关打开就常显）',
+  loupeVisibleOf(true, LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, false, true) === false &&
+  loupeVisibleOf(true, LOUPE_PANE_LEFT, LOUPE_PANE_LEFT, true, false) === false &&
+  loupeVisibleOf(true, LOUPE_PANE_NONE, LOUPE_PANE_LEFT, true, true) === false, true);
+check('① 全链路：默认关 → 右键开显示 → 右键关隐藏 → 右键开再显示',
+  (() => {
+    let enabled = LOUPE_DEFAULT_ENABLED;
+    const pane = LOUPE_PANE_LEFT;
+    if (loupeVisibleOf(enabled, pane, pane, true, true)) { return false; }
+    enabled = loupeEnabledAfterRightPress(enabled, true);
+    if (!loupeVisibleOf(enabled, pane, pane, true, true)) { return false; }
+    enabled = loupeEnabledAfterRightPress(enabled, true);
+    if (loupeVisibleOf(enabled, pane, pane, true, true)) { return false; }
+    enabled = loupeEnabledAfterRightPress(enabled, true);
+    return loupeVisibleOf(enabled, pane, pane, true, true);
+  })(), true);
+check('① InteractionPlan.ts 仍是纯函数模块（第十五轮不带 SDK / IO / 计时器）',
+  NO_UI_SIDE_EFFECT.some(s => IP_CODE.includes(s)) === false &&
+  IP_CODE.includes('export function loupeEnabledAfterRightPress') &&
+  IP_CODE.includes('export function loupeVisibleOf') &&
+  IP_CODE.includes('export const LOUPE_DEFAULT_ENABLED'), true);
+
+console.log('--- 第十五轮 ②：Index.ets 源码静态契约（预设关闭 / 右键 toggle / 回归护栏） ---');
+check('② @State loupeEnabled 初值取预设常量（默认关闭，单一真值来源）',
+  INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
+  LOUPE_DEFAULT_ENABLED === false &&
+  INDEX.includes('LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,'), true);
+check('② loupeLayer 绘制判定走 loupeVisibleOf（总开关 + 双页独立）',
+  LOUPE13_CODE.includes('loupeVisibleOf(this.loupeEnabled, this.loupePane, pane,') &&
+  LOUPE13_CODE.includes('this.loupeHover, this.hasLoupeImage(pane)))') &&
+  LOUPE13_CODE.includes('loupePaneActiveOf(this.loupePane,') === false, true);
+check('② 右键点击改为 toggle 放大镜，移除原「还原视图」',
+  MOUSEBTN15_CODE.includes('if (btn === MouseButton.Right)') &&
+  MOUSEBTN15_CODE.includes('this.applyLoupeToggle(true);') &&
+  MOUSEBTN15_CODE.includes('this.resetView();') === false &&
+  MOUSEBTN15_CODE.includes('已还原') === false, true);
+check('② 右键点击仍走 !moved 判定（右键拖拽是平移，不翻转开关）',
+  MOUSEBTN15_CODE.includes('if (moved) {') &&
+  MOUSEBTN15_CODE.indexOf('if (moved) {') < MOUSEBTN15_CODE.indexOf('this.applyLoupeToggle(true);') &&
+  MOUSEBTN15_CODE.includes('const btn: number = this.pressBtn;'), true);
+check('② 右键 Press 仍 stopPropagation（不弹系统右键菜单）',
+  MOUSEBTN15_CODE.includes('event.stopPropagation();') &&
+  MOUSEBTN15_CODE.includes('event.button === MouseButton.Right'), true);
+check('② applyLoupeToggle 走纯函数且只在真正翻转时写状态',
+  TOGGLE15_CODE.includes('loupeEnabledAfterRightPress(this.loupeEnabled, rightClick)') &&
+  TOGGLE15_CODE.includes('if (next !== this.loupeEnabled)') &&
+  TOGGLE15_CODE.includes('this.loupeEnabled = next;'), true);
+check('② 根容器 Press 兜底：非预览区右键也能 toggle，且只认 Press 不重复翻转',
+  ROOTMOUSE15_CODE.includes('if (event.action === MouseAction.Press)') &&
+  ROOTMOUSE15_CODE.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  ROOTMOUSE15_CODE.includes('MouseAction.Release') === false, true);
+check('② 全屏复位不重置总开关（用户手动开启的开关跨全屏保持）',
+  SET_FULL14_CODE.includes('loupeEnabled') === false &&
+  SET_FULL14_CODE.includes('this.loupePane = LOUPE_PANE_NONE;') &&
+  SET_FULL14_CODE.includes('this.loupeHover = loupeHoverAfterModeChange'), true);
+check('② 空态提示文案同步为「右键放大镜」（不再写右键还原）',
+  INDEX.includes("Text('双击进入全屏 · 右键放大镜 · 拖拽平移')") &&
+  INDEX.includes("Text('双击进入全屏 · 右键还原 · 拖拽平移')") === false, true);
+check('② 复位能力未丢失：resetView() 仍被键盘 / 其它路径多处调用',
+  INDEX.split('this.resetView();').length - 1 >= 4, true);
+check('② 顶栏滞回链零动画 / 零延迟未被右键兜底破坏',
+  NO_ANIM.some(s => ROOTMOUSE15_CODE.includes(s)) === false &&
+  ROOTMOUSE15_CODE.includes('!this.fullscreen && event.action === MouseAction.Move') &&
+  ROOTMOUSE15_CODE.includes('topBarPeekOf(this.topBarPeek, yTop,'), true);
+check('② 第十五轮回归护栏：鼠标 / 全屏 / 画质 / 版本 / 顶栏既有交互全未动',
+  INDEX.includes('TapGesture({ count: 2 })') &&
+  INDEX.includes('this.onDoubleTapCanvas();') &&
+  INDEX.includes('this.clickSnapZoom = -1;') &&
+  INDEX.includes('.onAxisEvent((event: AxisEvent)') &&
+  INDEX.includes('this.pressMoved = true;') &&
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes('回上层') === false &&
+  INDEX.includes('@State topBarPeek: boolean = false;') &&
+  INDEX.includes('topBarPeekOf(this.topBarPeek, yTop,'), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
