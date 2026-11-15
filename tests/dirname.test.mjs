@@ -28,7 +28,9 @@
  * 第十五轮「放大镜预设关闭 / 鼠标右键 toggle 开关」、
  * 第十六轮「ESC 分状态 / 全屏往返窗口几何 / 放大镜 >1:1 重采样」、
  * 第十七轮「放大镜边缘抗锯齿：SDK 插值档语义修正 / 真实设备密度 / 原图上限夹界 /
- * 真实像素增益跳过 / PixelMap 边缘 AA」。
+ * 真实像素增益跳过 / PixelMap 边缘 AA」、
+ * 第十八轮「窗口模式重做：ESC 严格两态分派 / 去掉 400ms 冷却误吞 / 系统被动退出
+ * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -81,7 +83,9 @@ import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
   LOUPE_DENSITY_MIN, LOUPE_DENSITY_MAX, LOUPE_DENSITY_FALLBACK,
   LOUPE_AA_ENABLED, LOUPE_QA_HIGH, LOUPE_QA_LOW,
   loupeDensityRatioOf, loupeQualityTierOf, loupeResampleEdge2Of,
-  loupeResampleGainOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
+  loupeResampleGainOf,
+  escActionByState, shouldArmSystemEcho, shouldCaptureRectAll,
+  shouldApplyRectRestore, shouldSelfHealOnResize } from '../entry/src/main/ets/common/InteractionPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -1372,7 +1376,7 @@ check('回归：预算常量 / 防冻结闸门 / 按钮 / 版本不动',
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 console.log('--- 源码静态契约：5 项实机修正（全屏放大 / ESC 还原 / 右页锯齿 / hover / 列表）---');
-const SF0 = INDEX.indexOf('private setFull(on: boolean): void {');
+const SF0 = INDEX.indexOf('private setFull(on: boolean, bySystemHeal: boolean = false): void {');
 const SET_FULL_FN = INDEX.slice(SF0, INDEX.indexOf('fullscreenStepsOf(on)', SF0));
 const FB0 = INDEX.indexOf('private armCanvasReloadFallback(): void {');
 const FALLBACK_FN = INDEX.slice(FB0, FB0 + 600);
@@ -1532,14 +1536,15 @@ console.log('--- 源码静态契约：① ESC 对齐双击 + 全屏沉浸自愈 
 const ONKEY_FN = INDEX.slice(INDEX.indexOf('private onKey(event: KeyEvent): void {'),
   INDEX.indexOf('// ------------------------------------------------------------------\n  // UI 片段',
     INDEX.indexOf('private onKey(event: KeyEvent): void {')));
-check('① ESC 与双击/F11 同走 toggleFull()（第十六轮改按 escActionOf 分派，入口仍不分叉）',
-  ONKEY_FN.includes('const escAct: number = escActionOf(this.fullscreen,') &&
+check('① ESC 与双击/F11 同走 toggleFull()（第十八轮改按 escActionByState 分派，入口仍不分叉）',
+  ONKEY_FN.includes('const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);') &&
   /if \(escAct === ESC_ACT_EXIT_FULL\) \{\s*this\.toggleFull\(\);/.test(ONKEY_FN) &&
   /this\.toggleFull\(\);/.test(ONKEY_FN) &&
   /case KeyCode\.KEYCODE_F11:\s*this\.toggleFull\(\);/.test(ONKEY_FN), true);
-check('① onAreaChange 全屏态画布缩小 → 自愈 setFull(false) 恢复完整界面',
-  /shouldExitFullOnResize\(this\.fullscreen, this\.fullCanvasW, this\.fullCanvasH, w, h,\s*FULL_EXIT_SHRINK_RATIO\)/.test(INDEX) &&
-  /this\.setFull\(false\);\s*return;/.test(INDEX), true);
+check('① onAreaChange 全屏态画布缩小 → 自愈 setFull(false, true) 恢复完整界面（第十八轮双判据）',
+  /const shrinkBig: boolean = shouldExitFullOnResize\(this\.fullscreen, this\.fullCanvasW, this\.fullCanvasH, w, h,\s*FULL_EXIT_SHRINK_RATIO\)/.test(INDEX) &&
+  /const shrinkSmall: boolean = shouldSelfHealOnResize\(this\.fullscreen, healReady,/.test(INDEX) &&
+  /this\.setFull\(false, true\);\s*return;/.test(INDEX), true);
 check('① 全屏画布基准：进全屏清零并记时刻、期间取最大、退出清零',
   /private fullCanvasW: number = 0;/.test(INDEX) &&
   /private fullEnterAt: number = 0;/.test(INDEX) &&
@@ -2403,8 +2408,8 @@ check('③ hover 缩略图 builder 内无淡入淡出 / 过渡动画',
   /\.opacity\(|\.transition\(|animateTo/.test(HOVER_THUMB_FN) === false, true);
 
 // ④ ESC：仅非全屏退出 APP，全屏保持原全屏交互
-check('④ ESC 全屏态仍走 toggleFull()、非全屏态才 quitApp()（第十六轮按窗口状态分派）',
-  ESC_FN.includes('const escAct: number = escActionOf(this.fullscreen,') &&
+check('④ ESC 全屏态仍走 toggleFull()、非全屏态才 quitApp()（第十八轮 escActionByState 严格两态分派）',
+  ESC_FN.includes('const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);') &&
   ESC_FN.includes('if (escAct === ESC_ACT_EXIT_FULL) {') &&
   ESC_CODE.includes('this.toggleFull();') &&
   ESC_FN.includes('else if (escAct === ESC_ACT_QUIT_APP) {') &&
@@ -3105,18 +3110,23 @@ const CAPTURE16_CODE = stripComments(INDEX.slice(
   INDEX.indexOf('  private capturePreFullRect('), INDEX.indexOf('  private setFull(')));
 const LOUPE16_CODE = stripComments(LOUPE13_CODE);
 
-check('② 第十七轮画质纯函数 / 常量全部 import 到 Index.ets（第十六轮旧三档函数已退役）',
+check('② 第十八轮 ESC/几何纯函数 import 到 Index.ets（第十六轮 escActionOf / msSinceFullExitOf 已退役）',
   INDEX.includes('ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,') &&
-  INDEX.includes('shouldCaptureWindowRect, shouldRestoreWindowRect, msSinceFullExitOf,') &&
+  INDEX.includes('shouldCaptureWindowRect, shouldRestoreWindowRect,') &&
+  INDEX.includes('escActionByState, shouldArmSystemEcho, shouldCaptureRectAll,') &&
+  INDEX.includes('shouldApplyRectRestore, shouldSelfHealOnResize,') &&
   INDEX.includes('loupeEffectiveScaleOf, loupeNeedsResampleOf') &&
   INDEX.includes('loupePixelAlignOf, loupeResampleStableOf') &&
   INDEX.includes('LOUPE_AA_ENABLED, LOUPE_QA_HIGH, loupeDensityRatioOf, loupeQualityTierOf') &&
-  INDEX.includes('loupeResampleEdge2Of, loupeResampleGainOf'), true);
-check('② 四个新常量就位（密度比 / 解码边上限 / 稳定阈值 / ESC 冷却）',
+  INDEX.includes('loupeResampleEdge2Of, loupeResampleGainOf') &&
+  INDEX.includes('msSinceFullExitOf') === false &&
+  INDEX.includes('escActionOf(') === false, true);
+check('② 常量就位（三处放大镜 + 第十八轮绝对像素自愈阈值；400ms 时间冷却常量已移除）',
   INDEX.includes('const LOUPE_DENSITY_RATIO: number = 1;') &&
   INDEX.includes('const LOUPE_RESAMPLE_MAX_EDGE: number = 8192;') &&
   INDEX.includes('const LOUPE_RESAMPLE_STABLE_MIN_DELTA: number = 64;') &&
-  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS: number = 400;'), true);
+  INDEX.includes('const FULL_SELF_HEAL_MIN_SHRINK_PX: number = 8;') &&
+  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS') === false, true);
 check('② 进入全屏前抓 rect：走 shouldCaptureWindowRect + packWindowRect + 可用性校验',
   CAPTURE16_CODE.includes('shouldCaptureWindowRect(prevFull, nextFull, floating)') &&
   CAPTURE16_CODE.includes('packWindowRect({') &&
@@ -3142,16 +3152,21 @@ check('② setFull() 下降沿记时刻 + 模式切换释放高清图源 + 上�
   SET_FULL16_CODE.includes('if (prevFull && !on) {') &&
   SET_FULL16_CODE.includes('this.lastFullExitAt = Date.now();') &&
   SET_FULL16_CODE.includes('this.clearLoupeHiRes();'), true);
-check('② ESC 按当前窗口状态分派（escActionOf(this.fullscreen, …) 为唯一真值来源）',
-  ONKEY16_CODE.includes('escActionOf(this.fullscreen,') &&
-  ONKEY16_CODE.includes('msSinceFullExitOf(Date.now(), this.lastFullExitAt)') &&
+check('② ESC 严格按当前窗口状态分派（escActionByState 为唯一真值来源，彻底无时间冷却）',
+  ONKEY16_CODE.includes('const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);') &&
   ONKEY16_CODE.includes('ESC_ACT_EXIT_FULL') && ONKEY16_CODE.includes('ESC_ACT_QUIT_APP') &&
-  ONKEY16_CODE.includes('escAct === ESC_ACT_NONE') &&
+  ONKEY16_CODE.includes('this.quitApp();') &&
+  ONKEY16_CODE.includes('escActionOf(') === false &&
+  ONKEY16_CODE.includes('msSinceFullExitOf(') === false &&
+  ONKEY16_CODE.includes('FULL_EXIT_ESC_GUARD_MS') === false &&
   ONKEY16_CODE.includes('if (this.fullscreen) {') === false, true);
-check('② ESC 冷却只吞一次（NONE 分支清零），第二次 ESC 立即退出 APP',
-  ONKEY16_CODE.includes('this.lastFullExitAt = 0;'), true);
-check('② 系统自愈退出沉浸分支也记时刻（补发 ESC 不会落到 quitApp）',
-  /this\.lastFullExitAt = Date\.now\(\);\s*this\.setFull\(false\);/.test(INDEX), true);
+check('② 补发 ESC 只吞一次（else 分支清 pendingSystemEcho），第二次 ESC 立即退出 APP',
+  ONKEY16_CODE.includes('this.pendingSystemEcho = false;') &&
+  ONKEY16_CODE.includes('this.lastFullExitAt = 0;') === false, true);
+check('② 系统被动退出沉浸走 setFull(false, true) + 按来源置位补发标志（补发 ESC 不落到 quitApp）',
+  /this\.setFull\(false, true\);\s*return;/.test(INDEX) &&
+  SET_FULL16_CODE.includes('this.pendingSystemEcho = shouldArmSystemEcho(bySystemHeal, prevFull, on);') &&
+  INDEX.includes('private setFull(on: boolean, bySystemHeal: boolean = false): void {'), true);
 check('② 全屏快照字段就位（本次往返专用，用完即清）',
   INDEX.includes('private preFullRect: string') &&
   INDEX.includes('private hasPreFullRect: boolean') &&
@@ -3336,8 +3351,123 @@ check('② 第十七轮回归护栏：三处画质计数 / 版本 / 右键 toggl
   INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
   INDEX.includes('@State topBarPeek: boolean = false;') &&
   INDEX.includes('shouldCaptureWindowRect(prevFull, nextFull, floating)') &&
-  INDEX.includes('escActionOf(this.fullscreen,') &&
+  INDEX.includes('escActionByState(this.fullscreen,') &&
   INDEX.includes('quitApp()') && INDEX.includes('ability.terminateSelf()'), true);
+
+// ==================== 第十八轮：窗口模式 ESC 严格两态 / 几何快照放宽 / 绝对像素自愈 ====================
+console.log('--- 第十八轮 ①：InteractionPlan.ts 纯函数（两态分派 / 补发标志 / 几何 / 自愈） ---');
+check('① escActionByState：全屏恒 EXIT_FULL（首次 ESC 绝不退出 APP，含 pendingEcho=true 也不变）',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(true, true) === ESC_ACT_EXIT_FULL, true);
+check('① escActionByState：普通无补发标志 → QUIT_APP（返回普通模式再次 ESC 退出 APP）',
+  escActionByState(false, false) === ESC_ACT_QUIT_APP, true);
+check('① escActionByState：普通且 pendingSystemEcho → NONE（仅系统被动退出后吞一次补发）',
+  escActionByState(false, true) === ESC_ACT_NONE, true);
+check('① shouldArmSystemEcho：仅「系统被动退出全屏 下降沿」置位，主动退出/上升沿/非全屏恒 false',
+  shouldArmSystemEcho(true, true, false) === true &&
+  shouldArmSystemEcho(false, true, false) === false &&
+  shouldArmSystemEcho(true, true, true) === false &&
+  shouldArmSystemEcho(true, false, false) === false &&
+  shouldArmSystemEcho(true, false, true) === false, true);
+check('① shouldCaptureRectAll：非全屏→全屏上升沿 + rect 可用才抓，最大化态也抓（不再 floating-only）',
+  shouldCaptureRectAll(false, true, true) === true &&
+  shouldCaptureRectAll(false, true, false) === false &&
+  shouldCaptureRectAll(true, true, true) === false &&
+  shouldCaptureRectAll(false, false, true) === false &&
+  shouldCaptureRectAll(true, false, true) === false, true);
+check('① shouldApplyRectRestore：仅「进入前自由窗口 + rect 可用」才精确 resize/move，最大化态保持',
+  shouldApplyRectRestore(true, true) === true &&
+  shouldApplyRectRestore(false, true) === false &&
+  shouldApplyRectRestore(true, false) === false &&
+  shouldApplyRectRestore(false, false) === false, true);
+check('① shouldSelfHealOnResize：绝对像素缩小 ≥8px 即自愈（0.92 比例阈值抓不到的小幅缩小）',
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1912, 1080, 8) === true &&
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1920, 1050, 8) === true &&
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1830, 1000, 8) === true, true);
+check('① shouldSelfHealOnResize：未缩小 / 缩小 <8px / 非全屏 / 未稳定 / 脏尺寸 全部不自愈',
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1920, 1080, 8) === false &&
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1915, 1080, 8) === false &&
+  shouldSelfHealOnResize(false, true, 1920, 1080, 1000, 800, 8) === false &&
+  shouldSelfHealOnResize(true, false, 1920, 1080, 1000, 800, 8) === false &&
+  shouldSelfHealOnResize(true, true, 0, 1080, 800, 800, 8) === false &&
+  shouldSelfHealOnResize(true, true, 1920, 1080, 0, 0, 8) === false, true);
+check('① shouldSelfHealOnResize：minShrinkPx 非法值按 8 兜底（脏值不误触发）',
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1912, 1080, 0) === true &&
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1913, 1080, 0) === false &&
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1900, 1080, NaN) === true, true);
+
+console.log('--- 第十八轮 ②：端到端场景矩阵（用户诉求四句逐条可验证） ---');
+// 场景 1：普通模式双击进全屏 → 保存几何（不受 getWindowStatus 值影响）
+check('场景1 双击进全屏：上升沿恒抓几何 + 记录进入前形态（FLOATING / MAXIMIZE / 状态读取失败都覆盖）',
+  shouldCaptureRectAll(false, true, true) === true &&
+  shouldCaptureWindowRect(false, true, true) === true &&   // 旧 FLOATING 快路径仍在
+  shouldApplyRectRestore(true, true) === true &&          // 自由窗口快照可精确还原
+  shouldApplyRectRestore(false, true) === false, true);   // 最大化态快照不误缩
+// 场景 2：全屏首次 ESC → 只退全屏、恢复几何，绝不退出 APP
+check('场景2 全屏首次 ESC：恒 EXIT_FULL，任何 pendingEcho / 距上次退出时刻都不改变（无时间冷却）',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(true, true) === ESC_ACT_EXIT_FULL &&
+  shouldRestoreWindowRect(true, false, true, true) === true && // 下降沿 + 快照可用 → 恢复几何
+  shouldRestoreWindowRect(false, false, true, true) === false, true);
+// 场景 3：返回普通模式后再次 ESC → 退出 APP（主动退出路径 pendingEcho 恒 false，不被误吞）
+check('场景3 主动退出全屏后第二次 ESC：pendingEcho=false → 立即 QUIT_APP（第十六轮 400ms 冷却已废）',
+  shouldArmSystemEcho(false, true, false) === false &&     // 主动退出不置补发标志
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS') === false, true);
+// 场景 4：真全屏 ESC 被系统消费 → 自愈同步 + 一次补发吞键，避免首次 ESC 直接退出 APP
+check('场景4 系统消费 ESC：小幅画布缩小触发自愈 → 置补发标志 → 补发 ESC 被吞 → 之后主动 ESC 才退 APP',
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1900, 1080, 8) === true && // 仅缩 20px 也能捕获
+  shouldArmSystemEcho(true, true, false) === true &&
+  escActionByState(false, true) === ESC_ACT_NONE &&      // 补发 ESC 被吞
+  escActionByState(false, false) === ESC_ACT_QUIT_APP, true); // 用户随后主动 ESC 退 APP
+// 场景 5：双击 / F11 / 退出按钮等主动路径，不产生补发标志
+check('场景5 主动退出路径（双击/F11/按钮）不置补发标志，紧接着的二次 ESC 不被吞',
+  shouldArmSystemEcho(false, true, false) === false &&
+  escActionByState(false, shouldArmSystemEcho(false, true, false)) === ESC_ACT_QUIT_APP, true);
+
+console.log('--- 第十八轮 ③：Index.ets 源码静态契约（接线 / 护栏） ---');
+const SET_FULL18_CODE = stripComments(SET_FULL_FN);
+const ONKEY18_CODE = stripComments(ONKEY_FN);
+const CAPTURE18_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('  private capturePreFullRect('), INDEX.indexOf('  private setFull(')));
+const RESTORE18_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('  private async restorePreFullRect('), INDEX.indexOf('  private setFull(')));
+check('③ 四个第十八轮纯函数接线：两态分派 / 按来源置位 / 几何宽判据 / 形态判据 / 绝对像素自愈',
+  ONKEY18_CODE.includes('escActionByState(this.fullscreen, this.pendingSystemEcho);') &&
+  SET_FULL18_CODE.includes('shouldArmSystemEcho(bySystemHeal, prevFull, on);') &&
+  CAPTURE18_CODE.includes('shouldCaptureRectAll(prevFull, nextFull, true)') &&
+  RESTORE18_CODE.includes('shouldApplyRectRestore(wasFloating, true)') &&
+  INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,'), true);
+check('③ setFull 签名带 bySystemHeal 默认参数，下降沿按来源置位（不再是「所有路径无脑记时刻」）',
+  INDEX.includes('private setFull(on: boolean, bySystemHeal: boolean = false): void {') &&
+  SET_FULL18_CODE.includes('this.pendingSystemEcho = shouldArmSystemEcho(bySystemHeal, prevFull, on);') &&
+  /if \(prevFull && !on\) \{[^}]*this\.lastFullExitAt = Date\.now\(\);[^}]*shouldArmSystemEcho/.test(SET_FULL18_CODE), true);
+check('③ 自愈分支唯一置位入口 setFull(false, true)，且保留比例 + 绝对像素双判据',
+  /this\.setFull\(false, true\);\s*return;/.test(INDEX) &&
+  /const shrinkBig: boolean = shouldExitFullOnResize\(/.test(INDEX) &&
+  /const shrinkSmall: boolean = shouldSelfHealOnResize\(/.test(INDEX) &&
+  INDEX.split('this.setFull(false, true);').length - 1 === 1, true);
+check('③ 几何快照放宽：上升沿清 preFullFloating + 记录 floating 形态 + resize/move 前判形态',
+  CAPTURE18_CODE.includes('this.preFullFloating = false;') &&
+  CAPTURE18_CODE.includes('this.preFullFloating = floating;') &&
+  RESTORE18_CODE.includes('const wasFloating: boolean = this.preFullFloating;') &&
+  INDEX.includes('await win.resize(rect.width, rect.height);') &&
+  INDEX.includes('await win.moveWindowTo(rect.left, rect.top);'), true);
+check('③ 时间冷却彻底移除：Index 不含 escActionOf( / msSinceFullExitOf( / FULL_EXIT_ESC_GUARD_MS 常量 / lastFullExitAt=0',
+  INDEX.includes('escActionOf(') === false &&
+  INDEX.includes('msSinceFullExitOf(') === false &&
+  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS') === false &&
+  INDEX.includes('this.lastFullExitAt = 0;') === false, true);
+check('③ 第十七/十三/十四/十五轮回归护栏：画质三处 / 版本 / AA / 右键 toggle / 放大镜几何 / 顶栏滞回 均未破坏',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  LOUPE13_CODE.split('.antialiased(LOUPE_AA_ENABLED)').length - 1 === 5 &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
+  INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  INDEX.includes('@State topBarPeek: boolean = false;') &&
+  INDEX.includes('loupeClampedOffset(') &&
+  INDEX.includes('ability.terminateSelf()'), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

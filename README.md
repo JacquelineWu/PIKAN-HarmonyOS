@@ -39,12 +39,12 @@
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
-| 关闭应用 | **`Esc`** 按当前窗口状态区分（第十六轮 `escActionOf`）：全屏下首次 `Esc` 先退全屏并恢复进全屏前的窗口尺寸位置（**绝不退出 APP**），返回普通模式后再按一次才关闭；系统自愈退出全屏后补发的迟到 ESC 被 400ms 冷却吞掉，不会误退出 |
+| 关闭应用 | **`Esc`** 严格按当前窗口状态区分（**第十八轮重做** `escActionByState`）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的窗口尺寸位置（**绝不退出 APP**），返回普通模式后再按一次立即关闭；**已废除第十六轮 400ms 时间冷却**（它会误吞用户紧接着的第二次 ESC），仅「系统被动退出沉浸」后置一次性标志吞掉可能的补发键，见第十八轮章节 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
-| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十六轮**：进全屏前抓普通模式窗口尺寸位置内存快照，退出时 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
+| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
 | 色彩 / HDR / EXIF | 解码时按 EXIF Orientation 自动摆正（含 4 种镜像）；识别内嵌 ICC 映射到的标准色彩空间（sRGB / Display P3 / BT.2020…）并显示；HDR 图按 HDR 解码 + 显示端 HIGH 动态范围，平台不支持时自动降 SDR。**平台边界**：HarmonyOS 26 没有「从 ICC profile 字节流构造色彩空间」API，详见专章 |
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
@@ -532,6 +532,74 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第十八轮：窗口模式交互重做 —— ESC 严格两态 / 废除时间冷却 / 全窗口态几何快照 / 绝对像素自愈（2026-11-15）
+
+用户实机反馈第十六轮的「窗口模式 / ESC 分状态 / 全屏往返几何恢复」**没有实现**。本轮不沿用第十六轮
+「靠 400ms 时间冷却猜补发键 + 0.92 比例阈值自愈 + floating-only 快照」的思路，重新定位到三处确定根因，
+在**完全保留当前交互、页面布局与既有功能**的前提下重做 ESC 状态机与几何恢复。
+
+> ⚠️ **本节取代第十六轮关于 ESC 冷却的结论**：400ms 时间窗无法区分「系统补发 ESC」与
+> 「用户主动的第二次 ESC」，是「返回普通模式后再次按 ESC 应退出 APP」失效的主因。详见第十六轮章节订正注记。
+
+### 诉求
+
+> 请实现窗口模式交互逻辑：从普通模式双击鼠标进入全屏时，保留进入前的窗口尺寸和位置；
+> 在全屏状态下首次按 ESC，应退出全屏、返回普通模式，并恢复该尺寸和位置；
+> 返回普通模式后再次按 ESC，应退出 APP。确保 ESC 响应按当前窗口状态区分，
+> 避免首次按 ESC 直接退出 APP。
+
+拆解：① 双击进全屏保存窗口几何；② 全屏首次 ESC 退全屏 + 恢复几何、绝不退出 APP；
+③ 普通模式再次 ESC 退出 APP；④ ESC 只按当前窗口状态区分。
+
+### 根因（「没有实现」的三个确定原因）
+
+| # | 根因 | 为什么导致「没实现」 |
+|---|---|---|
+| 1 | **400ms 时间冷却误吞主动二次 ESC（主因）** | `escActionOf(false, sinceExitMs, 400)` 在「距上次退出全屏 < 400ms」时把 ESC 判为 `NONE` 吞掉；而 `setFull()` 下降沿（6351）与自愈分支（7362）对**所有**退出路径都无条件刷新 `lastFullExitAt`。用户「退出全屏后紧接着按第二次 ESC」几乎必然落在窗内 → 被当成补发键吞掉 → **「再次 ESC 退出 APP」永远不成立**；用户往往要按到第三次才退出。时间窗根本无法区分「系统补发」与「用户主动按键」 |
+| 2 | **自愈比例阈值过严 → 真全屏下状态长期不同步** | 真全屏 ESC 常被窗口管理器先消费，系统自行退出沉浸后往往只是 title / dock / 系统栏回来，画布仅缩小几十 px（约 0.95）；而 `shouldExitFullOnResize` 要求缩到 `0.92` 以下才自愈 → 自愈从不触发 → `fullscreen` 与真实窗口脱节，界面布局卡在全屏态、ESC 「按状态区分」整体失效 |
+| 3 | **几何快照 floating-only → 常常根本不抓** | `shouldCaptureWindowRect` 额外要求 `getWindowStatus()===FLOATING`；PC / 2in1 上自由窗口的状态值不总是 FLOATING（也可能 MAXIMIZE / UNDEFINED，或读取抛异常）→ 快照不抓 → 退出时 `hasPreFullRect=false` → **「保留并恢复进入前尺寸位置」不执行** |
+
+### 改动
+
+| 文件 | 改动 |
+|---|---|
+| `InteractionPlan.ts` | 新增 ⑨ 节纯函数：`escActionByState`（严格两态、无时间冷却）、`shouldArmSystemEcho`（仅系统被动退出置一次补发标志）、`shouldCaptureRectAll`（上升沿 + rect 合法即抓，放宽 floating 限制）、`shouldApplyRectRestore`（仅自由窗口才精确 resize/move）、`shouldSelfHealOnResize`（≥ `minShrinkPx` 绝对像素缩小即自愈）。第十六轮旧 `escActionOf` / `msSinceFullExitOf` / `shouldCaptureWindowRect` / `shouldRestoreWindowRect` 全部保留供回归 |
+| `Index.ets` | ① `onKey(ESC)` 改走 `escActionByState(fullscreen, pendingSystemEcho)`，彻底删除时间冷却；② 新增 `pendingSystemEcho` 一次性标志，仅 `setFull(false, true)`（系统自愈）经 `shouldArmSystemEcho` 置位、被任意一次 ESC 消费即清零；③ `setFull(on, bySystemHeal=false)` 加来源参数，主动退出（ESC/F11/双击/按钮）恒清标志 → 二次 ESC 立即退 APP；④ 自愈同时保留 `0.92` 比例快路径 + 新增 `≥8px` 绝对像素判据（捕获系统栏回来）；⑤ `capturePreFullRect` 放宽到所有普通窗口态并记 `preFullFloating`；⑥ `restorePreFullRect` 仅自由窗口 `resize`+`moveWindowTo`，最大化态交给 `EXIT_IMMERSIVE` 维持形态不误缩 |
+| `tests/dirname.test.mjs` | 同步 9 条第十六轮旧静态断言到新接线；新增 20 条第十八轮断言（4 组纯函数 + 端到端场景矩阵 + 源码静态契约 + 回归护栏）。**1132 → 1152** |
+
+`FULL_EXIT_ESC_GUARD_MS = 400` 常量与 `escActionOf(...)` / `msSinceFullExitOf(...)` 在 `Index.ets` 的接线
+全部移除；`lastFullExitAt` 字段保留但仅用于日志 / 诊断，不再参与 ESC 分派。
+
+### 验证场景与对应预期效果
+
+| # | 场景 | 操作 | 预期效果 |
+|---|---|---|---|
+| 1 | 自由窗口进全屏 | 普通模式自由窗口（任意尺寸位置）双击进全屏 | 保存进入前 `left,top,width,height` 快照 + 记录「进入前是自由窗口」；真全屏（无标题栏 / dock / 任务栏） |
+| 2 | 最大化窗口进全屏 | 窗口已最大化时双击进全屏 | 同样保存快照（不再 floating-only 漏抓），记录「进入前非自由窗口」 |
+| 3 | **全屏首次 ESC（核心）** | 全屏态按一次 `Esc` | `escActionByState(true, …)` → `EXIT_FULL`：只退出全屏、返回普通模式、恢复几何；**绝不退出 APP** |
+| 4 | 自由窗口几何精确恢复 | 场景 1 后按 ESC | 退出时 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize`+`moveWindowTo` 还原进入前尺寸与位置 |
+| 5 | 最大化态不误缩 | 场景 2 后按 ESC | 保持最大化形态（`EXIT_IMMERSIVE`），不拿 rect 把窗口缩成自由窗口 |
+| 6 | **返回普通模式后再次 ESC（核心）** | 场景 3 后紧接着（< 400ms 也测）再按一次 `Esc` | `pendingSystemEcho=false` → `QUIT_APP`：**立即退出 APP**，不再被时间冷却误吞 |
+| 7 | 连贯双击式快按 | 进全屏后 ESC 紧接着 ESC（间隔 < 100ms） | 第一次退全屏、第二次退 APP，无「要按第三次」现象 |
+| 8 | 系统消费 ESC（小幅缩小） | 真全屏下 ESC 被窗口管理器先消费，系统仅恢复 title/dock，画布缩小 ~20px | `shouldSelfHealOnResize`（≥8px 绝对像素）触发自愈 → `setFull(false, true)` 同步状态 + 恢复几何（比例阈值 0.92 抓不到这种小幅缩小） |
+| 9 | 系统补发 ESC | 场景 8 后系统又补发一次 ESC 到 APP | `pendingSystemEcho=true` → `NONE` 吞掉这一次，标志随即清零；**首次 ESC 不会直接退出 APP** |
+| 10 | 补发后用户主动 ESC | 场景 9 后用户再按 ESC | `pendingSystemEcho` 已清 → 立即退出 APP |
+| 11 | 双击 / F11 / 退出按钮退出全屏 | 用双击、F11、顶栏退出按钮代替 ESC 退全屏 | 都是 `bySystemHeal=false` 主动路径，`pendingSystemEcho` 恒 false，随后第一次 ESC 立即退出 APP |
+| 12 | F11 往返 / 多次往返 | 反复进 / 出全屏 | 每轮上升沿清空并重抓快照、用完即清，几何恢复幂等、不串图；放大镜 / 画质不受影响 |
+| 13 | 窗口状态读取异常 | `getWindowStatus()` 抛异常 / 返回非 FLOATING | 宽判据仍按 `getWindowProperties().windowRect` 抓几何，`windowRectUsable` 兜底；不误缩窗口 |
+| 14 | 非法 rect | 窗口 rect 为 0 / NaN / 超界 | `shouldCaptureRectAll` + `windowRectUsable` 拒绝，退出时 `hasPreFullRect=false` 降级到既有 `recover()`/`EXIT_IMMERSIVE`，绝不拿空 rect 去 resize |
+| 15 | 进全屏过渡期抖动 | 刚进全屏 900ms 内画布来回变 | `healReady` 稳定期挡住，不误判为「系统退出沉浸」、不被踢出全屏 |
+| 16 | 回归：画质 / 放大镜 / 交互 | 放大镜开关、右键 toggle、顶栏滞回、主视图画质、点选零滚动、hover、缓存、版本 | 三处画质属性、5 处 `antialiased`、右键 toggle、`topBarPeek`、放大镜几何、版本 `1.0.7` 全部不变 |
+
+### 校验
+
+`node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 1152 passed, 0 failed**；
+`git diff --check` / 括号净平衡 / `node --check` 全绿；版本仍 `1.0.7`。
+按既定约束**未编译 HAP / 未放桌面 / 未跑 build.sh / 未升版本 / 未 push**；
+DevEco Studio（API 26）编译与实机逐场景验证（尤其场景 1~11 的窗口几何与 ESC 时序）仍由用户侧完成。
+
+---
+
 ## 第十七轮：放大镜边缘抗锯齿 —— SDK 插值档语义修正 / 真实密度 / 原图上限夹界 / 增益跳过 / PixelMap 边缘 AA（2026-11-15）
 
 第十六轮把画质全押在「按倍率重解码高清图源」上，并主动放弃了插值档。实机反馈**放大后仍有锯齿**。
@@ -626,7 +694,16 @@ HAP 安装与实机验证仍由用户侧完成。
 > 「ArkUI `.interpolation()` 对 `PixelMap` 图源不生效」的判断**有误**（那是 `sourceSize()` 的限制），
 > 且三档插值（`None / High / Medium`）档位选反 —— 放大镜恒 3× 却恒落 `Medium`(MipMap，缩小专用)。
 > 这两点已在**第十七轮**修正为「放大一律 `High`(Cubic) + 五源全开 `.antialiased(true)` + 真实设备密度」。
-> 本节其余内容（窗口几何 / ESC 分状态 / 整像素对齐 / token 性能护栏）仍然有效。详见上方第十七轮章节。
+> 本节其余内容（整像素对齐 / token 性能护栏）仍然有效。详见上方第十七轮章节。
+>
+> ⚠️ **订正（第十八轮）**：本节「做法（窗口 / ESC）」里用 **400ms 时间冷却**判「系统补发 ESC」、
+> **0.92 比例阈值**自愈、**floating-only** 抓几何快照这三处设计，实机导致整套
+> 「窗口模式 / ESC 分状态 / 全屏往返几何恢复」**未真正实现**：冷却把用户主动的第二次 ESC 误吞
+> （「再次 ESC 退出 APP」失效）、比例阈值抓不到系统栏回来那种小幅缩小（状态不同步）、
+> floating-only 让最大化态 / 状态读取异常时根本不抓快照（几何不恢复）。
+> 已在**第十八轮**全部重做：`escActionByState` 严格两态无冷却 + 按来源置位的一次性补发标志 +
+> ≥8px 绝对像素自愈 + 全窗口态几何快照（记录进入前形态，最大化态不误缩）。**本节窗口/ESC 做法已被取代**，
+> 以最上方第十八轮章节为准；放大镜重采样部分见第十七轮订正。
 
 两件事：① 双击进全屏保留普通模式的窗口尺寸与位置，ESC 首次退全屏并精确还原、
 再次 ESC 才退出 APP；② 修复放大镜放大后的锯齿 / 像素化 / 边缘粗糙，>1:1 才补足像素、

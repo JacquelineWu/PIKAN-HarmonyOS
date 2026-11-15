@@ -12,6 +12,9 @@
  *  ⑧ 第十七轮放大镜边缘抗锯齿：修正 SDK 插值档语义错配（放大一律 Cubic，
  *    绝不用 MipMap / 最近邻）、接入真实设备像素密度比、重解码按原图上限夹界 +
  *    无增益跳过、PixelMap 边缘 AA。
+ *  ⑨ 第十八轮窗口模式重做：ESC 严格按 fullscreen 两态分派（去掉 400ms 时间冷却
+ *    对主动二次 ESC 的误吞）、系统被动退出沉浸改用「一次性补发标志」+ 绝对像素
+ *    缩小自愈、几何快照放宽到所有普通窗口态并记录进入前形态。
  *
  * 只做数值判定，不碰任何 SDK / IO / 状态，便于静态契约测试直接 import。
  */
@@ -494,4 +497,93 @@ export function loupeResampleGainOf(targetEdge: number, srcLong: number,
   const cur: number = currentEdge > 0 && currentEdge === currentEdge ? currentEdge : 0;
   const g: number = minGain > 0 && minGain === minGain ? minGain : 1;
   return avail > cur + g;
+}
+
+// ==================================================================
+// ⑨ 第十八轮：窗口模式 ESC 严格两态分派 / 系统被动退出补发吞键 /
+//    全窗口态几何快照 / 绝对像素缩小自愈
+// ==================================================================
+
+/**
+ * ESC 动作的**唯一真值来源（第十八轮）**：严格按当前窗口状态区分，不做时间冷却猜测。
+ *
+ * 用户在实机反馈第十六轮「没有实现」，根因之一就是 `escActionOf` 用 400ms 时间窗
+ * 判「系统补发 ESC」：用户「退出全屏后紧接着按的第二次 ESC」几乎必然落在窗内，
+ * 被当成补发键吞掉 → 「返回普通模式后再次按 ESC 应退出 APP」永远不成立。
+ * 时间窗根本无法区分「系统补发」与「用户主动按键」，必须换成按来源置位的一次性标志。
+ *
+ *  · 全屏 → EXIT_FULL：首次 ESC 恒退全屏并恢复进入前几何，绝不退出 APP（诉求核心）；
+ *  · 普通 + pendingSystemEcho → NONE：仅「系统被动退出沉浸」后吞一次可能的补发 ESC，
+ *    该标志由 shouldArmSystemEcho 只在系统路径置位、被任意一次 ESC 消费后即清零，
+ *    绝不因 APP 主动退出全屏而置位，故不影响用户紧接着的第二次 ESC；
+ *  · 其余普通 → QUIT_APP：返回普通模式后再次 ESC 退出 APP。
+ *
+ * 第十六轮旧 `escActionOf(fullscreen, sinceExitMs, guardMs)` 保留供回归断言，
+ * 但 Index.ets 自第十八轮起改用本函数为唯一真值来源。
+ */
+export function escActionByState(fullscreen: boolean, pendingSystemEcho: boolean): number {
+  if (fullscreen) {
+    return ESC_ACT_EXIT_FULL;
+  }
+  if (pendingSystemEcho) {
+    return ESC_ACT_NONE;
+  }
+  return ESC_ACT_QUIT_APP;
+}
+
+/**
+ * 是否置「待吞补发 ESC」标志：仅「系统被动退出全屏」的下降沿才置位。
+ *  · bySystemHeal=true 且 全屏→普通：系统把 ESC 消费掉自行退出沉浸，APP 靠
+ *    windowStatus / 画布缩小被动同步，此时可能紧随一次补发 ESC 落到「普通态」；
+ *    置位后由 escActionByState 吞一次，避免它被当成「再次 ESC」误退出 APP。
+ *  · APP 主动退出（onKey 收到 ESC / F11 / 双击 / 退出按钮）恒不置位 ——
+ *    用户返回普通模式后紧接着按的第二次 ESC 必须立即退出 APP。
+ */
+export function shouldArmSystemEcho(bySystemHeal: boolean,
+  prevFull: boolean, nextFull: boolean): boolean {
+  return bySystemHeal && prevFull && !nextFull;
+}
+
+/**
+ * 几何快照判据（第十八轮放宽）：非全屏→全屏上升沿，只要能拿到合法 rect 就抓。
+ * 第十六轮 `shouldCaptureWindowRect` 额外要求 `getWindowStatus()===FLOATING`，
+ * 但 PC / 2in1 上自由窗口的状态值不总是 FLOATING（也可能 MAXIMIZE / UNDEFINED），
+ * 于是快照常常不抓 → 退出时 hasPreFullRect=false → 「恢复进入前尺寸位置」不执行。
+ * 这里放宽后仍由调用方记录「进入前是否自由窗口」，恢复时据此决定是否 resize /
+ * moveWindowTo（最大化态交给 maximize(EXIT_IMMERSIVE) 保持，绝不误缩）。
+ */
+export function shouldCaptureRectAll(prevFull: boolean, nextFull: boolean,
+  rectUsable: boolean): boolean {
+  return !prevFull && nextFull && rectUsable;
+}
+
+/**
+ * 恢复几何时是否真的 resize + moveWindowTo：仅「进入前是自由窗口」才精确还原，
+ * 最大化 / 系统全屏态交给 applyWindowFullScreen 的 maximize(EXIT_IMMERSIVE) / recover
+ * 维持形态，绝不拿快照把一个最大化窗口 resize 成自由窗口（否则形态被破坏）。
+ */
+export function shouldApplyRectRestore(wasFloating: boolean, rectUsable: boolean): boolean {
+  return wasFloating && rectUsable;
+}
+
+/**
+ * 系统自行退出沉浸的「自愈」判据（第十八轮放宽）：全屏态 + 已过进全屏稳定期 +
+ * 画布出现「≥ minShrinkPx 的可见缩小」即判定系统替用户退出了全屏，APP 需把
+ * fullscreen 同步回普通模式并恢复几何。
+ *
+ * 第十六轮 `shouldExitFullOnResize` 要求缩到 `fullW*0.92` 以下（比例阈值）；但真全屏
+ * ESC 被窗口管理器消费后，系统往往只是把 title / dock / 系统栏恢复，画布仅缩小
+ * 几十 px（常见 ~0.95），远达不到 0.92 → 自愈从不触发 → `fullscreen` 与真实窗口
+ * 长期脱节 → 「ESC 按当前窗口状态区分」整体失效。改用**绝对像素**判据即可捕获
+ * 这种小幅缩小，同时用 minShrinkPx（默认 8）挡住 1~3px 的正常布局抖动。
+ * stable 由调用方按「进全屏已过 guard」传入，避免刚进全屏的画布变化被误判。
+ */
+export function shouldSelfHealOnResize(fullscreen: boolean, stable: boolean,
+  fullW: number, fullH: number, newW: number, newH: number,
+  minShrinkPx: number): boolean {
+  if (!fullscreen || !stable || fullW <= 0 || fullH <= 0 || newW <= 0 || newH <= 0) {
+    return false;
+  }
+  const m: number = minShrinkPx > 0 && minShrinkPx === minShrinkPx ? minShrinkPx : 8;
+  return (fullW - newW) >= m || (fullH - newH) >= m;
 }

@@ -95,7 +95,9 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   loupeResetOnModeChange, loupeHoverAfterModeChange,
   LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,
   loupeVisibleOf, ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,
-  escActionOf, shouldCaptureWindowRect, shouldRestoreWindowRect, msSinceFullExitOf,
+  shouldCaptureWindowRect, shouldRestoreWindowRect,
+  escActionByState, shouldArmSystemEcho, shouldCaptureRectAll,
+  shouldApplyRectRestore, shouldSelfHealOnResize,
   loupeEffectiveScaleOf, loupeNeedsResampleOf,
   loupePixelAlignOf, loupeResampleStableOf,
   LOUPE_AA_ENABLED, LOUPE_QA_HIGH, loupeDensityRatioOf, loupeQualityTierOf,
@@ -204,11 +206,11 @@ const LOUPE_RESAMPLE_STABLE_MIN_DELTA: number = 64;
 /** 第十七轮：重解码「真实像素增益」阈值 —— 目标边相对主视图解码边的提升不足该值时
  *  跳过重解码（小图 / 原图分辨率不足时补不出像素），省一次解码与一张大图内存。 */
 const LOUPE_RESAMPLE_MIN_GAIN: number = 96;
-/** 第十六轮：退出全屏后的 ESC 冷却期（ms）。真全屏下 ESC 常被窗口管理器先消费，
- *  系统自行退出沉浸 → 画布缩小触发自愈 setFull(false) → 随后补发 / 迟到的那一次 ESC
- *  会落到「非全屏」而被误当成「再次 ESC 退出 APP」。冷却期内只吞一次，避免首次 ESC
- *  直接退出 APP；吞完立即清零，用户紧接着再按一次 ESC 就正常退出 APP。 */
-const FULL_EXIT_ESC_GUARD_MS: number = 400;
+// 第十六轮的 FULL_EXIT_ESC_GUARD_MS（400ms 时间冷却，第十八轮移除）：
+// 时间窗无法区分「系统补发 ESC」与「用户主动的第二次 ESC」，连贯两次按键几乎必然
+// 落在 400ms 内 → 「返回普通模式后再次按 ESC 退出 APP」被误吞而失效，正是用户反馈
+// 「没有实现」的主因。第十八轮改用按来源置位的一次性标志 pendingSystemEcho +
+// escActionByState 严格两态分派，不再有任何时间冷却。
 /** 左栏宽度：展开 / 收起。
  *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 往上层 / 选择文件夹）等宽并排且不重叠；
  *  LIST_MAX_W 是上限，避免个别超长档案名把右侧预览区压没。
@@ -383,8 +385,15 @@ const RESIZE_MIN_DELTA_PX: number = 8;
 /** 全屏态下画布缩到「全屏基准」的这个比例以下，判定系统已自行退出沉浸。
  *  真全屏下 ESC 常被窗口管理器消费，APP 收不到按键；此时窗口会缩小，
  *  据此自愈退出 APP 全屏态、恢复完整界面（与双击退出对齐）。
- *  0.92 允许「只回来标题栏 / dock」这种小幅缩小；误判由 FULL_SELF_HEAL_GUARD_MS 稳定期挡住。 */
+ *  第十六轮仅靠 0.92 比例阈值（要求缩小 8%），但「只回来标题栏 / dock」往往只
+ *  缩小几十 px（~0.95），根本触发不了 —— 第十八轮补绝对像素判据见下方。
+ *  误判由 FULL_SELF_HEAL_GUARD_MS 稳定期挡住。 */
 const FULL_EXIT_SHRINK_RATIO: number = 0.92;
+/** 第十八轮：系统退出沉浸自愈的「最小可见缩小」绝对像素阈值。
+ *  真全屏 ESC 被系统消费后，常见表现只是 title / dock / 系统栏恢复，画布缩小几十 px；
+ *  比例阈值(0.92)触发不了 → fullscreen 与真实窗口长期脱节、ESC 分状态整体失效。
+ *  改用绝对像素即可捕获，同时用 8px 挡住 1~3px 的正常布局抖动。 */
+const FULL_SELF_HEAL_MIN_SHRINK_PX: number = 8;
 /** 进全屏后的自愈稳定期（ms）：真全屏的 maximize / layout 是一连串异步 await，
  *  过渡期画布尺寸会来回变，这段时间不做「缩小→退全屏」判定，避免刚进全屏就被误踢出来。
  *  用户按 ESC 通常发生在进全屏很久之后，不受影响。 */
@@ -1760,11 +1769,18 @@ struct Index {
    *  退出全屏、窗口形态恢复之后，用它精确 resize + moveWindowTo 还原尺寸位置。 */
   private preFullRect: string = '';
   private hasPreFullRect: boolean = false;
+  /** 第十八轮：进入全屏前窗口是否为「自由窗口」(FLOATING)。
+   *  只有自由窗口退出时才 resize + moveWindowTo 精确还原几何；最大化 / 系统全屏态
+   *  交给 maximize(EXIT_IMMERSIVE) / recover 维持形态，绝不拿 rect 把窗口缩成自由窗口。 */
+  private preFullFloating: boolean = false;
   /** 第十六轮：退出全屏时是否待执行精确 rect 恢复（幂等，用完即清）。 */
   private restoreRectPending: boolean = false;
-  /** 第十六轮：最近一次「全屏→普通」退出的时刻（供 ESC 冷却判定），0 = 从未退出。
-   *  由 setFull() 下降沿统一设置；onAreaChange 自愈分支也会再置一次表明该路径。
-   *  冷却期只吞一次补发 / 迟到的 ESC，吞掉后即清零，故用户再次按 ESC 立即退出 APP。 */
+  /** 第十八轮：是否「待吞一次系统补发 ESC」。仅当系统把 ESC 消费掉、自行退出沉浸
+   *  （APP 靠自愈被动同步）时置位，由任意一次 ESC 消费后即清零。第十六轮用 400ms
+   *  时间窗判「补发」会误吞用户主动的第二次 ESC，故改为按来源置位的一次性布尔。 */
+  private pendingSystemEcho: boolean = false;
+  /** 最近一次「全屏→普通」退出的时刻（仅日志 / 诊断；第十八轮起不再参与 ESC
+   *  分派，避免时间冷却误吞用户主动按键），0 = 从未退出。 */
   private lastFullExitAt: number = 0;
 
   // ---- 第十六轮：放大镜 >1:1 重采样专用高分辨率图源 ----
@@ -6260,9 +6276,12 @@ struct Index {
     }
   }
 
-  /** 第十六轮：进入全屏前抓「普通模式窗口尺寸与位置」快照。
-   *  仅 普通→全屏 上升沿 + 自由窗口(FLOATING) 才抓；窗口未就绪 / 最大化态一律不抓，
-   *  退出时就没有快照，自动降级到既有 recover()/EXIT_IMMERSIVE 行为，绝不误缩窗口。
+  /** 第十八轮：进入全屏前抓「普通模式窗口尺寸与位置」快照。
+   *  放宽到**所有普通窗口态**：第十六轮要求 getWindowStatus()===FLOATING 才抓，
+   *  但 PC / 2in1 上自由窗口状态值不总是 FLOATING（也可能 MAXIMIZE / UNDEFINED），
+   *  快照常常不抓 → 退出时 hasPreFullRect=false → 「恢复进入前尺寸位置」不执行。
+   *  现在只要上升沿 + rect 合法就抓，并记下「进入前是否自由窗口」：自由窗口退出时
+   *  精确 resize + moveWindowTo；最大化态交给 EXIT_IMMERSIVE 维持形态，绝不误缩。
    *  必须在任何 maximize / 沉浸窗口 API 之前调用 —— setFull 是本轮最早收口。 */
   private capturePreFullRect(prevFull: boolean, nextFull: boolean): void {
     if (!prevFull && nextFull) {
@@ -6270,6 +6289,7 @@ struct Index {
       this.preFullRect = '';
       this.hasPreFullRect = false;
       this.restoreRectPending = false;
+      this.preFullFloating = false;
     }
     const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
     let floating: boolean = false;
@@ -6280,7 +6300,11 @@ struct Index {
         floating = false;
       }
     }
-    if (win === undefined || !shouldCaptureWindowRect(prevFull, nextFull, floating)) {
+    // 第十八轮：FLOATING 快路径(shouldCaptureWindowRect) 与「所有普通窗口态」宽路径取或，
+    // 确保 getWindowStatus 不准 / 最大化态也能抓到几何。
+    const rise: boolean = shouldCaptureWindowRect(prevFull, nextFull, floating) ||
+      shouldCaptureRectAll(prevFull, nextFull, true);
+    if (win === undefined || !rise) {
       return;
     }
     try {
@@ -6288,24 +6312,33 @@ struct Index {
       const packed: string = packWindowRect({
         left: r.left, top: r.top, width: r.width, height: r.height
       });
-      if (windowRectUsable(parseWindowRect(packed), WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
+      if (shouldCaptureRectAll(prevFull, nextFull,
+        windowRectUsable(parseWindowRect(packed), WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H))) {
         this.preFullRect = packed;
         this.hasPreFullRect = true;
+        this.preFullFloating = floating;
       }
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'fullRect: capture failed');
     }
   }
 
-  /** 第十六轮：退出全屏、窗口形态恢复之后，按快照精确还原普通模式的尺寸与位置。
-   *  每步独立 try/catch，某机型不支持只记日志；用完立即清空快照，保证幂等。 */
+  /** 第十八轮：退出全屏、窗口形态恢复之后，按快照精确还原普通模式的尺寸与位置。
+   *  仅「进入前是自由窗口」才 resize + moveWindowTo；最大化 / 系统全屏态交给
+   *  applyWindowFullScreen 的 maximize(EXIT_IMMERSIVE) / recover 维持形态，绝不拿
+   *  rect 把最大化窗口缩成自由窗口。每步独立 try/catch，用完即清快照，保证幂等。 */
   private async restorePreFullRect(win: window.Window): Promise<void> {
     this.restoreRectPending = false;
     const rect: WindowRect | undefined = parseWindowRect(this.preFullRect);
+    const wasFloating: boolean = this.preFullFloating;
     this.hasPreFullRect = false;
     this.preFullRect = '';
     if (rect === undefined ||
       !windowRectUsable(rect, WIN_MIN_W, WIN_MIN_H, WIN_MAX_W, WIN_MAX_H)) {
+      return;
+    }
+    // rect 可用性已由上面 windowRectUsable 校验；这里只判「进入前形态」。
+    if (!shouldApplyRectRestore(wasFloating, true)) {
       return;
     }
     try {
@@ -6320,7 +6353,7 @@ struct Index {
     }
   }
 
-  private setFull(on: boolean): void {
+  private setFull(on: boolean, bySystemHeal: boolean = false): void {
     if (on === this.fullscreen) {
       return;
     }
@@ -6345,10 +6378,14 @@ struct Index {
       // 第十六轮：画布尺寸变了，原目标解码边失效 → 释放高清图源，下次移入按新画布重解。
       this.clearLoupeHiRes();
     }
-    // 第十六轮：记录「全屏→普通」的下降沿时刻，供 ESC 冷却期吞掉系统补发 / 迟到的按键。
-    // 覆盖全部退出路径（ESC / 双击 / F11 / 系统自愈），不只自愈一条。
+    // 第十八轮：下降沿记时刻（日志 / 诊断），并**按退出来源**决定「待吞补发 ESC」标志。
+    //  · 主动退出（ESC / 双击 / F11 / 退出按钮，bySystemHeal=false）→ 清标志，
+    //    用户紧接着的第二次 ESC 由 escActionByState 直接判 QUIT_APP，绝不被误吞；
+    //  · 系统被动退出沉浸（自愈分支 bySystemHeal=true）→ 置位，吞掉一次可能的补发 ESC。
+    //  彻底取代第十六轮「400ms 时间冷却」—— 它无法区分补发键与主动按键。
     if (prevFull && !on) {
       this.lastFullExitAt = Date.now();
+      this.pendingSystemEcho = shouldArmSystemEcho(bySystemHeal, prevFull, on);
     }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
@@ -6676,21 +6713,19 @@ struct Index {
         this.toggleFull();
         break;
       case KeyCode.KEYCODE_ESCAPE: {
-        // 第十六轮：**ESC 响应按当前窗口状态区分**，唯一真值来源是纯函数 escActionOf。
-        //  · 全屏 → EXIT_FULL：只退出全屏并恢复进入前的窗口尺寸 / 位置，绝不退出 APP；
-        //  · 非全屏 + 刚退出全屏的冷却期内 → NONE：真全屏下 ESC 常被窗口管理器先消费，
-        //    系统自行退出沉浸后画布缩小触发自愈 setFull(false)，随后补发 / 迟到的那一次
-        //    ESC 会落到「非全屏」；不拦截就会被当成「再次 ESC」直接退出 APP；
-        //  · 其余非全屏 → QUIT_APP：返回普通模式后再次按 ESC 才退出 APP。
-        //  冷却只吞一次（吞后立即清零），不会把用户紧接着的第二次 ESC 也吞掉。
-        const escAct: number = escActionOf(this.fullscreen,
-          msSinceFullExitOf(Date.now(), this.lastFullExitAt), FULL_EXIT_ESC_GUARD_MS);
+        // 第十八轮：**ESC 严格按当前窗口状态区分**，唯一真值来源 escActionByState。
+        //  · 全屏 → EXIT_FULL：首次 ESC 只退出全屏并恢复进入前几何，绝不退出 APP；
+        //  · 普通 + pendingSystemEcho → NONE：仅「系统被动退出沉浸」后吞一次补发 ESC；
+        //  · 其余普通 → QUIT_APP：返回普通模式后再次按 ESC 才退出 APP。
+        //  彻底去掉第十六轮 400ms 时间冷却 —— 它无法区分「系统补发」与「用户主动
+        //  第二次 ESC」，连贯两次按键几乎必然 < 400ms 导致「再次 ESC 退 APP」失效。
+        const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);
         if (escAct === ESC_ACT_EXIT_FULL) {
           this.toggleFull();
         } else if (escAct === ESC_ACT_QUIT_APP) {
           this.quitApp();
-        } else if (escAct === ESC_ACT_NONE) {
-          this.lastFullExitAt = 0; // 吞掉这一次补发 / 迟到 ESC，冷却随即结束
+        } else {
+          this.pendingSystemEcho = false; // 吞掉这一次补发 ESC，一次性标志随即结束
         }
         break;
       }
@@ -7349,18 +7384,23 @@ struct Index {
           if (w > 0 && h > 0 && w === w && h === h) {
             const changed: boolean = (w !== this.canvasW) || (h !== this.canvasH);
             // ① 系统自行退出沉浸（真全屏下 ESC 常被窗口管理器先消费，APP 收不到按键）：
-            //    全屏态画布相对基准明显缩小 → 自动切回完整界面，与双击退出完全对齐。
+            //    全屏态画布相对基准缩小 → 自动切回完整界面，与双击退出完全对齐。
             const healReady: boolean = this.fullEnterAt > 0 &&
               (Date.now() - this.fullEnterAt) > FULL_SELF_HEAL_GUARD_MS;
-            if (changed && healReady &&
-              shouldExitFullOnResize(this.fullscreen, this.fullCanvasW, this.fullCanvasH, w, h,
-                FULL_EXIT_SHRINK_RATIO)) {
+            // 第十八轮：两路判据取或。第十六轮比例阈值(0.92)保留作「明显缩小」快路径；
+            // 再加「≥ minShrinkPx 的绝对像素缩小」捕获系统栏 / dock / 标题栏回来那种
+            // 小幅缩小（真全屏 ESC 被系统消费后的典型表现，比例阈值根本触发不了）。
+            const shrinkBig: boolean = shouldExitFullOnResize(this.fullscreen, this.fullCanvasW, this.fullCanvasH, w, h,
+              FULL_EXIT_SHRINK_RATIO);
+            const shrinkSmall: boolean = shouldSelfHealOnResize(this.fullscreen, healReady,
+              this.fullCanvasW, this.fullCanvasH, w, h, FULL_SELF_HEAL_MIN_SHRINK_PX);
+            if (changed && healReady && (shrinkBig || shrinkSmall)) {
               this.canvasW = w;
               this.canvasH = h;
-              // 第十六轮：这是「系统自行退出沉浸」的自愈路径 —— 记时刻供 ESC 冷却判定，
-              // 吞掉随后补发 / 迟到的那一次 ESC，避免首次 ESC 直接退出 APP。
-              this.lastFullExitAt = Date.now();
-              this.setFull(false);
+              // 第十八轮：系统把 ESC 消费掉、自行退出沉浸 → APP 被动同步回普通模式。
+              // bySystemHeal=true 让 setFull 置位 pendingSystemEcho，吞掉随后可能紧随的
+              // 一次补发 ESC，避免它落到「普通态」被当成「再次 ESC」误退出 APP。
+              this.setFull(false, true);
               return;
             }
             this.canvasW = w;
