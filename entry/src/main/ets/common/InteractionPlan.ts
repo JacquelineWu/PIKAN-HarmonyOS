@@ -587,3 +587,36 @@ export function shouldSelfHealOnResize(fullscreen: boolean, stable: boolean,
   const m: number = minShrinkPx > 0 && minShrinkPx === minShrinkPx ? minShrinkPx : 8;
   return (fullW - newW) >= m || (fullH - newH) >= m;
 }
+
+// ==================== ⑩ 第二十一轮：窗口真实状态同步（ESC 链路的权威真值） ====================
+/**
+ * 系统窗口状态是否算「全屏」：`window.WindowStatusType` 中只有
+ * FULL_SCREEN(1) / MAXIMIZE(2) 两种是 APP 进真全屏时的形态（本项目走
+ * maximize(ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)）；系统消费首次 ESC
+ * 退出沉浸后通常是 FLOATING(4) / UNDEFINED(0) / MINIMIZE(3)。
+ *
+ * 只认 1/2，其余一律判「非全屏」：宁可早一点判普通，也不能让 fullscreen
+ * 卡在 true —— 那会让用户主动的第二次 ESC 又被 escActionByState 判成 EXIT_FULL。
+ */
+export function windowStatusIsFullscreen(status: number): boolean {
+  return status === 1 || status === 2;
+}
+
+/**
+ * 是否需要把 APP 内部 `fullscreen` 同步为 false（第二十一轮唯一真值来源）。
+ *
+ * 用户实机截图（2026-11-15）证据：系统已退出沉浸最大化、窗口变回带标题栏的
+ * 自由窗口，但 APP 界面仍是无左栏 / 无顶栏 / 无状态栏的全屏布局 —— 说明
+ * `this.fullscreen` 卡在 true。原因是首次 ESC 由系统窗口管理器消费，APP 只能靠
+ * onAreaChange 画布缩小「猜」系统退出；若画布没缩到阈值 / 事件没派发，
+ * setFull(false) 就永不执行，连带第二十轮挂在 setFull 里的重聚焦也不执行，
+ * 于是第二次 ESC 既到不了 onKey、到了也会被判 EXIT_FULL。
+ *
+ * 现在改由 `win.on('windowStatusChange')` 直接读系统状态（该回调整窗口管理器
+ * 派发，不经过 ESC 按键通道、不依赖焦点），并在每次 ESC 到达时再主动读一次
+ * getWindowStatus() 兜底。仅「APP 自认全屏 + 系统实际已非全屏」才同步，
+ * APP 自己进 / 退全屏的过程不触发，避免递归 setFull。
+ */
+export function shouldSyncFullFromWindow(appFull: boolean, winStatusFull: boolean): boolean {
+  return appFull && !winStatusFull;
+}

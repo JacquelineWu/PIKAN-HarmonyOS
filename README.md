@@ -39,12 +39,12 @@
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
-| 关闭应用 | **`Esc`** 严格按当前窗口状态两态区分（`escActionByState`，第十九轮定稿、第二十轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的窗口尺寸位置（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十轮**：前三轮都只改「ESC 到达 APP 之后」的纯函数，实机仍不退出 —— 真正病根在运行时链路：`onKeyEvent` 用 `void` 重载不消费事件、真全屏下系统/IME 先拿走 ESC、进出全屏后根组件焦点丢失、`quitApp()` 的 `await flushPos()` 异步 I/O 可能挂住导致 `terminateSelf()` 永不执行。现改为 `onKeyPreIme` + boolean 版 `onKeyEvent` 双通道主动消费、全屏切换后 `focusControl.requestFocus` 重抢焦点、`quitApp` 改同步 `flushPosSync()` 后立即 `terminateSelf()` 并加 AppStorage 上下文兜底。状态栏内置 `ESCDBG` 诊断串可供真机回传断点，见第二十轮章节 |
+| 关闭应用 | **`Esc`** 严格按当前窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十/二十一轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的窗口尺寸位置（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十一轮（截图证据驱动）**：用户实机截图显示系统已退出沉浸、窗口变回带标题栏的自由窗口，但 APP 界面仍是无左栏 / 无顶栏 / 无状态栏的全屏布局 —— 说明 `this.fullscreen` 卡在 `true`。`setFull(false)` 从未被调用，连带第二十轮挂在 `setFull` 里的重聚焦也从未执行，第二次 ESC 既到不了 `onKey()`、到了也会判 `EXIT_FULL`。现新增 `win.on('windowStatusChange')` 直接读系统窗口真值（不经按键 / 不依赖焦点）、ESC 分派前再主动读一次 `getWindowStatus()` 兜底、1vp 透明 `Button` 作为天然可聚焦的键盘锚点并首帧就抢焦点、右下角角标常显 `R21` 构建标记 + 黄色诊断行、`quitApp` 加 `destroyWindow()` 兜底。见第二十一轮章节 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
-| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态，且**自愈后不再置任何补发标志**（第十九轮：随后用户主动的第二次 `Esc` 直接退出 APP）；**第二十轮**：进出全屏后延时重抢键盘焦点、ESC 走 `onKeyPreIme` 前置拦截并主动消费，另兼容只派发 `KeyType.Up` 的 2in1 键盘；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
+| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态，且**自愈后不再置任何补发标志**（第十九轮：随后用户主动的第二次 `Esc` 直接退出 APP）；**第二十轮**：进出全屏后延时重抢键盘焦点、ESC 走 `onKeyPreIme` 前置拦截并主动消费，另兼容只派发 `KeyType.Up` 的 2in1 键盘；**第二十一轮**：窗口状态变化由系统直发同步 APP 全屏态（不再靠画布缩小猜）、Button 焦点锚点、首帧即抢焦点、`sawWindowFull` 前置证据防止 2in1 上首次 ESC 误退出；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
 | 色彩 / HDR / EXIF | 解码时按 EXIF Orientation 自动摆正（含 4 种镜像）；识别内嵌 ICC 映射到的标准色彩空间（sRGB / Display P3 / BT.2020…）并显示；HDR 图按 HDR 解码 + 显示端 HIGH 动态范围，平台不支持时自动降 SDR。**平台边界**：HarmonyOS 26 没有「从 ICC profile 字节流构造色彩空间」API，详见专章 |
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
@@ -532,7 +532,110 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第二十一轮：截图证据驱动的窗口真值同步 —— 第二次 ESC 仍不退出（2026-11-15）
+
+用户第五次反馈「还没有退出」并**发来实机截图**。本轮第一次拿到了可判读的真机证据，
+不再靠猜测改状态机。
+
+> ⚠️ 本会话仍然**无法自行在真实 APP 中按 ESC**（环境限制实测见第二十轮章节：
+> `hdc` 无设备、`bm install` 拒绝、`hilog` 权限拒绝、无按键注入工具）。
+> 但这次通过**放大分析用户截图**定位到了前四轮一直没看见的断点。
+
+### 截图证据（放大 4~5 倍逐区判读）
+
+| 区域 | 实测 | 推断 |
+|---|---|---|
+| 窗口形态 | 带 `PIKAN` 标题栏与最小化 / 最大化 / 关闭按钮的**自由窗口**，未占满屏幕 | 系统窗口管理器已消费首次 ESC 并退出沉浸最大化 |
+| 底部状态栏 | **整块没有渲染**，只剩画布上的 `9.9%` 缩放角标；而状态栏是 `if (!this.fullscreen)` 常显、`this.status` 初值还非空 | **`this.fullscreen` 仍为 `true`** |
+| 左栏 / 顶栏 / 工具条 | 全都不画，左右双页铺满窗口 | 同上：APP 界面仍处全屏布局 |
+| 左上角信息浮层 | `_DSC4726.jpg · _DSC4729.jpg` / `JPG · 22.67 MB · 4672×7008` / `全屏 · Esc / F11 / 双击退出` | 文案仍是进全屏时 `setFull(true)` 写入的，从未被 `setFull(false)` 还原 |
+| `ESC#` 诊断串 | **完全看不到** | 第二十轮把诊断放在「全屏时整块隐藏」的状态栏里 —— 这是上一轮的设计缺陷，截图天然看不到它 |
+
+**结论**：系统已退出全屏，APP 内部状态却卡在全屏，两者脱节。
+
+### 为什么第二十轮仍然无效（完整因果链）
+
+1. 双击进全屏 → `setFull(true)` → `maximize(ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)`。
+2. 首次 ESC **被系统窗口管理器消费**、自行退出沉浸，窗口恢复自由窗口；**该按键不派发给 APP**。
+3. APP 原本只能靠 `onAreaChange` 的 `shouldSelfHealOnResize`（画布缩小 ≥8px 且过 900ms 稳定期）
+   「猜」系统退出了全屏。本机该回调没触发（或缩小量不够 / 基准未就绪）→ **自愈 `setFull(false, true)` 从未执行**。
+4. 于是 `this.fullscreen` 永远是 `true`；更要命的是第二十轮的 `scheduleKeyRefocus()`
+   **只挂在 `setFull()` 里** —— 它一次都没跑过，根组件焦点一直没抢回来。
+5. 第二次 ESC 到达时既可能根本进不了 `onKey()`（无焦点），即便进去了也会被
+   `escActionByState(true, …)` 判成 `EXIT_FULL` → 视觉上「无任何响应」。
+6. 诊断串又恰好放在全屏时隐藏的状态栏 → 用户截图里什么都看不到，无法定位。
+
+补充：真 ArkTS 编译输出大量 `This API is unavailable to 2in1` 警告（集中在
+`setWindowSystemBarEnable` / `setSpecificSystemBarEnabled` / `setWindowLayoutFullScreen`），
+用户机器是 2in1 鸿蒙 PC，部分窗口 API 不生效 —— 因此**不能无条件用 `getWindowStatus()`
+的静态值覆盖 APP 状态**，否则进全屏后第一次 ESC 就会直接退出 APP。本轮加了
+`sawWindowFull` 前置证据来防这个误判。
+
+### 改动范围（3 文件）
+
+| 文件 | 改动 |
+|---|---|
+| `InteractionPlan.ts` | 新增 ⑩ 节两个纯函数：`windowStatusIsFullscreen(status)`（仅 `FULL_SCREEN=1` / `MAXIMIZE=2` 算全屏）、`shouldSyncFullFromWindow(appFull, winStatusFull)`（仅「APP 自认全屏 + 系统已非全屏」才同步，APP 自己进/退全屏不触发，避免递归）。第十九轮 `escActionByState` 严格两态 / `shouldArmSystemEcho` 恒 false **一字未改** |
+| `Index.ets` | ① `aboutToAppear` 注册 `win.on('windowStatusChange')`（窗口管理器直发，**不经 ESC 按键 / 不依赖焦点**），系统退出沉浸即 `setFull(false, true)` 同步并顺带恢复三栏、几何快照、重聚焦；② ESC 分支分派前 `syncFullWithWindow()` 主动读 `getWindowStatus()` 兜底；③ 两处同步都要求 `sawWindowFull` 前置证据（进全屏成功时由 `getWindowStatus()` 或回调置位），防 2in1 静态 `FLOATING` 误判；④ 新增 1vp 透明 `Button` 焦点锚点（天然可聚焦，比 `.focusable(true)` 的 Column 可靠），复用 `onKeyPreIme` / boolean 版 `onKeyEvent` 双通道，`onKey` 入口用 **KeyEvent 对象引用**去重（零时间窗，不吞第二次主动 ESC）；⑤ `aboutToAppear` 首帧就抢焦点，不再等 `setFull` 被调用；⑥ 右下角角标**常显 `R21` + `full=T/F` + `win=T/F`**，按过 ESC 后在上方展开黄色诊断行（全屏/普通都可见）；⑦ `quitApp` 在 `terminateSelf()` 后 400ms 若页面仍活着则 `destroyWindow()` 兜底关窗，带 `pageAlive` 与定时器清理 |
+| `tests/dirname.test.mjs` | 同步 4 条旧护栏（角标 Text 计数 / `setFull(false,true)` 三处）+ 新增 15 条第二十一轮断言（窗口状态四象限、端到端场景、防误判、焦点锚点、去重、常显诊断、退出兜底、回归护栏）。**1182 → 1197** |
+
+### 验证结果（三类证据分开说）
+
+| 类型 | 结果 | 能证明什么 |
+|---|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL**（首次 1m1s / 复核 12s，已签名 HAP） | `win.on('windowStatusChange')`、空 `Button() { }` builder、`destroyWindow().catch()`、`Number(st)` 均为合法 SDK 26 用法 |
+| 静态契约测试 | **ALL PASS 1197 passed, 0 failed**；`node --check` / `git diff --check` 全绿 | 接线存在、1171+ 条既有回归护栏未坏；**不证明按键到达** |
+| **真机按两次 ESC** | **本会话无法执行**，待用户验证 | 唯一能证明故障消除的验证 |
+
+按既定约束：未跑 `build.sh`、未把 HAP 放桌面、未升版本（`1.0.7` / `versionCode: 7`）、未 push；
+编译产物留在项目 `entry/build/default/outputs/default/`。
+
+### 真机验证步骤（请先确认装的是新包）
+
+1. 安装本次签名包 `entry/build/default/outputs/default/entry-default-signed.hap`
+   （或在 DevEco Studio 重新编译运行）。
+2. **⭐ 先看右下角缩放角标**：必须显示 `9.9% · R21 · full=… · win=…`。
+   - **看不到 `R21` → 装的是旧包**，前面五轮改动根本没进真机；请重新卸载安装后再测。
+   - 有 `R21` 才能继续判断下面的状态。
+3. 启动 APP，**双击进全屏**，记下角标里的 `full=` / `win=` 值。
+4. **第一次按 ESC** → 应返回普通模式（左栏 / 顶栏 / 状态栏回来，角标 `full=F`），
+   并恢复进入前的窗口尺寸位置。
+5. **第二次按 ESC** → 应立即退出 APP。
+6. 若仍没退出：**把右下角角标那一整片（含黄色诊断行）截图发我**。
+
+### 诊断对照表（按完两次 ESC 看右下角角标）
+
+| 角标显示 | 断点定位 | 下一步 |
+|---|---|---|
+| 没有 `R21` | 旧包 / 没重新编译安装 | 重新装签名 HAP 再测 |
+| `R21 · full=T · win=T`，完全没出现黄色诊断行 | ESC 事件**根本没到 `onKey()`**（系统消费或焦点仍丢） | 回传截图；需上系统级按键订阅或放弃沉浸最大化形态 |
+| 首次 ESC 后 `win=F` 但 `full` 仍 `T` | `windowStatusChange` 没派发且 `sawWindowFull` 未置位 | 回传截图；调整同步触发源 |
+| 两次都 `full=T` 且黄色行都是 `(EXIT_FULL)` | 首次 ESC 后 APP 状态没同步回 false | 回传截图；查 `sawWindowFull` / `getWindowStatus()` 返回值 |
+| `ESC#2 full=F … (QUIT_APP) → quitApp → terminateSelf()`，APP 仍在 | `terminateSelf()` 不关窗口；400ms 后应出现 `→ destroyWindow` | 回传截图；若 `destroyWindow` 也无效则改进程退出 |
+| `NO_CONTEXT` / `REJECTED` / `EXCEPTION` | 上下文 / 退出 Promise / 异常 | 回传截图按标记修 |
+| 第二次 ESC 后 APP 正常关闭 | ✅ 修复完成 | 无需回传 |
+
+### 覆盖的验证场景
+
+| # | 场景 | 预期 |
+|---|---|---|
+| 1 | 用户复现路径：双击进全屏 → 两次 ESC | 首次返回并恢复几何，第二次立即退出 APP |
+| 2 | 首次 ESC 被系统消费、画布不缩小 | `windowStatusChange` 直发同步 `full=false`，三栏恢复、重聚焦执行 |
+| 3 | 首次 ESC 由 APP 收到 | `EXIT_FULL`，绝不退出 APP |
+| 4 | 2in1 上 `getWindowStatus()` 恒 `FLOATING` | `sawWindowFull` 未置位 → 不误同步 → 首次 ESC 不会直接退出 APP |
+| 5 | 连贯快按两次 ESC（<100ms） | 对象引用去重只针对同一事件，无冷却、无吞键 |
+| 6 | `onKeyPreIme` 与 `onKeyEvent`、Button 与根 Column 多路收到同一 ESC | 只处理一次，首次 ESC 不误退 APP |
+| 7 | 只派发 `KeyType.Up` 的键盘 | 当作一次有效 ESC，不双触发 |
+| 8 | `terminateSelf()` 在 PC 上不关窗口 | 400ms 后 `destroyWindow()` 兜底 |
+| 9 | 回归：放大镜 / 右键 toggle / 画质三处 / AA 五源 / 顶栏 / 缓存 / 版本 | 全部不变（`1.0.7`） |
+
 ## 第二十轮：真机链路修复 —— ESC 到达 / 退出不阻塞 / 可观测诊断（2026-11-15）
+
+> ⚠️ **订正（第二十一轮）**：本节把诊断串放在状态栏，而状态栏在 `fullscreen=true` 时
+> 整块隐藏 —— 用户截图里因此看不到任何 `ESC#`，这是上一轮的设计缺陷；且
+> `scheduleKeyRefocus()` 只挂在 `setFull()` 里，而自愈 `setFull(false,true)` 实机从未触发，
+> 导致重聚焦一次都没执行。本节结论（双通道消费 / 同步落盘 / AppStorage 兜底）**保留**，
+> 但「已修复」的判断以最上方第二十一轮章节与真机验证为准。
 
 用户第四次反馈：**「全屏模式后按两次 ESC 不能退出 APP，请在真实 APP 中测试验证」**。
 本轮不再改状态机纯函数 —— 那部分第十九轮已经对了；改的是**运行时事件链路**，并第一次把

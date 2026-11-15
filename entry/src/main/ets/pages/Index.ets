@@ -101,7 +101,8 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   loupeEffectiveScaleOf, loupeNeedsResampleOf,
   loupePixelAlignOf, loupeResampleStableOf,
   LOUPE_AA_ENABLED, LOUPE_QA_HIGH, loupeDensityRatioOf, loupeQualityTierOf,
-  loupeResampleEdge2Of, loupeResampleGainOf } from '../common/InteractionPlan';
+  loupeResampleEdge2Of, loupeResampleGainOf,
+  windowStatusIsFullscreen, shouldSyncFullFromWindow } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -114,6 +115,16 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
 /** 第二十轮：全屏切换后重聚焦的延时（ms）。等 ArkUI 完成整块布局重建再请求焦点，
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
+/** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
+const ESC_BUILD_TAG: string = 'R21';
+/** 第二十一轮：天然可聚焦的 Button 锚点 id。Column / Stack 布局容器在 PC 上即使
+ *  .focusable(true) 也未必真能拿到键盘焦点，Button 一定可以。 */
+const KEY_FOCUS_ID: string = 'heicKeyFocusAnchor';
+/** 窗口状态监听注册重试：mainWindow 由 EntryAbility 异步缓存，需要等就绪。 */
+const WIN_STATUS_RETRY_MS: number = 200;
+const WIN_STATUS_RETRY_MAX: number = 12;
+/** terminateSelf 后窗口仍在时的 destroyWindow 兜底延时。 */
+const QUIT_FALLBACK_DELAY_MS: number = 400;
 
 /** 版本号（与 AppScope/app.json5 的 versionName 保持一致），用于窗口标题栏。
  *  Win64 版 3ea7419 起标题栏带版本号；鸿蒙没有「读取程序集版本」的等价物，故用常量。 */
@@ -1801,6 +1812,20 @@ struct Index {
   private escDownHandled: boolean = false;
   /** 全屏切换后重聚焦的延时句柄（等 UI 重建完成）。 */
   private keyRefocusTimer: number = -1;
+  // ---- 第二十一轮：窗口真实状态同步 + 焦点锚点 + 常显诊断 ----
+  /** 系统窗口当前是否真的处于全屏形态（只用于常显角标诊断，不参与业务分派）。 */
+  @State winFullBySystem: boolean = false;
+  /** 同一个 KeyEvent 在「焦点锚点 Button → 根 Column」双通道间精确去重。
+   *  用**事件对象引用**而非时间窗：零冷却，绝不误吞用户连按的第二次 ESC。 */
+  private lastKeyEvent: KeyEvent | undefined = undefined;
+  private winStatusListenerOn: boolean = false;
+  /** 系统是否**确实报告过**全屏形态（FULL_SCREEN / MAXIMIZE）。
+   *  2in1 上部分窗口 API 不可用，getWindowStatus() 可能恒为 FLOATING；
+   *  只有「先见过全屏、再见非全屏」才算系统替用户退出了全屏。
+   *  没有这个前置证据，进全屏后第一次 ESC 就会被误同步成 QUIT_APP 直接退出 APP。 */
+  private sawWindowFull: boolean = false;
+  private pageAlive: boolean = true;
+  private quitFallbackTimer: number = -1;
 
   // ---- 第十六轮：放大镜 >1:1 重采样专用高分辨率图源 ----
   /** 按放大后像素需求重新解码的一张 PixelMap，供放大镜圆内绘制（1:1 旁路时不生成）。
@@ -1964,6 +1989,10 @@ struct Index {
       'PIKAN %{public}s start · preload %{public}d fwd / %{public}d max · spread=%{public}d · dirPoll=%{public}d',
       APP_VERSION, PRELOAD_FWD, PRELOAD_COUNT, SPREAD_PORTRAIT ? 1 : 0, DIR_POLL_MS);
     this.readLastPos(); // 异步读几个小 key，不阻塞首帧；恢复排到首帧之后（见 scheduleShowLast）
+    // 第二十一轮：注册窗口状态监听（窗口管理器直发，不经 ESC 按键 / 焦点），
+    // 并在首帧后抢一次键盘焦点 —— 不再等 setFull 被调用才抢。
+    this.registerWindowStatusSync(0);
+    this.scheduleKeyRefocus();
   }
 
   /** 切后台 / 锁屏 / 被别的应用盖住：这是「退出 APP」最常走的路径。
@@ -1980,6 +2009,11 @@ struct Index {
   aboutToDisappear(): void {
     this.stopSlide();
     this.clearKeyRefocusTimer();
+    this.pageAlive = false;
+    if (this.quitFallbackTimer !== -1) {
+      clearTimeout(this.quitFallbackTimer);
+      this.quitFallbackTimer = -1;
+    }
     if (this.dirPollTimer !== -1) {
       clearInterval(this.dirPollTimer);
       this.dirPollTimer = -1;
@@ -6311,6 +6345,24 @@ struct Index {
           this.status = '[ESC诊断] terminateSelf 被拒绝（请回传此行）';
           hilog.warn(DOMAIN, TAG, 'ESCDBG terminateSelf rejected');
         });
+      // 第二十一轮：部分 PC 窗口形态下 terminateSelf() 只销毁 ability、不关窗口，
+      // 用户看到的就是「APP 还在」。延时后若页面仍活着，直接 destroyWindow() 兜底。
+      this.quitFallbackTimer = setTimeout(() => {
+        this.quitFallbackTimer = -1;
+        if (!this.pageAlive) {
+          return;
+        }
+        try {
+          const w: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+          if (w !== undefined) {
+            w.destroyWindow().catch(() => {});
+            this.escDiag = this.escDiag + ' → destroyWindow';
+            hilog.info(DOMAIN, TAG, 'ESCDBG destroyWindow fallback');
+          }
+        } catch (e3) {
+          hilog.warn(DOMAIN, TAG, 'ESCDBG destroyWindow fallback failed');
+        }
+      }, QUIT_FALLBACK_DELAY_MS);
     } catch (e) {
       this.escDiag = this.escDiag + ' EXCEPTION';
       this.status = '[ESC诊断] quitApp 异常（请回传此行）';
@@ -6584,6 +6636,11 @@ struct Index {
           this.maximizedByUs = true;
         }
         await win.maximize(window.MaximizePresentation.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER);
+        // 第二十一轮：确认系统真的进过全屏形态，作为「之后系统退出需同步」的前置证据。
+        // 不依赖 windowStatusChange 是否派发（2in1 上部分窗口事件可能不到应用）。
+        if (windowStatusIsFullscreen(Number(win.getWindowStatus()))) {
+          this.sawWindowFull = true;
+        }
       } catch (e) {
         hilog.warn(DOMAIN, TAG, 'fullscreen: maximize failed: %{public}s', JSON.stringify(e));
       }
@@ -6693,6 +6750,13 @@ struct Index {
   }
 
   private onKey(event: KeyEvent): void {
+    // 第二十一轮：同一个 KeyEvent 对象可能在「焦点锚点 Button」与「根 Column」
+    // 两个通道各派发一次。用对象引用精确去重，不使用任何时间窗 / 计数冷却，
+    // 因此用户紧接着主动按下的第二次 ESC 一定会被正常处理。
+    if (this.lastKeyEvent === event) {
+      return;
+    }
+    this.lastKeyEvent = event;
     const code: number = event.keyCode;
     const rawDown: boolean = (event.type === KeyType.Down);
     // 第二十轮：少数 2in1 / PC 键盘的 ESC 只把 KeyType.Up 派给应用（Down 被系统
@@ -6765,6 +6829,10 @@ struct Index {
         this.toggleFull();
         break;
       case KeyCode.KEYCODE_ESCAPE: {
+        // 第二十一轮：分派前先按**系统窗口真值**同步 fullscreen。
+        // 实机截图证明首次 ESC 被系统消费后 APP 内部 fullscreen 会卡在 true，
+        // 导致第二次 ESC 被判 EXIT_FULL 而「无响应」；这里是最直接的兜底。
+        this.syncFullWithWindow();
         // 第二十轮：真机可观测诊断 —— 状态栏 + hilog ESCDBG 双通道。
         // 按两次 ESC 后若 APP 没退出，回传状态栏这行即可定位「事件 / 分派 / 退出」断点。
         this.escSeen++;
@@ -6836,10 +6904,16 @@ struct Index {
     this.keyRefocusTimer = setTimeout(() => {
       this.keyRefocusTimer = -1;
       try {
-        focusControl.requestFocus(ROOT_FOCUS_ID);
-        hilog.info(DOMAIN, TAG, 'ESCDBG refocus root');
+        // 第二十一轮：优先抢「天然可聚焦」的 Button 锚点。第二十轮只请求根 Column，
+        // 而 Column 在 PC 上未必真能拿到键盘焦点，这是上一轮失效的原因之一。
+        focusControl.requestFocus(KEY_FOCUS_ID);
+        hilog.info(DOMAIN, TAG, 'ESCDBG refocus key anchor');
       } catch (e) {
-        hilog.warn(DOMAIN, TAG, 'ESCDBG refocus failed');
+        try {
+          focusControl.requestFocus(ROOT_FOCUS_ID);
+        } catch (e2) {
+          hilog.warn(DOMAIN, TAG, 'ESCDBG refocus failed');
+        }
       }
     }, ESC_REFOCUS_DELAY_MS);
   }
@@ -6849,6 +6923,75 @@ struct Index {
     if (this.keyRefocusTimer !== -1) {
       clearTimeout(this.keyRefocusTimer);
       this.keyRefocusTimer = -1;
+    }
+  }
+
+  /** 第二十一轮：注册窗口状态监听。mainWindow 由 EntryAbility 异步缓存，需重试等就绪。
+   *  **关键**：windowStatusChange 由系统窗口管理器直接派发，既不经过 ESC 按键事件、
+   *  也不依赖 ArkUI 焦点，因此是「系统消费首次 ESC 退出沉浸」最可靠的同步通道 ——
+   *  前四轮全部卡在「等按键到达 APP」，这条链路根本不走按键。 */
+  private registerWindowStatusSync(retry: number): void {
+    if (this.winStatusListenerOn) {
+      return;
+    }
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    if (win === undefined) {
+      if (retry < WIN_STATUS_RETRY_MAX) {
+        setTimeout(() => {
+          this.registerWindowStatusSync(retry + 1);
+        }, WIN_STATUS_RETRY_MS);
+      }
+      return;
+    }
+    try {
+      win.on('windowStatusChange', (st: window.WindowStatusType): void => {
+        this.onWindowStatusChanged(Number(st));
+      });
+      this.winStatusListenerOn = true;
+      hilog.info(DOMAIN, TAG, 'ESCDBG windowStatusChange registered');
+      this.syncFullWithWindow(); // 注册时先对齐一次，避免首帧状态就是脱节的
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'ESCDBG windowStatusChange register failed');
+    }
+  }
+
+  /** 系统窗口状态变化：APP 自认全屏但系统已非全屏 → 立刻同步回普通态。
+   *  setFull(false, true) 会顺带恢复界面三栏 / 几何快照并触发重聚焦，
+   *  这正是第二十轮「重聚焦从未执行」的解锁点。APP 自己进 / 退全屏时
+   *  shouldSyncFullFromWindow 为 false，不会递归。 */
+  private onWindowStatusChanged(st: number): void {
+    const sysFull: boolean = windowStatusIsFullscreen(st);
+    this.winFullBySystem = sysFull;
+    if (sysFull) {
+      this.sawWindowFull = true;
+    }
+    // 只有「先见过全屏、再见非全屏」才同步，避免 2in1 上静态 FLOATING 误判。
+    if (this.sawWindowFull && shouldSyncFullFromWindow(this.fullscreen, sysFull)) {
+      hilog.info(DOMAIN, TAG, 'ESCDBG WIN→F sys=%{public}d', st);
+      this.setFull(false, true);
+    }
+  }
+
+  /** ESC 分派前主动读一次系统窗口真值兜底：即便 windowStatusChange 没派发，
+   *  第二次 ESC 到达时也不会再被卡住的 fullscreen=true 误判成 EXIT_FULL。 */
+  private syncFullWithWindow(): void {
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    if (win === undefined) {
+      return;
+    }
+    let st: number = 0;
+    try {
+      st = Number(win.getWindowStatus());
+    } catch (e) {
+      return;
+    }
+    const sysFull: boolean = windowStatusIsFullscreen(st);
+    this.winFullBySystem = sysFull;
+    // 同样要求前置证据：系统确实进过全屏，才允许用「当前非全屏」同步。
+    // 否则在 2in1（getWindowStatus 恒 FLOATING）上，进全屏后第一次 ESC 会直接退出 APP。
+    if (this.sawWindowFull && shouldSyncFullFromWindow(this.fullscreen, sysFull)) {
+      hilog.info(DOMAIN, TAG, 'ESCDBG KEY→F sys=%{public}d', st);
+      this.setFull(false, true);
     }
   }
 
@@ -7452,8 +7595,25 @@ struct Index {
             }
             // 「缓存 N 张」文案 / 控件已移除：缓存账目仍由 syncCacheStat 维护（内部可观测），
             // 只是不再画在百分比上方，右下角只剩这一行缩放百分比。
+            // 第二十一轮：按过 ESC 后才出现的黄色链路诊断行。放在右下角角标层，
+            // **全屏 / 普通都可见** —— 第二十轮把诊断放在「全屏时整块隐藏」的状态栏，
+            // 恰恰是截图看不到任何诊断的原因，属于上一轮的设计缺陷。
+            if (this.escDiag.length > 0) {
+              Text(this.escDiag)
+                .fontSize(10)
+                .fontColor('#ffd479')
+                .maxLines(3)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .constraintSize({ maxWidth: 460 })
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .backgroundColor('#cc12161c')
+                .borderRadius(4)
+                .margin({ bottom: 6 })
+            }
             Row() {
-              Text(this.zoomPercentText())
+              Text(this.zoomPercentText() + ' · ' + ESC_BUILD_TAG +
+                ' · full=' + (this.fullscreen ? 'T' : 'F') +
+                ' · win=' + (this.winFullBySystem ? 'T' : 'F'))
                 .fontSize(12)
                 .fontColor('#dfe5ef')
                 .padding({ left: 8, right: 8, top: 4, bottom: 4 })
@@ -7672,6 +7832,22 @@ struct Index {
         .position({ x: 0, y: 0 })
         .zIndex(10)
       }
+
+      // 第二十一轮：1vp 透明 Button 作为键盘焦点锚点。Button 天然可聚焦，
+      // 比 .focusable(true) 的 Column 容器可靠；按键事件在焦点链上派发，
+      // 这里与根 Column 复用同一组 onKeyCapture / onKeyConsumed，靠 KeyEvent
+      // 对象引用在 onKey 入口去重（零时间窗，不会吞第二次主动 ESC）。
+      Button() { }
+        .width(1)
+        .height(1)
+        .opacity(0)
+        .id(KEY_FOCUS_ID)
+        .focusable(true)
+        .defaultFocus(true)
+        .position({ x: 0, y: 0 })
+        .hitTestBehavior(HitTestMode.None)
+        .onKeyPreIme((event: KeyEvent): boolean => this.onKeyCapture(event))
+        .onKeyEvent((event: KeyEvent): boolean => this.onKeyConsumed(event))
     }
     .width('100%')
     .height('100%')

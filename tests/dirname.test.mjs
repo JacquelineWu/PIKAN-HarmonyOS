@@ -33,6 +33,8 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十一轮「窗口真值同步：windowStatusChange 直发链路 / ESC 前读系统状态 /
+ *    Button 焦点锚点 / 常显 R21 诊断角标 / destroyWindow 兜底」；
  * 第二十轮「真机链路修复：onKeyPreIme + boolean 版 onKeyEvent 双通道消费 ESC /
  * 全屏切换后 focusControl 重抢焦点 / quitApp 去掉 await flushPos 阻塞 /
  * UIAbilityContext 兜底 / 状态栏 ESCDBG 可观测诊断 / 真实 ArkTS 编译校验」。
@@ -94,7 +96,8 @@ import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
   loupeDensityRatioOf, loupeQualityTierOf, loupeResampleEdge2Of,
   loupeResampleGainOf,
   escActionByState, shouldArmSystemEcho, shouldCaptureRectAll,
-  shouldApplyRectRestore, shouldSelfHealOnResize } from '../entry/src/main/ets/common/InteractionPlan.ts';
+  shouldApplyRectRestore, shouldSelfHealOnResize,
+  windowStatusIsFullscreen, shouldSyncFullFromWindow } from '../entry/src/main/ets/common/InteractionPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -1226,14 +1229,17 @@ check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
 check('诊断行的渲染被开关包住，diagLine 赋值点一个没删',
   /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(BADGE) &&
   (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
-check('右下角恒显示区只剩 1 个 Text（缩放百分比），缓存 N 张已移除',
-  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 1 &&
+check('右下角恒显示区：缩放百分比 1 个 Text + 第二十一轮条件诊断 1 个 Text，缓存 N 张仍移除',
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 2 &&
+  /if \(this\.escDiag\.length > 0\)/.test(BADGE_CODE) &&
+  /Text\(this\.escDiag\)/.test(BADGE_CODE) &&
   /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比仍在右下角，100% = 原图像素 1:1 口径未改',
-  /Text\(this\.zoomPercentText\(\)\)/.test(BADGE_CODE) &&
+check('缩放百分比仍在右下角且带 R21 常显构建标记，100% = 原图像素 1:1 口径未改',
+  /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
+  /const ESC_BUILD_TAG: string = 'R21';/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
   /Text\('预载 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) &&
@@ -1879,10 +1885,10 @@ check('③ 档案行最左侧圆点已移除（上层 / 目录符号保留，列
   /Text\(this\.kind === ROW_UP \? '↑' : \(this\.kind === ROW_FOLDER \? '▣' : ''\)\)/.test(INDEX) &&
   /ROW_FOLDER \? '▣' : '·'/.test(INDEX) === false &&
   /\.width\(18\)/.test(INDEX), true);
-check('④ 右下角百分比上方「缓存 N 张」文案 / 控件已移除',
+check('④ 右下角百分比上方「缓存 N 张」文案 / 控件已移除（第二十一轮角标改为带构建标记）',
   /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
   /右下角角标：只显示「缩放百分比」一项/.test(INDEX) &&
-  /Text\(this\.zoomPercentText\(\)\)/.test(INDEX), true);
+  /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(INDEX), true);
 check('⑤ 左键单击不再放大，双击仍切全屏（TapGesture count 2）',
   /this\.zoomAt\(ZOOM_LEFT, event\.x, event\.y\);/.test(INDEX) === false &&
   /左键单击不再放大/.test(INDEX) &&
@@ -3454,11 +3460,12 @@ check('③ setFull 签名带 bySystemHeal 默认参数，下降沿恒不置位�
   INDEX.includes('private setFull(on: boolean, bySystemHeal: boolean = false): void {') &&
   SET_FULL18_CODE.includes('this.pendingSystemEcho = shouldArmSystemEcho(bySystemHeal, prevFull, on);') &&
   /if \(prevFull && !on\) \{[^}]*this\.lastFullExitAt = Date\.now\(\);[^}]*shouldArmSystemEcho/.test(SET_FULL18_CODE), true);
-check('③ 自愈分支 setFull(false, true)（第十九轮恒不置位），且保留比例 + 绝对像素双判据',
+check('③ 自愈分支 setFull(false, true) + 第二十一轮两处窗口真值同步入口，双判据仍在',
   /this\.setFull\(false, true\);\s*return;/.test(INDEX) &&
   /const shrinkBig: boolean = shouldExitFullOnResize\(/.test(INDEX) &&
   /const shrinkSmall: boolean = shouldSelfHealOnResize\(/.test(INDEX) &&
-  INDEX.split('this.setFull(false, true);').length - 1 === 1, true);
+  // 三处：自愈 / windowStatusChange 回调 / ESC 分派前主动读真值
+  INDEX.split('this.setFull(false, true);').length - 1 === 3, true);
 check('③ 几何快照放宽：上升沿清 preFullFloating + 记录 floating 形态 + resize/move 前判形态',
   CAPTURE18_CODE.includes('this.preFullFloating = false;') &&
   CAPTURE18_CODE.includes('this.preFullFloating = floating;') &&
@@ -3645,6 +3652,89 @@ check('③ 回归护栏：版本 / 画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('this.setFull(false, true);') &&
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,'), true);
 console.log('  ⚠️ 本组为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十轮章节。');
+
+// ==================== 第二十一轮：窗口真值同步 / 焦点锚点 / 常显诊断（截图证据驱动） ====================
+// 用户第五次反馈并发来实机截图：APP 窗口底部状态栏整块没渲染、无左栏/顶栏，
+// 说明系统已退出沉浸（窗口变回带标题栏的自由窗口）而 APP 内部 fullscreen 仍卡在 true。
+console.log('\n--- 第二十一轮 ①：窗口真实状态同步（截图证据：APP 内部 fullscreen 卡在 true） ---');
+check('① windowStatusIsFullscreen：仅 FULL_SCREEN(1)/MAXIMIZE(2) 算全屏，其余全判普通',
+  windowStatusIsFullscreen(1) === true &&
+  windowStatusIsFullscreen(2) === true &&
+  windowStatusIsFullscreen(0) === false &&
+  windowStatusIsFullscreen(3) === false &&
+  windowStatusIsFullscreen(4) === false &&
+  windowStatusIsFullscreen(5) === false, true);
+check('① shouldSyncFullFromWindow：仅「APP 自认全屏 + 系统已非全屏」才同步（防递归/防误判）',
+  shouldSyncFullFromWindow(true, false) === true &&
+  shouldSyncFullFromWindow(true, true) === false &&
+  shouldSyncFullFromWindow(false, false) === false &&
+  shouldSyncFullFromWindow(false, true) === false, true);
+check('① 端到端：系统曾全屏→退出沉浸(FLOATING=4) → 同步普通态 → 第二次 ESC 必 QUIT_APP',
+  windowStatusIsFullscreen(4) === false &&
+  shouldSyncFullFromWindow(true, windowStatusIsFullscreen(4)) === true &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP, true);
+check('① 首次 ESC 保护：系统仍在全屏(MAXIMIZE=2) 时不同步，仍是 EXIT_FULL（绝不退出 APP）',
+  shouldSyncFullFromWindow(true, windowStatusIsFullscreen(2)) === false &&
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL, true);
+
+console.log('--- 第二十一轮 ②：运行时接线（windowStatusChange 直发 / ESC 前读真值 / 防误判） ---');
+check('② win.on(windowStatusChange) 已注册 + mainWindow 异步就绪重试 + 注册即对齐一次',
+  INDEX.includes("win.on('windowStatusChange', (st: window.WindowStatusType): void => {") &&
+  INDEX.includes('this.registerWindowStatusSync(0);') &&
+  INDEX.includes('WIN_STATUS_RETRY_MAX') &&
+  INDEX.includes('this.syncFullWithWindow(); // 注册时先对齐一次'), true);
+check('② 两处窗口真值同步都要求 sawWindowFull 前置证据（2in1 恒 FLOATING 不会误退 APP）',
+  INDEX.includes('private sawWindowFull: boolean = false;') &&
+  (INDEX.match(/this\.sawWindowFull && shouldSyncFullFromWindow\(this\.fullscreen, sysFull\)/g) || []).length === 2 &&
+  /if \(sysFull\) \{[^}]*this\.sawWindowFull = true;/.test(INDEX) &&
+  INDEX.includes('if (windowStatusIsFullscreen(Number(win.getWindowStatus()))) {'), true);
+check('② ESC 分派前先读系统窗口真值（兜底 windowStatusChange 未派发）',
+  /case KeyCode\.KEYCODE_ESCAPE: \{[\s\S]{0,400}this\.syncFullWithWindow\(\);/.test(INDEX) &&
+  INDEX.includes('st = Number(win.getWindowStatus());'), true);
+check('② 三处 setFull(false, true) 仍在：自愈 / 窗口状态回调 / ESC 前兜底',
+  INDEX.split('this.setFull(false, true);').length - 1 === 3, true);
+
+console.log('--- 第二十一轮 ③：焦点锚点 / 去重 / 常显诊断 / 退出兜底 ---');
+check('③ 1vp 透明 Button 焦点锚点：天然可聚焦 + 双通道按键 + 不挡鼠标',
+  /Button\(\) \{ \}[\s\S]{0,500}\.id\(KEY_FOCUS_ID\)/.test(INDEX) &&
+  INDEX.includes('.hitTestBehavior(HitTestMode.None)') &&
+  (INDEX.match(/\.onKeyPreIme\(\(event: KeyEvent\): boolean => this\.onKeyCapture\(event\)\)/g) || []).length === 2 &&
+  (INDEX.match(/\.onKeyEvent\(\(event: KeyEvent\): boolean => this\.onKeyConsumed\(event\)\)/g) || []).length === 2, true);
+check('③ 重聚焦优先抢 Button 锚点，且 aboutToAppear 也主动抢（不再等 setFull 被调用）',
+  INDEX.includes('focusControl.requestFocus(KEY_FOCUS_ID);') &&
+  /aboutToAppear\(\): void \{[\s\S]{0,1000}this\.scheduleKeyRefocus\(\);/.test(INDEX), true);
+check('③ KeyEvent 对象引用去重：零时间窗，不吞用户连按的第二次 ESC',
+  INDEX.includes('if (this.lastKeyEvent === event) {') &&
+  INDEX.includes('this.lastKeyEvent = event;') &&
+  INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
+check('③ 常显 R21 构建标记 + 全屏/普通都可见的黄色诊断行（第二十轮只放状态栏的缺陷已修）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R21';") &&
+  /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
+  INDEX.includes('if (this.escDiag.length > 0) {') &&
+  INDEX.includes('Text(this.escDiag)') &&
+  INDEX.includes(".fontColor('#ffd479')"), true);
+check('③ quitApp 加 destroyWindow 兜底 + pageAlive 保护 + 定时器清理',
+  INDEX.includes('w.destroyWindow().catch(() => {});') &&
+  INDEX.includes('if (!this.pageAlive) {') &&
+  INDEX.includes('QUIT_FALLBACK_DELAY_MS') &&
+  INDEX.includes('clearTimeout(this.quitFallbackTimer);'), true);
+
+console.log('--- 第二十一轮 ④：回归护栏 + 验证边界声明 ---');
+check('④ 第十九轮严格两态定稿未被推翻（普通恒 QUIT_APP、shouldArmSystemEcho 恒 false）',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(true, true) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  escActionByState(false, true) === ESC_ACT_QUIT_APP &&
+  shouldArmSystemEcho(true, true, false) === false, true);
+check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / 自愈双判据 / 版本',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  LOUPE13_CODE.split('.antialiased(LOUPE_AA_ENABLED)').length - 1 === 5 &&
+  INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
+console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
+console.log('  ⚠️ 截图判定：右下角角标必须出现 R21，否则说明装的是旧包，需重新安装签名 HAP。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
