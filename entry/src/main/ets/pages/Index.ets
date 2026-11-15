@@ -59,7 +59,8 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
   upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
   realPathOf, hierPathOf, textWidthVp, listWidthForNames,
-  isStrictParentOf, sameEntryNames } from '../common/DirName';
+  isStrictParentOf, sameEntryNames,
+  isUpListPseudoName, mergeUpListNames, rootFormParentOf } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -121,7 +122,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R28';
+const ESC_BUILD_TAG: string = 'R29';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -506,6 +507,20 @@ interface ImageItem {
   kind?: number;       // 0=图片 1=上级「..」 2=子文件夹 3=不支持预览的文件
   itemIndex?: number;  // 图片行对应 items 的下标；非图片行 = -1
 }
+
+/** 第二十九轮：会话内「某一层目录的真实清单快照」。
+ *  只在 openFolder 真的 fs.listFile 成功、并且用本次真实 names 建好 rows 之后记录，
+ *  **绝不**拿 this.rows（可能是上一屏 APP 内伪清单）来建。
+ *  path 记当时真正能列的 base；names / uris 一一对应，uris 是同一 base 拼出的
+ *  真实子项 URI —— 父目录列不出来时，兄弟目录用这个 URI 进去命中率最高。
+ *  多层并存（上限 UP_DIR_CACHE_MAX），进入子目录不再覆盖父层那份完整清单。 */
+interface UpDirSnapshot {
+  path: string;
+  names: Array<string>;
+  uris: Array<string>;
+  kinds: Array<number>;   // 当时 statSync 判出的真实行种类，避免靠名字猜文件夹
+}
+const UP_DIR_CACHE_MAX: number = 24;
 
 /** 左栏行种类 */
 const ROW_IMAGE: number = 0;
@@ -1757,6 +1772,10 @@ struct Index {
    *  重启后为空 → 退化为 pathChainOf() 的目录层级清单。 */
   private lastUpPath: string = '';
   private lastUpNames: Array<string> = [];
+  /** 第二十九轮：多层真实目录清单快照。旧 lastUpNames 是单槽，进入任一层就覆盖，
+   *  父层那份含全部兄弟目录的清单会丢 —— 上层清单于是只剩「恒列当前目录」一项。
+   *  这里按层并存，sameDirPath 命中目标层的**全部**快照一起聚合，杜绝遗漏。 */
+  private upDirCache: Array<UpDirSnapshot> = [];
   /** 左栏当前是不是「APP 内自建清单态」。为真时点目录行绝不弹「目录内多选」兜底选择器。 */
   private inAppUpList: boolean = false;
   private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
@@ -6008,17 +6027,12 @@ struct Index {
       // 进入新目录前，把「当前这份目录清单」按真实路径记下来（只存条目名，纯字符串）。
       // 用户随后点「往上层」回到这一层、而上级授权已失效列不出真实内容时，
       // showUpListInApp 就能在 APP 内还原档案清单，不必弹系统选择目录 dialog。
-      if (this.browseBase.length > 0 && this.rows.length > 0) {
-        const cacheNames: Array<string> = [];
-        for (let i = 0; i < this.rows.length; i++) {
-          const rn: ImageItem = this.rows[i];
-          if ((rn.kind ?? ROW_IMAGE) !== ROW_UP) {
-            cacheNames.push(rn.name);
-          }
-        }
-        this.lastUpPath = stripTrailingSlash(this.browseBase);
-        this.lastUpNames = cacheNames;
-      }
+      // 第二十九轮：**改用本次真实列目录得到的局部 rows**，绝不再读 this.rows ——
+      // this.rows 是上一屏 UI 行，APP 内清单态时里面混着「— 上层清单（APP 内）… —」
+      // 说明行，旧版把它们当成真实目录名写进缓存，于是上层清单出现伪文件夹。
+      // 同时按层并存快照：单槽 lastUpNames 会被下一次 openFolder 覆盖，
+      // 父层那份含全部兄弟目录（2026 / 2025 / 2024 …）的清单就再也找不回来。
+      this.cacheUpDirSnapshot(base, rows);
       this.inAppUpList = false;   // 这次是真列出来的目录态，不是 APP 内自建清单
       // 第十轮 ff1：任何一次「真的列目录成功」都证明路径可达 —— 死路径记忆作废。
       // 只在标记非空时写，自动重扫（每 1.5s）不会因此多写盘。
@@ -6247,6 +6261,131 @@ struct Index {
     }
   }
 
+  /** 第二十九轮：记录某一层目录的**真实**清单快照。
+   *  只在 openFolder 真的 fs.listFile 成功、并且用本次 names 建好局部 rows 之后调用。
+   *  绝不再读 this.rows（APP 内清单态时里面混着说明行 / `..`），从源头杜绝伪目录。
+   *  同层多次列目录按名字合并、不覆盖，兄弟目录一次都不会漏。 */
+  private cacheUpDirSnapshot(base: string, rows: ImageItem[]): void {
+    const keyPath: string = stripTrailingSlash(base);
+    if (keyPath.length === 0) {
+      return;
+    }
+    const names: Array<string> = [];
+    const uris: Array<string> = [];
+    const kinds: Array<number> = [];
+    for (let i = 0; i < rows.length; i++) {
+      const rn: ImageItem = rows[i];
+      if ((rn.kind ?? ROW_IMAGE) === ROW_UP || isUpListPseudoName(rn.name)) {
+        continue;
+      }
+      names.push(rn.name);
+      uris.push(rn.uri);
+      kinds.push(rn.kind ?? ROW_IMAGE);
+    }
+    if (names.length === 0) {
+      return;
+    }
+    let hit: number = -1;
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      if (sameDirPath(this.upDirCache[i].path, keyPath)) {
+        hit = i;
+        break;
+      }
+    }
+    if (hit >= 0) {
+      const old: UpDirSnapshot = this.upDirCache[hit];
+      const merged: Array<string> = mergeUpListNames([old.names, names]);
+      const mergedUris: Array<string> = [];
+      const mergedKinds: Array<number> = [];
+      for (let k = 0; k < merged.length; k++) {
+        const nm: string = merged[k];
+        let u: string = '';
+        let kd: number = -1;
+        for (let j = 0; j < old.names.length && j < old.uris.length; j++) {
+          if (old.names[j] === nm) {
+            u = old.uris[j];
+            kd = j < old.kinds.length ? old.kinds[j] : -1;
+            break;
+          }
+        }
+        if (u.length === 0) {
+          for (let j = 0; j < names.length; j++) {
+            if (names[j] === nm) {
+              u = uris[j];
+              kd = kinds[j];
+              break;
+            }
+          }
+        }
+        mergedUris.push(u.length > 0 ? u : stripTrailingSlash(keyPath) + '/' + nm);
+        mergedKinds.push(kd);
+      }
+      this.upDirCache[hit] = { path: keyPath, names: merged, uris: mergedUris,
+        kinds: mergedKinds };
+    } else {
+      this.upDirCache.push({ path: keyPath, names: names, uris: uris, kinds: kinds });
+      if (this.upDirCache.length > UP_DIR_CACHE_MAX) {
+        this.upDirCache.splice(0, 1);
+      }
+    }
+    // 旧单槽缓存保留（历史链路仍读它），但同样只装真实条目名。
+    this.lastUpPath = keyPath;
+    this.lastUpNames = names;
+  }
+
+  /** 第二十九轮：聚合目标父层的**全部**真实子目录名。
+   *  所有落在同一层的快照都参与合并，外加旧单槽缓存与当前目录名；
+   *  伪行由 mergeUpListNames 剔除，绝不因为「只命中一个单槽」而只剩 2026。 */
+  private upListNamesOf(target: string, currentName: string): Array<string> {
+    const groups: Array<Array<string>> = [];
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      if (sameDirPath(this.upDirCache[i].path, target)) {
+        groups.push(this.upDirCache[i].names);
+      }
+    }
+    if (this.lastUpNames.length > 0 && sameDirPath(this.lastUpPath, target)) {
+      groups.push(this.lastUpNames);
+    }
+    groups.push([currentName]);
+    return mergeUpListNames(groups);
+  }
+
+  /** 第二十九轮：找某个兄弟目录当时真实可访问的 URI（同一个能 listFile 的 base 拼出来的）。
+   *  找不到就退回 target + 目录名，导航行为与旧版一致。 */
+  private upListUriOf(target: string, name: string): string {
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      const snap: UpDirSnapshot = this.upDirCache[i];
+      if (!sameDirPath(snap.path, target)) {
+        continue;
+      }
+      for (let j = 0; j < snap.names.length && j < snap.uris.length; j++) {
+        if (snap.names[j] === name && snap.uris[j].length > 0) {
+          return snap.uris[j];
+        }
+      }
+    }
+    return stripTrailingSlash(target) + '/' + name;
+  }
+
+  /** 第二十九轮：用快照里 statSync 判出的真实行种类，而不是「名字里有没有点」猜。
+   *  兄弟目录名带点（`Vol.2`、`2026.备份`）时，旧名字启发式会判成 ROW_OTHER，
+   *  而 ROW_OTHER 在 onRowTap 里不可点 —— 目录就「看得到但进不去」。
+   *  没有快照时仍退回旧启发式，零回归。 */
+  private upListKindOf(target: string, name: string, fallback: number): number {
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      const snap: UpDirSnapshot = this.upDirCache[i];
+      if (!sameDirPath(snap.path, target)) {
+        continue;
+      }
+      for (let j = 0; j < snap.names.length && j < snap.kinds.length; j++) {
+        if (snap.names[j] === name && snap.kinds[j] >= 0) {
+          return snap.kinds[j] === ROW_FOLDER ? ROW_FOLDER : ROW_OTHER;
+        }
+      }
+    }
+    return fallback;
+  }
+
   /** 往上层：按**目录层级**进入当前路径的直接父级，对齐 Windows 文件管理器的「向上」。
    *
    *  2026-11-10 语义重写（本次需求）：旧实现是「按浏览历史回退」——
@@ -6333,10 +6472,26 @@ struct Index {
       return;
     }
     const rawUri: string = this.browseDir.length > 0 ? this.browseDir : current;
+    // 第二十九轮：把 picker 原始授权 URI 也交给候选生成。openFolder 每次成功都会
+    // 把 browseDir 覆写成子目录路径，原始 file:// 授权形态容易丢；父目录只有用
+    // 与授权同形态的 URI 才更可能被 fs.listFile 列出来 —— 真列出来就自然含
+    // 该层全部子目录（2026 之外的兄弟目录），而不是靠缓存只拼出当前目录一个。
+    const upRoots: Array<string> = [];
+    if (this.pickRootUri.length > 0) {
+      upRoots.push(this.pickRootUri);
+    }
+    if (this.browseDir.length > 0 && this.browseDir !== this.pickRootUri) {
+      upRoots.push(this.browseDir);
+    }
+    if (this.savedDirUri.length > 0 && this.savedDirUri !== this.pickRootUri &&
+        this.savedDirUri !== this.browseDir) {
+      upRoots.push(this.savedDirUri);
+    }
     // UNKNOWN 态 upLevelOf 为空，必须显式传入宽松父级，否则候选集为空、按钮又变成没反应。
+    // 非 loose 用空串占位（函数内回退 upLevelOf），保持既有调用形态与层级校验不变。
     const parents: string[] = loose
-      ? upParentCandidates(current, rawUri, target)
-      : upParentCandidates(current, rawUri);
+      ? upParentCandidates(current, rawUri, target, upRoots)
+      : upParentCandidates(current, rawUri, '', upRoots);
     const targetName: string = baseName(target);
     this.status = '往上层 L' + level + '→L' + dirLevelOf(target) + ' → ' + targetName;
     this.diagLine = 'up | ' + UP_NAV_TAG + ' | L' + level + '→L' + dirLevelOf(target) +
@@ -6383,9 +6538,10 @@ struct Index {
    *  直接在 APP 内左栏显示上层的「档案目录 / 档案清单」（2026-11-11 第四次实机反馈）。
    *
    *  数据源全是纯字符串，零 IO：
-   *   · pathChainOf(target)：从卷根到目标父级的每一级目录，逐条可点进入；
-   *   · lastUpNames：会话内进入子目录前记下的那一层真实条目名（含档案名），
-   *     命中时列出完整「档案清单」；重启后为空则至少列出当前目录这个已知子目录。
+   *   · upListNamesOf(target)：所有落在该层的真实目录清单快照（多层并存）+
+   *     旧单槽 lastUpNames + 当前目录名，聚合出**完整**兄弟目录，不遗漏非 2026 目录；
+   *   · upListUriOf(target)：快照里当时真正能 listFile 的 base 拼出的子项 URI；
+   *   · pathChainOf(target)：只用于 diagLine 层级计数，**绝不**再当成目录项列出。
    *  rows 里的目录行点进去照常走 openFolder（用户主动点击才发生，不是启动期批量 IO）。
    *  ⚠️ 刻意**不调用 applyItems**：它会 applyPendingRestore 重设恢复模式 / 提示卡，
    *     还会触发 showPreviewOf / fillSizes / schedulePreload。这里只提交一份纯清单，
@@ -6394,36 +6550,28 @@ struct Index {
     parents: string[], state: number, level: number): void {
     const rows: ImageItem[] = [];
     rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
-    // ① 父目录的**真实子目录**：会话内曾在这一层列过，就照原样还原完整清单。
+    // ① 第二十九轮：父层的**全部**真实子目录。多层会话快照 + 旧单槽缓存 +
+    //    当前目录名一起聚合，伪说明行由 mergeUpListNames 剔除、按原名去重。
+    //    旧版只认一个 lastUpNames 单槽：一旦被下一层覆盖或缓存里装的是伪清单，
+    //    这里就只剩「恒列当前目录」一项 —— 正是截图里只有 2026 的原因。
+    const curName: string = current.length > 0 ? baseName(current) : '';
     const cached: boolean = this.lastUpNames.length > 0 &&
       sameDirPath(this.lastUpPath, target);
-    if (cached) {
-      for (let i = 0; i < this.lastUpNames.length; i++) {
-        const nm: string = this.lastUpNames[i];
-        if (nm.length === 0) {
-          continue;
-        }
-        // 档案只列名字、不进翻页序列（授权失效时不解码）；文件夹可点进入。
-        const isFile: boolean = isImageName(nm) || nm.indexOf('.') > 0;
-        rows.push({ uri: stripTrailingSlash(target) + '/' + nm, name: nm,
-          size: -1, mtime: 0, kind: isFile ? ROW_OTHER : ROW_FOLDER, itemIndex: -1 });
-      }
-    }
-    // ② 当前目录恒作为目标父级的一个已知真实子目录列出（点一下就能回去），
-    //    且与 ① 缓存条目按名字去重。第二十八轮：即使缓存命中也保证能回刚才那层。
-    if (current.length > 0) {
-      const curName: string = baseName(current);
-      let exists: boolean = false;
-      for (let i = 1; i < rows.length; i++) {
-        if (rows[i].name === curName) {
-          exists = true;
-          break;
-        }
-      }
-      if (!exists) {
-        rows.push({ uri: current, name: curName, size: -1, mtime: 0,
-          kind: ROW_FOLDER, itemIndex: -1 });
-      }
+    const upNames: Array<string> = this.upListNamesOf(target, curName);
+    for (let i = 0; i < upNames.length; i++) {
+      const nm: string = upNames[i];
+      // 当前目录恒用已知可列的真实路径（点一下就能回去）；兄弟目录优先用
+      // 快照里当时真正 listFile 成功的 base 拼出的 URI，保证「能访问」。
+      const isCurrent: boolean = nm === curName;
+      const rowUri: string = isCurrent && current.length > 0
+        ? current : this.upListUriOf(target, nm);
+      // 档案只列名字、不进翻页序列（授权失效时不解码）；文件夹可点进入。
+      // 第二十九轮：优先用快照里的真实种类，带点的目录名（Vol.2）也能点进去。
+      const isFile: boolean = isImageName(nm) || nm.indexOf('.') > 0;
+      const rowKind: number = this.upListKindOf(target, nm,
+        isFile ? ROW_OTHER : ROW_FOLDER);
+      rows.push({ uri: rowUri, name: nm,
+        size: -1, mtime: 0, kind: rowKind, itemIndex: -1 });
     }
     // ③ 路径层级链**只作诊断**，绝不再当成目录项列出来。
     //    旧版无条件 pathChainOf(target) 逐层 push ROW_FOLDER，把 `/`、`storage`、

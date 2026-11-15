@@ -33,6 +33,8 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十九轮「上层清单只列 2026 且混入伪目录：多层真实清单快照 / 全子目录聚合 /
+ *    授权同形态父 URI / 真实行种类 / R29 构建标记」、
  * 第二十八轮「NAS 往上层错误文件夹清单：挂载前缀卷根判定 / 规范层级键 /
  *    百分号编码父 URI 候选 / 父级真值校验 / 清单只列真实子目录 / R28 构建标记」、
  * 第二十七轮「NAS 路径 THREAD_BLOCK_6S：RawStore.read 真异步化 + 到点即放弃超时闸门 /
@@ -60,7 +62,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf, upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
   isNetworkHost, nasHostOf, canonicalLevelKeyOf, encodePathForm,
-  isStrictParentOf } from '../entry/src/main/ets/common/DirName.ts';
+  isStrictParentOf, isUpListPseudoName, mergeUpListNames, rootFormParentOf } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -1195,9 +1197,9 @@ check('browseUp 函数体内没有 DocumentViewPicker / .select / pickerStartOf 
   /DocumentViewPicker|dv\.select|pickerStartOf\(|isUpTargetOf\(/.test(UP_FN) === false, true);
 check('browseUp 两个失败分支都收口 showUpListInApp（loose + 正常层级）',
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length, 2);
-check('showUpListInApp 存在且用 pathChainOf 生成可点层级行',
+check('showUpListInApp 存在且用 pathChainOf 生成诊断层级 / 目录行仍用 ROW_FOLDER',
   UPLIST_CODE.length > 0 && /pathChainOf\(target\)/.test(UPLIST_CODE) &&
-  /kind: ROW_FOLDER/.test(UPLIST_CODE), true);
+  /ROW_FOLDER/.test(UPLIST_CODE), true);
 check('showUpListInApp 用 sameDirPath 命中会话缓存、列真实档案清单',
   /sameDirPath\(this\.lastUpPath, target\)/.test(UPLIST_CODE) &&
   /this\.lastUpNames/.test(UPLIST_CODE), true);
@@ -1218,9 +1220,11 @@ check('清单态标记 inAppUpList 只在三处维护',
   (INDEX.match(/this\.inAppUpList =/g) || []).length, 3);
 check('清单行点击禁掉「目录内多选」兜底选择器',
   /this\.openFolder\(r\.uri, true, !this\.inAppUpList\);/.test(INDEX), true);
-check('openFolder 进入新目录前缓存上一层条目名（纯字符串）',
-  /this\.lastUpNames = cacheNames;/.test(INDEX) &&
-  /this\.lastUpPath = stripTrailingSlash\(this\.browseBase\);/.test(INDEX), true);
+check('R29 openFolder 用本次真实 rows 建多层目录快照（不再读 this.rows 以免混入伪清单）',
+  /this\.cacheUpDirSnapshot\(base, rows\);/.test(INDEX) &&
+  /private cacheUpDirSnapshot\(base: string, rows: ImageItem\[\]\)/.test(INDEX) &&
+  /this\.lastUpNames = names;/.test(INDEX) &&
+  /this\.lastUpNames = cacheNames;/.test(INDEX) === false, true);
 check('诊断串明确 no-picker，便于实机辨认新包',
   /no-picker/.test(UPLIST_CODE), true);
 
@@ -1262,9 +1266,9 @@ check('右下角：正式版只显示缩放百分比；诊断层展开时显示�
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R28 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比恒在右下角；R29 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R28';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R29';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3743,8 +3747,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 诊断层展开时可见 R28 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") &&
+check('③ 诊断层展开时可见 R29 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3770,7 +3774,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R28，否则说明装的是旧包。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R29，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3831,9 +3835,10 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R28 构建标记已升级（R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") &&
+check('④ R29 构建标记已升级（R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
@@ -3857,7 +3862,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：展开诊断层后须出现 R28；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R29；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3925,9 +3930,10 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R28 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") &&
+check('⑤ R29 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
@@ -3997,9 +4003,10 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R28 构建标记且 R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") &&
+check('④ R29 构建标记且 R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
@@ -4045,10 +4052,11 @@ check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
   (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
 
-console.log('--- 第二十五轮 ③：R28 构建标记 + 既有链路零回归 ---');
-check('③ R28 构建标记，R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") &&
+console.log('--- 第二十五轮 ③：R29 构建标记 + 既有链路零回归 ---');
+check('③ R29 构建标记，R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false, true);
@@ -4122,10 +4130,10 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
   INDEX_CODE26.split('.autoResize(false)').length - 1 === 3 &&
   INDEX_CODE26.split('.dynamicRangeMode(').length - 1 === 3, true);
 
-console.log('--- 第二十六轮 ④：R28 构建标记 + 既有链路零回归 ---');
-check('④ ESC_BUILD_TAG=R28，R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") &&
-  ['R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+console.log('--- 第二十六轮 ④：R29 构建标记 + 既有链路零回归 ---');
+check('④ ESC_BUILD_TAG=R29，R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
+  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4239,13 +4247,13 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
-check('⑤ R28 构建标记，R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") &&
-  ['R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('⑤ R29 构建标记，R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
+  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
 console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
-console.log('  ⚠️ 真机步骤：装 R28 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
+console.log('  ⚠️ 真机步骤：装 R29 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
 
 // ==================== 第二十八轮：NAS 往上层显示错误文件夹清单（2026-11-16，R28） ====================
 // 用户复现路径：/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026
@@ -4265,132 +4273,329 @@ const M_RAW = 'file://' + M_HOST + '/' + M_TAIL;
 const M_VOLROOT = '/storage/userExternal/' + M_HOST;
 const M_GRAND = '/storage/userExternal/' + M_HOST + '/图片档案/Collection/4 中';
 
-check('R28 用户路径：中文 / 空格 / 方括号 / 英文 / 数字混合目录名 baseName 精确',
+check('R29 用户路径：中文 / 空格 / 方括号 / 英文 / 数字混合目录名 baseName 精确',
   baseName(M_LOGICAL), '2026');
-check('R28 用户路径：父级精确落在 [青丘图鉴] Nine tail Photography',
+check('R29 用户路径：父级精确落在 [青丘图鉴] Nine tail Photography',
   upLevelOf(M_LOGICAL), M_PARENT_L);
-check('R28 用户路径：父级显示名含方括号与空格且未被拆解',
+check('R29 用户路径：父级显示名含方括号与空格且未被拆解',
   baseName(upLevelOf(M_LOGICAL)), '[青丘图鉴] Nine tail Photography');
-check('R28 方括号目录名不被误判为 IPv6 主机', isNetworkHost('[青丘图鉴] Nine tail Photography'), false);
-check('R28 含空格目录名不被误判为主机', isNetworkHost('4 中'), false);
-check('R28 地址段被识别为主机', isNetworkHost(M_HOST), true);
+check('R29 方括号目录名不被误判为 IPv6 主机', isNetworkHost('[青丘图鉴] Nine tail Photography'), false);
+check('R29 含空格目录名不被误判为主机', isNetworkHost('4 中'), false);
+check('R29 地址段被识别为主机', isNetworkHost(M_HOST), true);
 
-check('R28 挂载形态：nasHostOf 抽到主机段（旧版只看第一段返回空）',
+check('R29 挂载形态：nasHostOf 抽到主机段（旧版只看第一段返回空）',
   nasHostOf(M_MOUNT), M_HOST);
-check('R28 挂载形态：volumeRootOf 取到主机段（旧版误判为 /）',
+check('R29 挂载形态：volumeRootOf 取到主机段（旧版误判为 /）',
   volumeRootOf(M_MOUNT), M_VOLROOT);
-check('R28 挂载形态：dirLevelOf 与逻辑形态一致', dirLevelOf(M_MOUNT), 5);
-check('R28 挂载形态：upLevelOf 精确只剥一层', upLevelOf(M_MOUNT), M_PARENT);
-check('R28 挂载形态：仍是 GO 态（不误判到顶 / UNKNOWN）', upNavStateOf(M_MOUNT), UP_NAV_GO);
+check('R29 挂载形态：dirLevelOf 与逻辑形态一致', dirLevelOf(M_MOUNT), 5);
+check('R29 挂载形态：upLevelOf 精确只剥一层', upLevelOf(M_MOUNT), M_PARENT);
+check('R29 挂载形态：仍是 GO 态（不误判到顶 / UNKNOWN）', upNavStateOf(M_MOUNT), UP_NAV_GO);
 const M_CHAIN = pathChainOf(M_PARENT);
-check('R28 挂载形态：清单首行是 NAS 卷根', M_CHAIN[0], M_VOLROOT);
-check('R28 挂载形态：清单不再出现伪造的文件系统根 / 行', M_CHAIN.includes('/'), false);
-check('R28 挂载形态：清单不再把 storage / userExternal 当独立目录行',
+check('R29 挂载形态：清单首行是 NAS 卷根', M_CHAIN[0], M_VOLROOT);
+check('R29 挂载形态：清单不再出现伪造的文件系统根 / 行', M_CHAIN.includes('/'), false);
+check('R29 挂载形态：清单不再把 storage / userExternal 当独立目录行',
   M_CHAIN.every(p => baseName(p) !== 'storage' && baseName(p) !== 'userExternal'), true);
-check('R28 挂载形态：清单末行是目标父级', M_CHAIN.slice(-1)[0], M_PARENT);
-check('R28 挂载形态：清单层级数 5（与逻辑形态一致）', M_CHAIN.length, 5);
-check('R28 挂载形态：清单每一级都带 NAS 卷根前缀',
+check('R29 挂载形态：清单末行是目标父级', M_CHAIN.slice(-1)[0], M_PARENT);
+check('R29 挂载形态：清单层级数 5（与逻辑形态一致）', M_CHAIN.length, 5);
+check('R29 挂载形态：清单每一级都带 NAS 卷根前缀',
   M_CHAIN.every(p => p.startsWith(M_VOLROOT)), true);
 
 console.log('--- 第二十八轮 ②：规范层级键 / 同层判定 / 百分号编码 ---');
-check('R28 规范层级键：挂载形态剥掉前缀', canonicalLevelKeyOf(M_MOUNT), M_LOGICAL);
-check('R28 规范层级键：scheme 授权形态归一到同一键', canonicalLevelKeyOf(M_RAW), M_LOGICAL);
-check('R28 规范层级键：逻辑形态原样', canonicalLevelKeyOf(M_LOGICAL), M_LOGICAL);
-check('R28 规范层级键：非 NAS 路径原样（零回归）',
+check('R29 规范层级键：挂载形态剥掉前缀', canonicalLevelKeyOf(M_MOUNT), M_LOGICAL);
+check('R29 规范层级键：scheme 授权形态归一到同一键', canonicalLevelKeyOf(M_RAW), M_LOGICAL);
+check('R29 规范层级键：逻辑形态原样', canonicalLevelKeyOf(M_LOGICAL), M_LOGICAL);
+check('R29 规范层级键：非 NAS 路径原样（零回归）',
   canonicalLevelKeyOf('/storage/Users/100/a/b'), '/storage/Users/100/a/b');
-check('R28 同层判定：scheme 授权形态 ↔ 挂载形态判为同层',
+check('R29 同层判定：scheme 授权形态 ↔ 挂载形态判为同层',
   sameDirPath(M_RAW, M_MOUNT), true);
-check('R28 同层判定：父 URI 的 scheme 形态 ↔ 挂载目标判为同层',
+check('R29 同层判定：父 URI 的 scheme 形态 ↔ 挂载目标判为同层',
   sameDirPath('file://' + M_HOST + '/' + M_PARENT_TAIL, M_PARENT), true);
-check('R28 同层判定：不同目录仍拒绝', sameDirPath(M_PARENT + '/别的', M_PARENT), false);
-check('R28 同层判定：空串仍不算同层', sameDirPath('', ''), false);
+check('R29 同层判定：不同目录仍拒绝', sameDirPath(M_PARENT + '/别的', M_PARENT), false);
+check('R29 同层判定：空串仍不算同层', sameDirPath('', ''), false);
 
 const M_ENC = encodePathForm(M_PARENT);
-check('R28 编码：空格 → %20', M_ENC.includes('%20'), true);
-check('R28 编码：方括号 → %5B / %5D', M_ENC.includes('%5B') && M_ENC.includes('%5D'), true);
-check('R28 编码：中文 → UTF-8 %E5%9B%BE', M_ENC.includes('%E5%9B%BE'), true);
-check('R28 编码：保留 scheme 与主机段',
+check('R29 编码：空格 → %20', M_ENC.includes('%20'), true);
+check('R29 编码：方括号 → %5B / %5D', M_ENC.includes('%5B') && M_ENC.includes('%5D'), true);
+check('R29 编码：中文 → UTF-8 %E5%9B%BE', M_ENC.includes('%E5%9B%BE'), true);
+check('R29 编码：保留 scheme 与主机段',
   encodePathForm('file://' + M_HOST + '/图片档案/4 中').startsWith('file://' + M_HOST + '/'), true);
-check('R28 编码：不重复编码已有 %XX', encodePathForm('file://a/%E4%B8%AD'), '');
-check('R28 编码：路径分隔符不被编掉', encodePathForm('/a/b c/d').split('/').length, 4);
-check('R28 编码：解码侧可还原为同一层（能通过候选过滤）',
+check('R29 编码：不重复编码已有 %XX', encodePathForm('file://a/%E4%B8%AD'), '');
+check('R29 编码：路径分隔符不被编掉', encodePathForm('/a/b c/d').split('/').length, 4);
+check('R29 编码：解码侧可还原为同一层（能通过候选过滤）',
   sameDirPath(M_ENC, M_PARENT), true);
 
 console.log('--- 第二十八轮 ③：父级真值校验 isStrictParentOf ---');
-check('R28 真值：直接父级通过', isStrictParentOf(M_PARENT, M_MOUNT), true);
-check('R28 真值：逻辑形态父级也通过（形态无关）', isStrictParentOf(M_PARENT_L, M_MOUNT), true);
-check('R28 真值：自身不是父级（杜绝原地不动）', isStrictParentOf(M_MOUNT, M_MOUNT), false);
-check('R28 真值：祖父级被拒（杜绝越级）', isStrictParentOf('/' + M_HOST + '/图片档案', M_MOUNT), false);
-check('R28 真值：旁支目录被拒', isStrictParentOf(M_PARENT + '/别的', M_MOUNT), false);
-check('R28 真值：空串被拒', isStrictParentOf('', M_MOUNT), false);
+check('R29 真值：直接父级通过', isStrictParentOf(M_PARENT, M_MOUNT), true);
+check('R29 真值：逻辑形态父级也通过（形态无关）', isStrictParentOf(M_PARENT_L, M_MOUNT), true);
+check('R29 真值：自身不是父级（杜绝原地不动）', isStrictParentOf(M_MOUNT, M_MOUNT), false);
+check('R29 真值：祖父级被拒（杜绝越级）', isStrictParentOf('/' + M_HOST + '/图片档案', M_MOUNT), false);
+check('R29 真值：旁支目录被拒', isStrictParentOf(M_PARENT + '/别的', M_MOUNT), false);
+check('R29 真值：空串被拒', isStrictParentOf('', M_MOUNT), false);
 
 console.log('--- 第二十八轮 ④：挂载形态父 URI 候选（不再只剩 1 条兜底）---');
 const M_CANDS = upParentCandidates(M_MOUNT, M_RAW);
-check('R28 父候选：保留带授权的 file://<host> 形态',
+check('R29 父候选：保留带授权的 file://<host> 形态',
   M_CANDS.some(u => u.indexOf('file://' + M_HOST + '/') === 0), true);
-check('R28 父候选：含百分号编码形态（空格 / 方括号 / 中文）',
+check('R29 父候选：含百分号编码形态（空格 / 方括号 / 中文）',
   M_CANDS.some(u => u.indexOf('%20') >= 0 && u.indexOf('%5B') >= 0), true);
-check('R28 父候选：含挂载真实路径目标', M_CANDS.includes(M_PARENT), true);
-check('R28 父候选：全部落在同一父层', M_CANDS.every(u => sameDirPath(u, M_PARENT)), true);
-check('R28 父候选：不含当前目录自身', M_CANDS.every(u => sameDirPath(u, M_MOUNT) === false), true);
-check('R28 父候选：不含祖父层', M_CANDS.every(u => sameDirPath(u, M_GRAND) === false), true);
-check('R28 父候选：不再只剩 1 条兜底', M_CANDS.length >= 4, true);
-check('R28 父候选：不含丢掉主机段的错误路径',
+check('R29 父候选：含挂载真实路径目标', M_CANDS.includes(M_PARENT), true);
+check('R29 父候选：全部落在同一父层', M_CANDS.every(u => sameDirPath(u, M_PARENT)), true);
+check('R29 父候选：不含当前目录自身', M_CANDS.every(u => sameDirPath(u, M_MOUNT) === false), true);
+check('R29 父候选：不含祖父层', M_CANDS.every(u => sameDirPath(u, M_GRAND) === false), true);
+check('R29 父候选：不再只剩 1 条兜底', M_CANDS.length >= 4, true);
+check('R29 父候选：不含丢掉主机段的错误路径',
   M_CANDS.some(u => sameDirPath(u, '/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography')), false);
 
 console.log('--- 第二十八轮 ⑤：Index.ets 静态接线 ---');
-check('R28 Index 引入 isStrictParentOf', /isStrictParentOf, sameEntryNames/.test(INDEX), true);
-check('R28 browseUp 有父级真值校验与 BADLEVEL 诊断',
+check('R29 Index 引入 isStrictParentOf', /isStrictParentOf, sameEntryNames/.test(INDEX), true);
+check('R29 browseUp 有父级真值校验与 BADLEVEL 诊断',
   /const strictParent: boolean = loose/.test(UP_FN) &&
   /isStrictParentOf\(target, current\)/.test(UP_FN) &&
   /up BADLEVEL/.test(UP_FN) &&
   /target\.length > 0 && !strictParent/.test(UP_FN), true);
-check('R28 校验仅严格层级链启用（loose / 卷根判不出时跳过，其它导航零改动）',
+check('R29 校验仅严格层级链启用（loose / 卷根判不出时跳过，其它导航零改动）',
   /loose \|\| root\.length === 0 \|\|/.test(UP_FN), true);
-check('R28 showUpListInApp 不再把 pathChainOf 逐层 push 成目录行',
+check('R29 showUpListInApp 不再把 pathChainOf 逐层 push 成目录行',
   /pathChainOf\(target\)/.test(UPLIST_CODE) &&
   /for \(let i = 0; i < chain\.length; i\+\+\)/.test(UPLIST_CODE) === false, true);
-check('R28 showUpListInApp 恒列当前目录作为父目录真实子目录（并按名字去重）',
-  /if \(current\.length > 0\) \{/.test(UPLIST_CODE) &&
-  /rows\.push\(\{ uri: current, name: curName/.test(UPLIST_CODE) &&
-  /let exists: boolean = false;/.test(UPLIST_CODE), true);
-check('R28 showUpListInApp 层级链只用于诊断（chain 计数进 diagLine）',
+check('R29 showUpListInApp 聚合该层全部真实子目录（含当前目录，按名字去重，绝不只剩 2026）',
+  /this\.upListNamesOf\(target, curName\)/.test(UPLIST_CODE) &&
+  /this\.upListUriOf\(target, nm\)/.test(UPLIST_CODE) &&
+  /mergeUpListNames\(groups\)/.test(INDEX) &&
+  /let exists: boolean = false;/.test(UPLIST_CODE) === false, true);
+check('R29 showUpListInApp 层级链只用于诊断（chain 计数进 diagLine）',
   /chain\.length/.test(UPLIST_CODE), true);
-check('R28 showUpListInApp 仍零 IO / 仍不弹系统选择器',
+check('R29 showUpListInApp 仍零 IO / 仍不弹系统选择器',
   /fs\.listFile|fs\.statSync|DocumentViewPicker|this\.applyItems/.test(UPLIST_CODE) === false, true);
-check('R28 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
+check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.browseBase = target;/.test(UPLIST_CODE) &&
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
-check('R28 构建标记 R28 且旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R28';/.test(INDEX) &&
-  ['R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R29 构建标记 R29 且旧标记全清除',
+  /const ESC_BUILD_TAG: string = 'R29';/.test(INDEX) &&
+  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十八轮 ⑥：其它导航 / 历史修复零回归 ---');
-check('R28 零回归：鸿蒙用户卷根不变', volumeRootOf(DEEP), VOLROOT);
-check('R28 零回归：通用 POSIX 卷根不变', volumeRootOf('/a/b/c'), '/');
-check('R28 零回归：Windows 盘符卷根不变', volumeRootOf('C:/Users/foo/Pictures/2020'), 'C:');
-check('R28 零回归：file://docs 还原不变',
+check('R29 零回归：鸿蒙用户卷根不变', volumeRootOf(DEEP), VOLROOT);
+check('R29 零回归：通用 POSIX 卷根不变', volumeRootOf('/a/b/c'), '/');
+check('R29 零回归：Windows 盘符卷根不变', volumeRootOf('C:/Users/foo/Pictures/2020'), 'C:');
+check('R29 零回归：file://docs 还原不变',
   realPathOf('file://docs/storage/Users/100/a'), '/storage/Users/100/a');
-check('R28 零回归：sameDirPath 仍认文档 URI 与真实路径',
+check('R29 零回归：sameDirPath 仍认文档 URI 与真实路径',
   sameDirPath('file://docs' + TARGET + '/', TARGET), true);
-check('R28 零回归：sameDirPath 仍拒绝不同目录', sameDirPath(TARGET + '/子', TARGET), false);
-check('R28 零回归：普通路径父候选仍有候选',
+check('R29 零回归：sameDirPath 仍拒绝不同目录', sameDirPath(TARGET + '/子', TARGET), false);
+check('R29 零回归：普通路径父候选仍有候选',
   upParentCandidates(DEEP, 'file://docs' + DEEP + '/').length > 0, true);
-check('R28 零回归：第八轮 NAS 逻辑形态卷根不变', volumeRootOf(NAS_BASE), NAS_ROOT);
-check('R28 零回归：第八轮 NAS 父候选仍含 scheme 形态',
+check('R29 零回归：第八轮 NAS 逻辑形态卷根不变', volumeRootOf(NAS_BASE), NAS_ROOT);
+check('R29 零回归：第八轮 NAS 父候选仍含 scheme 形态',
   upParentCandidates(NAS_BASE, NAS_RAW).some(u => u.indexOf('file://' + M_HOST + '/') === 0), true);
-check('R28 零回归：R27 readGuarded 真异步仍在',
+check('R29 零回归：R27 readGuarded 真异步仍在',
   /private readGuarded\(/.test(INDEX) && /await fs\.read\(file\.fd, buf\)/.test(INDEX), true);
-check('R28 零回归：R26 上下键翻页仍在',
+check('R29 零回归：R26 上下键翻页仍在',
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
-check('R28 零回归：版本守卫 1.0.7', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
-check('R28 零回归：ro1 总闸门 / 启动路径零 new Promise 未动',
+check('R29 零回归：版本守卫 1.0.7', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
+check('R29 零回归：ro1 总闸门 / 启动路径零 new Promise 未动',
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   /new Promise|Promise\.race/.test(RESUME_FN) === false, true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R28 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
+console.log('  ⚠️ 真机步骤：装 R29 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
+
+// ==================== 第二十九轮：上层清单只列 2026、且混入伪目录行（2026-11-16，R29） ====================
+// 真机截图 screenshot_20261116_045747（R29 之前的 R28 包）：
+//   抬头 APP 内上层「[青丘图鉴] Nine tail Photography」清单（3 项）· ul1
+//   左栏 = .. / 2026 / 两条带文件夹图标的「— 上层清单（APP 内）· 点目录名进入 · ul1 —」
+//          / 一条真正的说明行；右栏「本层没有图片」。
+// 用户要求：该层全部目录（含所有非 2026 目录）都要能识别 / 列出 / 访问，
+//           目录结构、命名、导航行为不变，多上级目录时完整无遗漏。
+// 源码里没有任何 2026 字面量筛选 —— 限制来自「单槽缓存 + 缓存污染 + 伪行未过滤」。
+console.log('\n--- 第二十九轮 ①：伪条目识别（绝不误伤真实目录名）---');
+const R29_HINT = '— 上层清单（APP 内）· 点目录名进入 · ul1 —';
+check('R29 伪行：清单说明行被识别', isUpListPseudoName(R29_HINT), true);
+check('R29 伪行：换 tag 的说明行仍被识别',
+  isUpListPseudoName('— 上层清单（APP 内）· 点目录名进入 · ul2 —'), true);
+check('R29 伪行：空串 / .. / . 被识别',
+  isUpListPseudoName('') && isUpListPseudoName('..') && isUpListPseudoName('.'), true);
+check('R29 伪行：.. 行带空格也被识别', isUpListPseudoName('  ..  '), true);
+check('R29 真目录：2026 不被误杀', isUpListPseudoName('2026'), false);
+check('R29 真目录：所有非 2026 兄弟目录都不被误杀',
+  ['2025', '2024', '2023', '合集', '4 中', '[青丘图鉴] Nine tail Photography',
+    'Vol.2', '编号202618 模特 奶茶'].every(n => isUpListPseudoName(n) === false), true);
+check('R29 真目录：带首尾空格 / 点号 / 方括号的目录名都不被误杀',
+  [' 2025 ', 'a.b', '[2022]'].every(n => isUpListPseudoName(n) === false), true);
+
+console.log('--- 第二十九轮 ②：多源清单聚合，完整无遗漏 ---');
+const R29_SIBLINGS = ['2026', '2025', '2024', '2023', '2022', '2021', '精选', '未整理'];
+const R29_GROUPS = [
+  R29_SIBLINGS,
+  ['2026', R29_HINT, R29_HINT],   // 旧单槽被 APP 内伪清单污染的形态
+  ['2026', '2020', '花絮'],        // 同一层另一份快照
+  ['2026'],                        // 当前目录恒列
+];
+const R29_MERGED = mergeUpListNames(R29_GROUPS);
+check('R29 聚合：8 个兄弟目录 + 2 个补充目录 = 10 条，当前目录去重后不增行，零遗漏',
+  R29_MERGED.length, 10);
+check('R29 聚合：非 2026 目录全部在结果里',
+  R29_SIBLINGS.filter(n => n !== '2026').every(n => R29_MERGED.includes(n)) &&
+  R29_MERGED.includes('2020') && R29_MERGED.includes('花絮'), true);
+check('R29 聚合：当前目录 2026 恰出现一次',
+  R29_MERGED.filter(n => n === '2026').length, 1);
+check('R29 聚合：伪说明行一条都不出现',
+  R29_MERGED.some(n => isUpListPseudoName(n)), false);
+check('R29 聚合：首份清单顺序原样保留（不改目录结构 / 命名 / 排序）',
+  R29_MERGED.slice(0, 8).join('|'), R29_SIBLINGS.join('|'));
+check('R29 聚合：按原名去重，不去空格 / 不改名',
+  mergeUpListNames([[' 2025 ', '2025'], ['2025']]).join('|'), ' 2025 |2025');
+check('R29 聚合：空组 / 全伪行组返回空清单',
+  mergeUpListNames([[], [R29_HINT, '..', '']]).length, 0);
+check('R29 聚合：单组原样（旧行为零回归）',
+  mergeUpListNames([['2026']]).join('|'), '2026');
+// 端到端复现截图：旧缓存里全是伪行时，也绝不能只列 2026
+const R29_SHOT = mergeUpListNames([
+  ['2026', R29_HINT, R29_HINT],
+  ['2026', '2025', '2024', '合集'],
+  [],
+]);
+check('R29 截图复现：清单 = 2026 / 2025 / 2024 / 合集，不再只有 2026、也不再有伪目录',
+  R29_SHOT.join('|'), '2026|2025|2024|合集');
+check('R29 截图复现：伪目录行数量归零',
+  R29_SHOT.filter(n => isUpListPseudoName(n)).length, 0);
+
+console.log('--- 第二十九轮 ③：授权同形态父 URI 还原（生成上级路径）---');
+const R29_PICK = 'file://docs/storage/userExternal/' + M_HOST + '/' + M_TAIL;
+const R29_PICK_ENC = encodePathForm(R29_PICK);
+check('R29 父 URI：picker 原始 file://docs 形态保住了',
+  rootFormParentOf(R29_PICK, M_PARENT),
+  'file://docs/storage/userExternal/' + M_HOST + '/' + M_PARENT_TAIL);
+check('R29 父 URI：还原结果确实落在目标父层',
+  sameDirPath(rootFormParentOf(R29_PICK, M_PARENT), M_PARENT), true);
+check('R29 父 URI：百分号编码形态也能还原同层',
+  sameDirPath(rootFormParentOf(R29_PICK_ENC, M_PARENT), M_PARENT), true);
+check('R29 父 URI：编码形态还原后仍是编码串',
+  rootFormParentOf(R29_PICK_ENC, M_PARENT).includes('%5B'), true);
+check('R29 父 URI：挂载纯路径形态保住了',
+  rootFormParentOf(M_MOUNT, M_PARENT), M_PARENT);
+check('R29 父 URI：root 已在目标层时原样返回（直接把父层原始授权 URI 拿来试列）',
+  rootFormParentOf(M_PARENT, M_PARENT), M_PARENT);
+check('R29 父候选：先选父层再进子目录时，父层原始授权 URI 本身进入候选',
+  upParentCandidates(M_MOUNT, M_MOUNT, '', [M_PARENT]).includes(M_PARENT), true);
+check('R29 父 URI：scheme 授权形态（无挂载前缀）也还原到同层',
+  sameDirPath(rootFormParentOf(M_RAW, M_PARENT), M_PARENT), true);
+check('R29 父 URI：旁支 / 祖父 / 空串一律拒绝',
+  rootFormParentOf('/' + M_HOST + '/别的/2026', M_PARENT) === '' &&
+  rootFormParentOf('/' + M_HOST + '/图片档案', M_PARENT) === '' &&
+  rootFormParentOf('', M_PARENT) === '' &&
+  rootFormParentOf(M_RAW, '') === '', true);
+
+console.log('--- 第二十九轮 ④：父候选补全（父目录真列出来 = 天然含全部子目录）---');
+const R29_BASE = upParentCandidates(M_MOUNT, M_MOUNT, '', []);
+const R29_WITH = upParentCandidates(M_MOUNT, M_MOUNT, '', [R29_PICK, M_RAW]);
+check('R29 父候选：补出 picker 原始授权形态的父 URI',
+  R29_WITH.some(u => u.indexOf('file://docs/storage/userExternal/' + M_HOST + '/') === 0), true);
+check('R29 父候选：补出 scheme 授权形态的父 URI',
+  R29_WITH.some(u => u.indexOf('file://' + M_HOST + '/' + M_PARENT_TAIL) === 0), true);
+check('R29 父候选：候选数增加且不含重复',
+  R29_WITH.length > R29_BASE.length &&
+  new Set(R29_WITH).size === R29_WITH.length, true);
+check('R29 父候选：全部仍严格落在同一父层（不越级 / 不绕圈）',
+  R29_WITH.every(u => sameDirPath(u, M_PARENT)), true);
+check('R29 父候选：不含当前目录自身 / 祖父层',
+  R29_WITH.every(u => sameDirPath(u, M_MOUNT) === false && sameDirPath(u, M_GRAND) === false), true);
+check('R29 父候选：2 参数旧调用零回归',
+  upParentCandidates(M_MOUNT, M_RAW).every(u => sameDirPath(u, M_PARENT)), true);
+check('R29 父候选：loose 显式 target + roots 仍落在目标层',
+  upParentCandidates(M_MOUNT, M_MOUNT, M_PARENT, [R29_PICK]).every(u =>
+    sameDirPath(u, M_PARENT)), true);
+check('R29 父候选：非 NAS 普通路径零回归',
+  upParentCandidates(DEEP, 'file://docs' + DEEP + '/', '', []).length > 0, true);
+
+console.log('--- 第二十九轮 ⑤：Index.ets 静态接线 ---');
+check('R29 Index 引入三个新纯函数',
+  /isUpListPseudoName, mergeUpListNames, rootFormParentOf/.test(INDEX), true);
+check('R29 多层快照：接口 / 字段 / 上限齐备',
+  /interface UpDirSnapshot \{/.test(INDEX) &&
+  /private upDirCache: Array<UpDirSnapshot> = \[\];/.test(INDEX) &&
+  /const UP_DIR_CACHE_MAX: number = 24;/.test(INDEX), true);
+check('R29 openFolder 只从真实 rows 建快照（this.rows 污染源已切断）',
+  /this\.cacheUpDirSnapshot\(base, rows\);/.test(INDEX) &&
+  /this\.lastUpNames = cacheNames;/.test(INDEX) === false &&
+  /this\.lastUpPath = stripTrailingSlash\(this\.browseBase\);/.test(INDEX) === false, true);
+check('R29 快照方法过滤 ROW_UP 与伪行、同层合并、旧单槽兼容',
+  /isUpListPseudoName\(rn\.name\)/.test(INDEX) &&
+  /mergeUpListNames\(\[old\.names, names\]\)/.test(INDEX) &&
+  /sameDirPath\(this\.upDirCache\[i\]\.path, keyPath\)/.test(INDEX) &&
+  /this\.lastUpNames = names;/.test(INDEX), true);
+check('R29 upListNamesOf 聚合该层全部快照 + 旧单槽 + 当前目录',
+  /private upListNamesOf\(target: string, currentName: string\)/.test(INDEX) &&
+  /sameDirPath\(this\.upDirCache\[i\]\.path, target\)/.test(INDEX) &&
+  /sameDirPath\(this\.lastUpPath, target\)/.test(INDEX) &&
+  /groups\.push\(\[currentName\]\)/.test(INDEX) &&
+  /return mergeUpListNames\(groups\);/.test(INDEX), true);
+check('R29 showUpListInApp 逐条渲染聚合结果（当前目录用真实路径 / 兄弟目录用快照 URI 与真实种类）',
+  /this\.upListNamesOf\(target, curName\)/.test(UPLIST_CODE) &&
+  /this\.upListUriOf\(target, nm\)/.test(UPLIST_CODE) &&
+  /this\.upListKindOf\(target, nm,/.test(UPLIST_CODE) &&
+  /const isCurrent: boolean = nm === curName;/.test(UPLIST_CODE) &&
+  /kind: rowKind/.test(UPLIST_CODE), true);
+check('R29 快照带真实行种类：带点的兄弟目录名仍可点进入（ROW_OTHER 不可点）',
+  /kinds: Array<number>;/.test(INDEX) &&
+  /kinds\.push\(rn\.kind \?\? ROW_IMAGE\)/.test(INDEX) &&
+  /private upListKindOf\(target: string, name: string, fallback: number\)/.test(INDEX) &&
+  /snap\.kinds\[j\] === ROW_FOLDER \? ROW_FOLDER : ROW_OTHER/.test(INDEX), true);
+check('R29 showUpListInApp 不再有「只按单槽 exists 去重」的旧逻辑',
+  /let exists: boolean = false;/.test(UPLIST_CODE) === false, true);
+check('R29 showUpListInApp 说明行仍然只追加一条',
+  (UPLIST_CODE.match(/上层清单（APP 内）/g) || []).length, 1);
+check('R29 showUpListInApp 仍零 IO / 仍不弹系统选择器',
+  /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|this\.applyItems|DocumentViewPicker|\.select\(|PhotoViewPicker/.test(UPLIST_CODE) === false, true);
+check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp / 停目录轮询',
+  /this\.browseBase = target;/.test(UPLIST_CODE) &&
+  /this\.titlePath = target;/.test(UPLIST_CODE) &&
+  /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE) &&
+  /clearInterval\(this\.dirPollTimer\)/.test(UPLIST_CODE), true);
+check('R29 showUpListInApp 路径层级链仍只作诊断（不映射成目录行）',
+  /pathChainOf\(target\)/.test(UPLIST_CODE) &&
+  /for \(let i = 0; i < chain\.length; i\+\+\)/.test(UPLIST_CODE) === false &&
+  /chain\.length/.test(UPLIST_CODE), true);
+check('R29 browseUp 把 picker 原始授权 URI / browseDir / savedDirUri 交给候选生成',
+  /const upRoots: Array<string> = \[\];/.test(UP_FN) &&
+  /upRoots\.push\(this\.pickRootUri\)/.test(UP_FN) &&
+  /upRoots\.push\(this\.browseDir\)/.test(UP_FN) &&
+  /upRoots\.push\(this\.savedDirUri\)/.test(UP_FN) &&
+  /upParentCandidates\(current, rawUri, target, upRoots\)/.test(UP_FN) &&
+  /upParentCandidates\(current, rawUri, '', upRoots\)/.test(UP_FN), true);
+check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧锚点均未动',
+  /isStrictParentOf\(target, current\)/.test(UP_FN) &&
+  (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
+  /this\.pickRootUri = '';/.test(UP_FN), true);
+check('R29 构建标记 R29 且 R28 及更早旧包全部可从截图排除',
+  /const ESC_BUILD_TAG: string = 'R29';/.test(INDEX) &&
+  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+    INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
+
+console.log('--- 第二十九轮 ⑥：目录结构 / 命名 / 导航行为零回归 ---');
+check('R29 零回归：UP_LIST_TAG 仍是 ul1、抬头文案未改',
+  /const UP_LIST_TAG: string = 'ul1';/.test(INDEX) &&
+  inAppUpListHint('父层', 3, 'ul1') ===
+    'APP 内上层「父层」清单（3 项）· 点目录名进入 · 不弹系统选择器 · ul1', true);
+check('R29 零回归：清单计数仍是 rows.length - 2（.. 与说明行不计入）',
+  /inAppUpListHint\(targetName, rows\.length - 2, UP_LIST_TAG\)/.test(UPLIST_CODE), true);
+check('R29 零回归：volumeRootOf / dirLevelOf / upLevelOf 不变',
+  volumeRootOf(M_MOUNT) === M_VOLROOT && dirLevelOf(M_MOUNT) === 5 &&
+  upLevelOf(M_MOUNT) === M_PARENT && upNavStateOf(M_MOUNT) === UP_NAV_GO, true);
+check('R29 零回归：canonicalLevelKeyOf / sameDirPath / isStrictParentOf 不变',
+  canonicalLevelKeyOf(M_MOUNT) === M_LOGICAL &&
+  sameDirPath(M_RAW, M_MOUNT) && isStrictParentOf(M_PARENT, M_MOUNT), true);
+check('R29 零回归：encodePathForm / pathChainOf 不变',
+  encodePathForm(M_PARENT).includes('%5B') && pathChainOf(M_PARENT)[0] === M_VOLROOT, true);
+check('R29 零回归：非 NAS 卷根 / 文档 URI / 版本守卫 / R27 真异步 / R26 翻页',
+  volumeRootOf('/a/b/c') === '/' &&
+  realPathOf('file://docs/storage/Users/100/a') === '/storage/Users/100/a' &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /private readGuarded\(/.test(INDEX) &&
+  /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
+console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
+console.log('  ⚠️ 真机步骤：装 R29 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

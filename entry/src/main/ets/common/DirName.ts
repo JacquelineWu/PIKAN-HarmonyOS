@@ -598,9 +598,14 @@ export function isUpTargetOf(picked: string, current: string): boolean {
  *  2026-11-16 第二十八轮：旧版用 hierPathOf 严格字符串相等过滤，把
  *  `file://<host>/...` 授权形态与 `/storage/userExternal/<host>/...` 挂载形态
  *  判成不同层，scheme 候选全被误删，只剩 1 条未编码纯路径 → fs.listFile
- *  `13900002` → 降级伪清单。现改用 canonicalLevelKeyOf，并额外补百分号编码形态。 */
+ *  `13900002` → 降级伪清单。现改用 canonicalLevelKeyOf，并额外补百分号编码形态。
+ *
+ *  2026-11-16 第二十九轮：extraRoots 传入「picker 原始授权 URI」，
+ *  由 rootFormParentOf() 还原出与授权同形态的父层 URI。browseDir 会在每次
+ *  openFolder 时被覆写成子目录路径，原始授权形态容易丢；补上这一路候选，
+ *  父目录才真正有机会被 fs.listFile 列出来（列出即含该层全部子目录）。 */
 export function upParentCandidates(currentPath: string, rawUri: string,
-  explicitTarget?: string): string[] {
+  explicitTarget?: string, extraRoots?: Array<string>): string[] {
   const target: string = explicitTarget !== undefined && explicitTarget.length > 0
     ? explicitTarget : upLevelOf(currentPath);
   if (target.length === 0) {
@@ -638,6 +643,20 @@ export function upParentCandidates(currentPath: string, rawUri: string,
   // ⑤ 真实路径目标永远兜底，保证至少有一个 fs.listFile 能认的形态
   add(target);
   add(encodePathForm(target));
+  // ⑥ 第二十九轮：picker 原始授权 URI 的同形态父层写法。
+  //    授权是按 URI 字符串发放的，纯路径 / 换过 scheme 的写法往往拿不到授权；
+  //    这一路候选让 fs.listFile(父目录) 真正有机会成功 —— 一旦成功，
+  //    openFolder 会列出该层**全部**子目录，而不是只靠缓存拼出当前目录一个。
+  if (extraRoots !== undefined) {
+    for (let i = 0; i < extraRoots.length; i++) {
+      const rp: string = rootFormParentOf(extraRoots[i], target);
+      if (rp.length > 0) {
+        add(rp);
+        add(safeDecode(rp));
+        add(encodePathForm(rp));
+      }
+    }
+  }
   return out;
 }
 
@@ -749,4 +768,97 @@ export function pathChainOf(path: string): string[] {
 export function inAppUpListHint(dirName: string, count: number, tag: string): string {
   return 'APP 内上层「' + dirName + '」清单（' + count +
     ' 项）· 点目录名进入 · 不弹系统选择器 · ' + tag;
+}
+
+// --------------------------------------------------------------------
+// 第二十九轮：上层清单「完整性」纯函数（2026-11-16，R29）
+//
+// 真机截图（screenshot_20261116_045747）：父层 [青丘图鉴] Nine tail Photography
+// 的 APP 内清单只有 2026 一个真实目录，另混进两条带文件夹图标的
+// 「— 上层清单（APP 内）· 点目录名进入 · ul1 —」伪目录行。
+// 根因不在目录名筛选（源码里没有任何 2026 字面量过滤），而在：
+//   ① openFolder 缓存用的是 this.rows（上一屏 UI 行），APP 内清单态时里面
+//      含说明行 → 伪行被当成真实目录写进缓存；
+//   ② lastUpNames 是**单槽**，进入任一层就覆盖，父层那份完整清单丢失，
+//      showUpListInApp 的 sameDirPath 命中不了就只剩「恒列当前目录」= 2026；
+//   ③ showUpListInApp 渲染缓存时不辨真伪，把说明行画成可点文件夹。
+// 下面三个纯函数分别负责：伪行识别、多源清单聚合、授权同形态父 URI 还原。
+// --------------------------------------------------------------------
+
+/** APP 内上层清单里的「伪条目名」：空的、`..`、以及清单自己追加的说明行。
+ *  这些字符串来自清单视图本身，**不是**父目录的真实子目录，既不能写进
+ *  目录快照缓存，也不能被渲染成可点击的文件夹行。
+ *  ⚠️ 只按 APP 自己生成的说明行特征匹配，绝不用「含数字 / 含年份 / 含点号」
+ *  这类会误伤真实目录名的规则（真机上 `2025`、`4 中`、`Vol.2` 都是合法目录名）。 */
+export function isUpListPseudoName(name: string): boolean {
+  const s: string = name.trim();
+  if (s.length === 0 || s === '..' || s === '.') {
+    return true;
+  }
+  // 说明行：'— 上层清单（APP 内）· 点目录名进入 · ul1 —'（tag 可能升级）
+  if (s.indexOf('上层清单') >= 0 && s.indexOf('APP 内') >= 0) {
+    return true;
+  }
+  return false;
+}
+
+/** 聚合「同一父层的全部真实子目录名」。
+ *
+ *  groups 是多份来源（多层会话快照、同一层不同 URI 形态的多次列目录、
+ *  当前目录名…）。逐组按原顺序收纳、过滤伪行、按**原名**去重（不 trim 原名，
+ *  真机目录名可能带首尾空格），绝不因为后一份来源覆盖前一份而漏掉条目。
+ *  返回值可直接逐行渲染 —— 只要缓存里出现过，非 2026 的兄弟目录一定在。 */
+export function mergeUpListNames(groups: Array<Array<string>>): Array<string> {
+  const out: Array<string> = [];
+  const seen: Set<string> = new Set<string>();
+  for (let g = 0; g < groups.length; g++) {
+    const list: Array<string> = groups[g];
+    for (let i = 0; i < list.length; i++) {
+      const nm: string = list[i];
+      if (isUpListPseudoName(nm) || seen.has(nm)) {
+        continue;
+      }
+      seen.add(nm);
+      out.push(nm);
+    }
+  }
+  return out;
+}
+
+/** 用「已授权的原始目录 URI」还原目标父层的**同形态** URI。
+ *
+ *  picker 的逐 URI 授权按 URI 字符串发放：`file://<host>/.../子目录` 被授权，
+ *  换成纯路径 `/storage/userExternal/<host>/.../子目录` 去 listFile 往往就没授权。
+ *  而 openFolder 每次成功都会把 browseDir 覆写成子目录路径，原始授权形态会丢。
+ *  这里按规范层级键算出层级差，从 rootUri 字符串尾部剥掉多出的段数，
+ *  得到与授权 URI 完全同 scheme / 同编码习惯的父层写法。
+ *
+ *  rootUri 必须落在 target 层或 target 的子层；越级 / 旁支 / 判不出层级
+ *  一律返回空串，绝不凭空造路径。剥完再用 canonicalLevelKeyOf 复核落层。 */
+export function rootFormParentOf(rootUri: string, target: string): string {
+  const rootKey: string = canonicalLevelKeyOf(rootUri);
+  const targetKey: string = canonicalLevelKeyOf(target);
+  if (rootKey.length === 0 || targetKey.length === 0) {
+    return '';
+  }
+  if (rootKey !== targetKey && rootKey.indexOf(targetKey + '/') !== 0) {
+    return '';
+  }
+  let s: string = stripTrailingSlash(rootUri);
+  const q: number = s.indexOf('?');
+  if (q >= 0) {
+    s = s.substring(0, q);
+  }
+  const extra: number = rootKey.split('/').length - targetKey.split('/').length;
+  for (let i = 0; i < extra; i++) {
+    const j: number = s.lastIndexOf('/');
+    if (j < 0) {
+      return '';
+    }
+    s = j === 0 ? '/' : s.substring(0, j);
+  }
+  if (s.length === 0 || canonicalLevelKeyOf(s) !== targetKey) {
+    return '';
+  }
+  return s;
 }

@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R28` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R29` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,77 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第二十九轮：上层清单只列 `2026` 且混入伪目录 —— 多层真实清单快照 / 全子目录聚合 / 授权同形态父 URI（2026-11-16，R29）
+
+**复现路径**：`/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026`，点「往上层」进入父目录 `[青丘图鉴] Nine tail Photography`。
+该层除 `2026` 外还有其它兄弟目录，APP 内清单必须**全部列出**，不能只纳入 `2026`。
+
+### 截图证据（`@image#1:screenshot_20261116_045747_com.workbuddy.heicviewer.jpg`，R28 包）
+
+| 位置 | 读到的内容 | 含义 |
+|---|---|---|
+| 右下角诊断 | `100% R28 · full:F · win:T · keys4 · dsp:0 · hk:N · wf:T` | 确认装的是 R28 包，问题不是旧包残留 |
+| 顶栏 / 左栏抬头 | `[青丘图鉴] Nine tail Photography` / `APP 内上层「[青丘图鉴] Nine tail Photography」清单（3 项）· 点目录名进入 · 不弹系统选择器 · ul1` | R28 的卷根 / 父级修复已生效，**确实进对了父层**，但仍走 APP 内降级清单 |
+| 左栏清单 | `..` / `2026` / **两条带文件夹图标的** `— 上层清单（APP 内）· 点目录名进入 · ul1 —` / 一条真正的说明行 | 真实兄弟目录一个都没有，反而把清单自己追加的说明行缓存下来渲染成可点文件夹 |
+| 右侧预览 | `本层没有图片 · 点左窗文件夹进入子目录` | 降级清单态无真实图片，进一步说明父目录没有被真正列出来 |
+
+### 问题定位：**没有**任何「只保留 2026」的判断 / 筛选 / 配置
+
+源码里不存在 `2026` 字面量过滤（`2026` 只是当前目录名）。上层内容被压成单一 `2026` 是三处结构性缺陷叠加，全在**会话缓存与候选生成**，与图片解码、ESC、卷根判定无关：
+
+1. **缓存被 APP 内清单污染**：`openFolder()` 建立「上一层清单」时读的是 `this.rows`（**上一屏 UI 行**）。用户处在 APP 内清单态时，`this.rows` 里除了 `..` 与 `2026`，还含清单自己 push 的说明行 `— 上层清单（APP 内）… —`。它照样被写进 `lastUpNames`，下一次 `showUpListInApp()` 又把这行按 `ROW_FOLDER` 渲染 —— 截图里两条带文件夹图标的伪目录就是这么来的。
+2. **单槽缓存 + 命中判定把父层完整清单弄丢**：`lastUpPath` / `lastUpNames` 只有一个槽位，任何一次 `openFolder` 都覆盖它。用户从父层进入 `2026` 后，父层那份含全部兄弟目录的清单一旦被其它层覆盖，`showUpListInApp()` 的 `sameDirPath(lastUpPath, target)` 就命中不了；代码里**唯一恒定存在**的行是「恒列当前目录」，于是清单只剩 `2026`。这就是「上层内容被限制为单一 2026 目录」的直接成因。
+3. **父目录 URI 候选丢了授权形态**：picker 的 URI 授权按 URI 字符串发放，但 `openFolder()` 每次成功都会把 `browseDir` 覆写成子目录路径。R28 的 `upParentCandidates()` 只从 `browseDir` / 当前路径推父级，原始 `file://docs/...`、`file://<host>/...` 形态不再出现，`fs.listFile(父目录)` 全部失败 → 只能走 APP 内降级清单。**父目录真列不出来，就永远拿不到该层的全部子目录。**
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | ① 新增 `isUpListPseudoName()`：只按 APP 自己生成的说明行特征识别伪条目，绝不用「含数字 / 年份 / 点号」这类会误伤 `2025`、`4 中`、`Vol.2` 的规则；② 新增 `mergeUpListNames()`：多组来源逐组保序收纳、过滤伪行、按**原名**去重（不 trim，真机目录名可带首尾空格），一份都不漏；③ 新增 `rootFormParentOf()`：按规范层级键算层级差，从 picker 原始授权 URI 尾部剥段，还原出与授权**同 scheme / 同编码习惯**的父层 URI，越级 / 旁支 / 层级判不出一律返回空串；④ `upParentCandidates()` 增加可选 `extraRoots`，把上述同形态父 URI（含解码 / 百分号编码写法）补进候选，仍全部经 `canonicalLevelKeyOf` 严格同层过滤 |
+| `entry/src/main/ets/pages/Index.ets` | ① 新增 `UpDirSnapshot` 接口与 `upDirCache` **多层**真实清单快照（上限 24 层，含 `names` / `uris` / `kinds` 三列）；② `openFolder()` 改用本次 `fs.listFile` 真实结果建好的**局部 `rows`** 调 `cacheUpDirSnapshot(base, rows)`，彻底不碰 `this.rows`，过滤 `ROW_UP` 与伪行，同层快照按名字**合并**而非覆盖，并保留旧单槽兼容；③ 新增 `upListNamesOf()` / `upListUriOf()` / `upListKindOf()`：把目标层全部快照 + 旧单槽 + 当前目录名聚合，兄弟目录优先用当时真正能 `listFile` 的 base 拼出的 URI（保证「能访问」），并用 `statSync` 判出的真实种类渲染，带点目录名（`Vol.2`）不会被误判成不可点的 `ROW_OTHER`；④ `showUpListInApp()` 逐条渲染聚合结果，说明行仍只追加一条，当前目录仍用已知真实路径；⑤ `browseUp()` 把 `pickRootUri` / `browseDir` / `savedDirUri` 一起交给 `upParentCandidates()`，让父目录有机会被真正列出；⑥ `ESC_BUILD_TAG` → `R29` |
+| `tests/dirname.test.mjs` | 构建标记 `R28` → `R29` 并补 `R28` 旧包排除；更新 3 条因实现变化失效的结构护栏；新增第二十九轮 **55 条**断言（伪行识别 / 多源聚合完整无遗漏 / 截图端到端复现 / 授权同形态父 URI / 父候选补全 / Index 静态接线 / 目录结构与导航零回归） |
+| `README.md` | 抬头 `R28` → `R29`；新增本章 |
+
+**关键设计**：
+- `mergeUpListNames()` 对非 NAS 路径、单组输入逐字等价于旧行为；伪行判定只匹配 APP 自己生成的说明行，目录结构、目录名、排序、翻页、导航一律不动。
+- 多层快照用 `sameDirPath()`（R28 的规范层级键）判「同一层」，scheme / 逻辑 / 挂载三种写法归一，不会把别的层级混进清单。
+- `rootFormParentOf()` 的产物仍要过 `upParentCandidates()` 的同层过滤，绝不因为「补候选」引入越级 / 绕圈；`pickRootUri` 依旧只作候选来源，不作层级锚点，成功上移后照旧清空。
+- `showUpListInApp()` 仍是**零 IO**、不弹系统选择器、不动恢复模式；`UP_LIST_TAG` 保持 `ul1`，清单计数仍是 `rows.length - 2`，版本仍 `1.0.7` / `versionCode 7`。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 12 s 145 ms**（真实 `CompileArkTS` 7 s 300 ms），签名 HAP **899,710 bytes**；`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 `R29=1 / R28=0 / R27=0 / R26=0`；**0 ERROR**，仅剩既有 17 条告警（8 条 `preferences`、1 条 `READ_IMAGEVIDEO`、8 条 2in1 系统栏 API），告警行全部落在本轮**未改动**区域；新增的 `UpDirSnapshot` / `mergeUpListNames` / `rootFormParentOf` 零告警 |
+| **静态契约 + 纯函数** | **ALL PASS 1397 passed, 0 failed**（1342 → 1397，新增 55 条）；含 8 个兄弟目录 + 2 个补充目录的聚合断言、截图污染形态端到端复现（结果 `2026\|2025\|2024\|合集`、伪行归零）、`node --check` / `git diff --check` / 版本守卫全绿 |
+| **真机 NAS 多目录验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝、无 NAS 访问。**编译校验 ≠ 真机验证** |
+
+### 覆盖的验证场景（请在装有 `R29` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层，看右下角角标 | 出现 `R29`（仍是 `R28` / `R27` 说明装的是旧包） |
+| 2 | 打开复现路径 `…/[青丘图鉴] Nine tail Photography/2026` | 当前目录图片正常，与 R28 一致 |
+| 3 | 点「往上层」 | 进入 `[青丘图鉴] Nine tail Photography`，左栏抬头变成该父目录名 |
+| 4 | 看左栏清单 | 列出该层**全部**子目录：除 `2026` 外，所有非 2026 兄弟目录（年份目录 / 合集 / 其它命名）都在，一个不漏 |
+| 5 | 看清单里有没有伪目录 | **不再**出现任何 `— 上层清单（APP 内）· 点目录名进入 · ul1 —` 带文件夹图标的行；说明行最多一条 |
+| 6 | 点任一非 2026 兄弟目录 | 能正常进入该目录（用快照里的真实子项 URI），图片 / 子目录正常；点 `2026` 能回到原目录 |
+| 7 | 逐级连点「往上层」 | `2026` → `[青丘图鉴]…` → `4 中` → `Collection` → `图片档案` → `192.168.100.61`（卷根）后停下，不越级、不绕圈 |
+| 8 | 先在父层浏览一次（让该层完整清单进入快照），再进入 `2026`，再反复进出其它子目录后点「往上层」 | 父层清单仍**完整**（多层快照不被覆盖），不会退化成只剩 `2026` |
+
+> 若「往上层」这次真的把父目录列出来了（`fs.listFile` 成功），左栏就是系统返回的完整目录表，天然包含全部兄弟目录；
+> 若仍因逐 URI 授权拿不到而进入 APP 内清单态，左栏也应给出会话内聚合出的全部真实子目录，且不再有其它层级的文件夹名。
+
+**授权边界（必须说清，不能夸大）**：picker 的目录授权通常只覆盖「选中的那一层及其子层」，不一定覆盖父层。
+若用户是**直接选中 `…/2026`** 进入的，`fs.listFile(父层)` 在任何 URI 写法下都拿不到授权，
+APP 也就无从得知该层还有哪些兄弟目录 —— 此时左栏只能给出会话内确实列过的真实子目录，
+不会凭空编造目录名。R29 新增的 `extraRoots` 专门覆盖另一种更常见的流程：
+用户**先选中父层 `[青丘图鉴] Nine tail Photography`**（`savedDirUri` 就是父层原始授权 URI），
+再点进 `2026`，此时 `rootFormParentOf()` 直接把该授权 URI 作为父层候选交给 `fs.listFile`，
+父层能被真正列出 → 全部兄弟目录自然到齐。
+若真机上确认属于「直接选中子目录」的情形，请用「选择文件夹」打开父层一次，
+该层完整清单即进入多层快照，此后反复进出子目录都不会再退化成只剩 `2026`。
 
 ## 第二十八轮：NAS 路径点「往上层」显示错误文件夹清单 —— 挂载前缀卷根 / 规范层级键 / 真实子目录（2026-11-16，R28）
 
