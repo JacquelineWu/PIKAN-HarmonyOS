@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R27` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R28` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,80 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第二十八轮：NAS 路径点「往上层」显示错误文件夹清单 —— 挂载前缀卷根 / 规范层级键 / 真实子目录（2026-11-16，R28）
+
+**复现路径**：`/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026`。
+点「往上层」应进入父目录 `…/[青丘图鉴] Nine tail Photography` 并列出其真实子目录。
+
+### 截图证据（`@image#1:screenshot_20261116_031348…jpg`）
+
+| 位置 | 读到的内容 | 含义 |
+|---|---|---|
+| 左栏抬头 | `2026` + `APP 内上层「2026」清单（10 项）· 点目录名进入 · 不弹系统选择器 · ul1` | 走的是**降级 APP 内清单**，且目标层级没有真正上移 |
+| 左栏列表 | `..` → `/` → `storage` → `userExternal` → `192.168.100.61` → `图片档案` → `Collection` → `4 中` → `[青丘图鉴] Nine tail Photography` → `2026` → `编号202618 模特 奶茶` | 把**整条祖先路径链**当成了「上层文件夹」逐行列出，正是用户说的「显示其他层级的文件夹列表」 |
+| 底部状态栏 | `无法列出该目录 · {"code":13900002}；可点「选择文件夹」重新选择` | 父目录 URI 所有候选 `fs.listFile` 全部失败，才触发降级清单 |
+| 右侧预览 | `本层没有图片 · 点左窗文件夹进入子目录` | 清单态没有真实图片，进一步说明没有真正进入父目录 |
+
+### 问题定位（三处叠加，全在**层级判定 / URI 形态**，与图片解码、缓存、ESC 无关）
+
+1. **真机 NAS 路径不是 `/<host>/...`，而是挂在系统目录之下**：
+   `/storage/userExternal/192.168.100.61/图片档案/Collection/4 中/…`。
+   第八轮（`2026-11-12`）的 `volumeRootOf()` 只认 `parts[1]` 是网络主机的情形，
+   遇到 `parts[1] === 'storage'` 就退回通用 POSIX 卷根 `/`。于是 `pathChainOf()`
+   从 `/` 起逐段累加，把 `/`、`storage`、`userExternal`、`192.168.100.61`
+   四层**系统 / 主机目录**当成可浏览文件夹塞进「上层清单」；`dirLevelOf()` 也从
+   5 虚高到 8，层级诊断全错。
+2. **同层判定把「授权形态」与「挂载形态」判成不同层**：
+   picker 逐 URI 授权给的是 `file://192.168.100.61/…`，`hierPathOf()` 得
+   `/192.168.100.61/…`；而 `fs.listFile` 实际用的 `browseBase` 是
+   `/storage/userExternal/192.168.100.61/…`。旧 `sameDirPath()` 直接比这两个字符串，
+   **永远不相等** —— `upParentCandidates()` 把最可能仍带授权的 `file://<host>/…`
+   父 URI 全部过滤掉，只剩 1 条未编码纯路径。带**中文 + 空格 + 方括号**的
+   `…/[青丘图鉴] Nine tail Photography` 在 URI 形态下需要百分号编码，未编码写法
+   直接 `13900002`，整批候选全灭 → 降级伪清单。
+3. **降级清单把「路径链」当成了「目录项」**：`showUpListInApp()` 无条件
+   `pathChainOf(target)` 逐层 `push` 成 `ROW_FOLDER`。即便父目录真的列不出来，
+   也不该把祖先层级画成父目录的子目录 —— 这是截图错误画面的直接渲染来源。
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | ① 新增 `nasHostIndexIn()`：在路径前 4 段内定位网络主机段，兼容 `/<host>/…` 与 `/storage/userExternal/<host>/…`，且不误判深层同名目录；② `nasHostOf()` 改为扫描前 4 段；③ `volumeRootOf()` 用 `nasHostIndexIn()` 取卷根（含挂载前缀），非 NAS 路径逐字不变；④ 新增 `canonicalLevelKeyOf()`：剥掉挂载前缀，让 scheme / 逻辑 / 挂载三种写法归一到同一层级键；⑤ `sameDirPath()` 改用它；⑥ 新增 `encodePathForm()`：逐段 `encodeURIComponent`，空格→`%20`、方括号→`%5B/%5D`、中文→UTF-8 `%XX`，保留 `scheme://` 与 `/`，已编码串返回空串绝不重复编码；⑦ `upParentCandidates()` 的「同层过滤」改用规范键，并补 `file://<host>/…`、逻辑路径、挂载路径、两种百分号编码形态共 5 类候选；⑧ 新增 `isStrictParentOf()`：校验恰好剥一层，杜绝原地不动 / 越级 / 旁支 |
+| `entry/src/main/ets/pages/Index.ets` | ① `browseUp()` 接入 `isStrictParentOf(target, current)` 父级真值校验，不通过则给 `up BADLEVEL` 诊断并拒绝上移（仅严格层级链 GO 态启用，`loose` / 卷根判不出时跳过，其它导航零改动）；② `showUpListInApp()` **彻底切断「层级链 → 目录清单」映射**：左栏只列父目录真实子目录（会话内 `lastUpNames` 缓存 + 恒列当前目录并按名字去重），`pathChainOf(target)` 仅用于 `diagLine` 层级计数；③ 引入 `isStrictParentOf`；④ `ESC_BUILD_TAG` → `R28` |
+| `tests/dirname.test.mjs` | 23 处构建标记 `R27` → `R28` 并补 `R27` 旧包排除；更新第八轮 NAS 静态护栏（旧护栏钉死 `isNetworkHost(parts[1])` 字面量，改为要求通用扫描 + 三个新纯函数）；新增第二十八轮 **68 条**断言（复现路径混合目录名、挂载形态卷根 / 层级 / 清单、规范层级键、同层判定、百分号编码、父级真值、父 URI 候选、Index 静态接线、其它导航零回归） |
+| `README.md` | 抬头 `R27` → `R28`；新增本章 |
+
+**明确不动**：`openFolder()` 的候选试列逻辑、`fs.listFile` 调用、当前目录读取与图片解码、
+`RawStore` 真异步读取（R27）、`RawCache` 超时闸门、方向键翻页（R26）、ESC 两态退出全链路、
+诊断层开关（R25）、`PRELOAD_*` 与 `RAW_CACHE_*` 常量、`bulkIoAllowed()` ro1 总闸门、
+启动恢复路径、`InteractionPlan.ts`、`AppScope/app.json5`（版本仍 `1.0.7` / `versionCode 7`）。
+「往上层」到卷根 / 到顶 / UNKNOWN 宽松父级等既有导航行为一律保留。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 14 s 804 ms**（真实 `CompileArkTS` 8 s 538 ms），签名 HAP **883,496 bytes**；`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 `R28=1 / R27=0`；**0 ERROR**，仅剩既有 17 条告警（8 条 `preferences` 可能抛异常、1 条 `READ_IMAGEVIDEO` 权限、8 条 2in1 系统栏 API 不可用），告警行全部落在本轮**未改动**区域；`encodeURIComponent` 等新增调用零告警 |
+| **静态契约 + 纯函数** | **ALL PASS 1342 passed, 0 failed**（1274 → 1342，新增 68 条）；`node --check` / `git diff --check` / 注释剥离后括号净平衡 / 版本守卫全绿 |
+| **真机 NAS「往上层」验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝、无注入工具、无法在真机打开 NAS 目录。**编译校验 ≠ 真机验证** |
+
+### 覆盖的验证场景（请在装有 `R28` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层，看右下角角标 | 出现 `R28`（若仍是 `R27` / `R26` 说明装的是旧包） |
+| 2 | 打开复现路径 `…/[青丘图鉴] Nine tail Photography/2026`，确认当前目录图片正常 | 当前目录读取与 R27 一致，零回归 |
+| 3 | 点「往上层」 | 进入 `[青丘图鉴] Nine tail Photography`；左栏抬头变成该父目录名 |
+| 4 | 看左栏清单 | 只列父目录的**真实子目录**（含 `2026`），**不再**出现 `/`、`storage`、`userExternal`、`图片档案`、`Collection`、`4 中` 等祖先层级 |
+| 5 | 看底部状态栏 | 不再出现 `无法列出该目录 · {"code":13900002}` |
+| 6 | 逐级连点「往上层」 | `2026` → `[青丘图鉴] Nine tail Photography` → `4 中` → `Collection` → `图片档案` → `192.168.100.61`（卷根）后停下，不越级、不绕圈 |
+| 7 | 点清单里的 `2026` 行 | 回到原目录，图片正常显示 |
+| 8 | 换一个含中文 / 空格 / 方括号 / 英文 / 数字混合目录名的 NAS 路径重复 2–6 | 父目录层级与显示名始终精确，不被拆解或误判成主机 |
+
+> 「往上层」若因上级逐 URI 授权确实拿不到而进入 APP 内清单态，左栏也只会显示
+> 父目录的已知真实子目录与 `..` 行，不再显示任何其他层级的文件夹列表。
 
 ## 第二十七轮：NAS 路径 `THREAD_BLOCK_6S` —— 原始档案读取真异步化 + 到点即放弃（2026-11-16，R27）
 

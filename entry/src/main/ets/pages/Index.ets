@@ -59,7 +59,7 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
   upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
   realPathOf, hierPathOf, textWidthVp, listWidthForNames,
-  sameEntryNames } from '../common/DirName';
+  isStrictParentOf, sameEntryNames } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -121,7 +121,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R27';
+const ESC_BUILD_TAG: string = 'R28';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -6292,7 +6292,24 @@ struct Index {
       target = upLooseParentOf(current);
       loose = target.length > 0;
     }
-    const canUp: boolean = target.length > 0;
+    // 2026-11-16 第二十八轮：父级真值校验 —— target 必须严格是 current 的
+    // **直接父级**（恰好剥一层）。NAS 路径同时存在 scheme 授权形态、逻辑形态
+    // `/<host>/...` 与挂载形态 `/storage/userExternal/<host>/...`，层级键一旦
+    // 对不上就可能落到错误层级（原地不动 / 越级），最终把「其他层级的文件夹
+    // 列表」当成上层清单显示。canonicalLevelKeyOf 已抹平形态差异，这里做硬校验。
+    // 仅严格层级链（GO）启用；UNKNOWN 的宽松父级与判不出卷根的形态保持原行为，
+    // 其它导航行为零改动。
+    const strictParent: boolean = loose || root.length === 0 ||
+      isStrictParentOf(target, current);
+    if (target.length > 0 && !strictParent) {
+      this.status = '往上层：父目录层级校验未通过（当前目录标识与目标层级不一致）· ' +
+        '请用「选择文件夹」重新进入该目录后再试';
+      this.diagLine = 'up BADLEVEL | ' + UP_NAV_TAG + ' | L' + level +
+        '→L' + dirLevelOf(target) + ' | cur=' + ellipsizeMiddle(current, 30) +
+        ' | target=' + ellipsizeMiddle(target, 30) + ' | v' + APP_VERSION;
+      return;
+    }
+    const canUp: boolean = target.length > 0 && strictParent;
     // canGoUp 只是信息状态（状态栏 / 诊断串），按钮本身永不置灰 / 永不禁用。
     this.canGoUp = canUp;
     this.diagLine = 'up START | ' + UP_NAV_TAG + ' | st=' + state +
@@ -6377,14 +6394,7 @@ struct Index {
     parents: string[], state: number, level: number): void {
     const rows: ImageItem[] = [];
     rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
-    // ① 路径层级：卷根 → … → 目标父级，每一级都是可点的目录行。
-    const chain: string[] = pathChainOf(target);
-    for (let i = 0; i < chain.length; i++) {
-      const p: string = chain[i];
-      rows.push({ uri: p, name: baseName(p), size: -1, mtime: 0,
-        kind: ROW_FOLDER, itemIndex: -1 });
-    }
-    // ② 会话内缓存命中：把上一层真实的档案清单也列出来（这才是完整清单）。
+    // ① 父目录的**真实子目录**：会话内曾在这一层列过，就照原样还原完整清单。
     const cached: boolean = this.lastUpNames.length > 0 &&
       sameDirPath(this.lastUpPath, target);
     if (cached) {
@@ -6398,11 +6408,30 @@ struct Index {
         rows.push({ uri: stripTrailingSlash(target) + '/' + nm, name: nm,
           size: -1, mtime: 0, kind: isFile ? ROW_OTHER : ROW_FOLDER, itemIndex: -1 });
       }
-    } else if (current.length > 0) {
-      // 至少把「当前目录」作为目标父级的已知子目录列出来，点一下就能回去。
-      rows.push({ uri: current, name: baseName(current), size: -1, mtime: 0,
-        kind: ROW_FOLDER, itemIndex: -1 });
     }
+    // ② 当前目录恒作为目标父级的一个已知真实子目录列出（点一下就能回去），
+    //    且与 ① 缓存条目按名字去重。第二十八轮：即使缓存命中也保证能回刚才那层。
+    if (current.length > 0) {
+      const curName: string = baseName(current);
+      let exists: boolean = false;
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i].name === curName) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) {
+        rows.push({ uri: current, name: curName, size: -1, mtime: 0,
+          kind: ROW_FOLDER, itemIndex: -1 });
+      }
+    }
+    // ③ 路径层级链**只作诊断**，绝不再当成目录项列出来。
+    //    旧版无条件 pathChainOf(target) 逐层 push ROW_FOLDER，把 `/`、`storage`、
+    //    `userExternal`、`192.168.100.61`、`图片档案`、`Collection`、`4 中`
+    //    这些**祖先层级**全画成「上层文件夹」—— 正是本轮用户截图里的错误画面。
+    //    volumeRootOf 已修正 NAS 卷根，这里再彻底切断「层级链 → 目录清单」的映射：
+    //    左栏只呈现父目录的真实子目录，不再显示任何其他层级的文件夹列表。
+    const chain: string[] = pathChainOf(target);
     // ③ 一行说明：明确告诉用户清单在 APP 内、不会弹系统选择器。
     rows.push({ uri: '', name: '— 上层清单（APP 内）· 点目录名进入 · ' + UP_LIST_TAG + ' —',
       size: -1, mtime: 0, kind: ROW_OTHER, itemIndex: -1 });
@@ -6443,7 +6472,7 @@ struct Index {
     this.diagLine = 'up LIST | ' + UP_LIST_TAG + ' | st=' + state +
       ' | L' + level + '→L' + dirLevelOf(target) +
       ' | cached=' + (cached ? '1' : '0') + ' | rows=' + rows.length +
-      ' | no-picker | v' + APP_VERSION;
+      ' | chain=' + chain.length + ' | no-picker | v' + APP_VERSION;
     hilog.info(DOMAIN, TAG, 'up list in app: %{public}d rows target=%{public}s cached=%{public}s',
       rows.length, target, cached ? '1' : '0');
   }

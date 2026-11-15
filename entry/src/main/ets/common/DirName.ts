@@ -122,9 +122,27 @@ export function isNetworkHost(seg: string): boolean {
   return false;
 }
 
+/** 在按 '/' 切好的路径段里找第一个网络主机段的下标；找不到返回 -1。
+ *
+ *  2026-11-16 第二十八轮：鸿蒙把网络卷**挂在系统目录之下**，真机实测形态是
+ *  `/storage/userExternal/192.168.100.61/图片档案/...`，主机段在 parts[3]，
+ *  旧版只看 parts[1]（= `storage`）所以完全认不出 NAS。这里从 1 起扫到前 4 段：
+ *  既覆盖 `/<host>/...` 与 `/storage/userExternal/<host>/...`，又不会把深层里
+ *  恰好长得像 IP / 域名的普通目录名误判成主机。parts[0] 是绝对路径的空串。 */
+function nasHostIndexIn(parts: string[]): number {
+  const limit: number = parts.length < 4 ? parts.length : 4;
+  for (let i = 1; i < limit; i++) {
+    if (isNetworkHost(parts[i])) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 /** 从 NAS 路径 / URI 里抽出网络主机段（不含斜杠）；非 NAS 返回 ''。
  *  覆盖 `/192.168.100.61/图片档案/...`、`file://192.../...`、`smb://...`、
- *  UNC `\\192.168.100.61\图片档案\...`、`//192.168.100.61/图片档案/...`。 */
+ *  UNC `\\192.168.100.61\图片档案\...`、`//192.168.100.61/图片档案/...`，
+ *  以及第二十八轮新增的挂载形态 `/storage/userExternal/192.168.100.61/图片档案/...`。 */
 export function nasHostOf(p: string): string {
   const s: string = stripTrailingSlash(p);
   const schemeAt: number = s.indexOf('://');
@@ -135,9 +153,15 @@ export function nasHostOf(p: string): string {
     const t: string = s.split('\\').join('/');
     rest = t.indexOf('//') === 0 ? t.substring(2) : (t.charAt(0) === '/' ? t.substring(1) : t);
   }
-  const slash: number = rest.indexOf('/');
-  const first: string = slash >= 0 ? rest.substring(0, slash) : rest;
-  return isNetworkHost(first) ? first : '';
+  // 不再只认第一段：挂载形态的前几段是 storage / userExternal 这类系统目录。
+  const parts: string[] = rest.split('/');
+  const limit: number = parts.length < 4 ? parts.length : 4;
+  for (let i = 0; i < limit; i++) {
+    if (isNetworkHost(parts[i])) {
+      return parts[i];
+    }
+  }
+  return '';
 }
 
 /** 把 `file://docs/...` 文档 URI、NAS URI / UNC 还原成「层级计算用」的真实路径。
@@ -310,6 +334,80 @@ export function hierPathOf(path: string): string {
   return hierSlashes(realPathOf(path));
 }
 
+/** 「同层判定」用的规范层级键：剥掉 NAS 挂载前缀，只留从主机段开始的层级。
+ *
+ *  2026-11-16 第二十八轮。真机上同一个 NAS 目录会同时存在两种写法：
+ *    · picker 逐 URI 授权的形态 `file://192.168.100.61/图片档案/.../2026`
+ *      → hierPathOf 得 `/192.168.100.61/图片档案/.../2026`；
+ *    · fs.listFile 实际用的挂载路径 `/storage/userExternal/192.168.100.61/.../2026`
+ *      → hierPathOf 得 `/storage/userExternal/192.168.100.61/.../2026`。
+ *  旧 sameDirPath() 直接比 hierPathOf 字符串，两者**永远不相等**，于是
+ *  upParentCandidates() 把「最可能仍带授权」的 scheme 形态父 URI 全部过滤掉，
+ *  只剩一条纯路径兜底；fs.listFile 对带空格 / 方括号 / 中文的未编码纯路径报
+ *  `13900002`，最终降级成 APP 内伪清单 —— 这就是本轮 appfreeze 之外的另一半根因。
+ *  非 NAS 路径原样返回 hierPathOf，行为与旧版逐字一致。 */
+export function canonicalLevelKeyOf(p: string): string {
+  const s: string = stripTrailingSlash(hierPathOf(p));
+  if (s.length === 0) {
+    return '';
+  }
+  const parts: string[] = s.split('/');
+  const hostIdx: number = nasHostIndexIn(parts);
+  if (hostIdx > 0) {
+    return '/' + parts.slice(hostIdx).join('/');
+  }
+  return s;
+}
+
+/** 生成「百分号编码」的 URI 写法：空格 → %20、方括号 → %5B/%5D、中文 → UTF-8 %XX。
+ *  保留 `scheme://` 与路径分隔符；已含 `%XX` 的串返回空串（绝不重复编码）。
+ *
+ *  NAS 上「中文 + 空格 + 方括号 + 英文 + 数字」混合目录名（例如
+ *  `[青丘图鉴] Nine tail Photography`、`4 中`）在 fs.listFile 的某些 URI 形态下
+ *  必须编码才认得，未编码写法直接 `13900002`。逐段 encodeURIComponent 不会
+ *  把 `/` 编掉，也不会动 scheme，解码侧 realPathOf 的 safeDecode 能还原。 */
+export function encodePathForm(p: string): string {
+  if (p.length === 0 || p.indexOf('%') >= 0) {
+    return '';
+  }
+  const at: number = p.indexOf('://');
+  const head: string = at >= 0 ? p.substring(0, at + 3) : '';
+  const rest: string = at >= 0 ? p.substring(at + 3) : p;
+  const parts: string[] = rest.split('/');
+  let out: string = head;
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) {
+      out += '/';
+    }
+    try {
+      out += encodeURIComponent(parts[i]);
+    } catch (e) {
+      return '';
+    }
+  }
+  return out;
+}
+
+/** 「往上层」父级真值校验：parent 必须严格是 current 的**直接父级**（恰好剥一层）。
+ *
+ *  用 canonicalLevelKeyOf 兼容 NAS 挂载前缀 / scheme / 编码形态差异后，再要求：
+ *  current 以 parent + '/' 开头，且余下部分不再含 '/'（即只多一级）。
+ *  任何「原地不动 / 越级 / 旁支 / 卷根之上」都会返回 false，调用方据此拒绝上移，
+ *  绝不把错误层级当成父目录显示成清单。非 NAS 路径同样适用。 */
+export function isStrictParentOf(parent: string, current: string): boolean {
+  const p: string = canonicalLevelKeyOf(parent);
+  const c: string = canonicalLevelKeyOf(current);
+  if (p.length === 0 || c.length === 0 || p === c) {
+    return false;
+  }
+  const prefix: string = p === '/' ? '/' : p + '/';
+  if (c.indexOf(prefix) !== 0) {
+    return false;
+  }
+  const tail: string = c.substring(prefix.length);
+  return tail.length > 0 && tail.indexOf('/') < 0;
+}
+
 /** 逻辑卷根 —— 「往上层」能到达的最高层（Windows 的 C:\ 对应物）。
  *  · Windows 盘符路径 `C:/Users/...` → `C:`（盘符根，再往上是「此电脑」，不属于目录层级）；
  *  · 鸿蒙用户卷 `/storage/(Users|media|emulated)/<id>/...` → `/storage/<bucket>/<id>`，
@@ -341,9 +439,15 @@ export function volumeRootOf(path: string): string {
       (parts[2] === 'Users' || parts[2] === 'media' || parts[2] === 'emulated')) {
     return '/' + parts[1] + '/' + parts[2] + '/' + parts[3];
   }
-  // parts[1] 是 NAS 主机段（含卷根自身 `/192.168.100.61` 的 parts.length===2）
-  if (parts.length >= 2 && parts[0] === '' && isNetworkHost(parts[1])) {
-    return '/' + parts[1];
+  // 2026-11-16 第二十八轮：NAS 主机段**未必在 parts[1]**。
+  // 旧实现只认 `/192.168.100.61/...`，而真机把网络卷挂在
+  // `/storage/userExternal/192.168.100.61/...` 之下，parts[1] 是 `storage`，
+  // 于是卷根被判成 `/` —— pathChainOf() 凭空把 `/`、`storage`、`userExternal`、
+  // `192.168.100.61` 全部当成可浏览目录列进「上层清单」，正是用户截图里
+  // 「显示其他层级的文件夹列表」的直接成因。卷根一律取到主机段（含挂载前缀）。
+  const hostIdx: number = nasHostIndexIn(parts);
+  if (hostIdx > 0) {
+    return '/' + parts.slice(1, hostIdx + 1).join('/');
   }
   return '/';
 }
@@ -458,10 +562,13 @@ export function upLooseParentOf(path: string): string {
 }
 
 /** 两个 uri / 路径是否指向同一个目录（同一层级、同一位置）。
- *  用于校验 picker 补授权时选中的确实是我们算出的那一层。 */
+ *  用于校验 picker 补授权时选中的确实是我们算出的那一层。
+ *  2026-11-16 第二十八轮：改用 canonicalLevelKeyOf —— NAS 的 scheme 授权形态
+ *  与 /storage/userExternal/<host> 挂载形态现在判为同层，父 URI 候选不会被误删；
+ *  非 NAS 路径的键值与旧版 hierPathOf 完全相同，零回归。 */
 export function sameDirPath(a: string, b: string): boolean {
-  const ka: string = stripTrailingSlash(hierPathOf(a));
-  const kb: string = stripTrailingSlash(hierPathOf(b));
+  const ka: string = canonicalLevelKeyOf(a);
+  const kb: string = canonicalLevelKeyOf(b);
   return ka.length > 0 && ka === kb;
 }
 
@@ -483,10 +590,15 @@ export function isUpTargetOf(picked: string, current: string): boolean {
 
 /** 「往上层」时逐个尝试的候选：全部是目标父层（默认 upLevelOf(currentPath)）的不同 URI 写法
  *  （保留 scheme / 编码的形态最可能仍带 picker 逐 URI 授权）。
- *  任何候选都必须通过 sameDirPath 校验落在同一层；层级不符、等于自身、
+ *  任何候选都必须通过 canonicalLevelKeyOf 校验落在同一层；层级不符、等于自身、
  *  等于当前目录的一律剔除 —— 从源头上杜绝越级与循环。
  *  explicitTarget：UNKNOWN 态（卷根判不出）时由调用方传入 upLooseParentOf 的结果，
- *  否则 upLevelOf 为空会直接返回 []，按钮点了永远没反应。 */
+ *  否则 upLevelOf 为空会直接返回 []，按钮点了永远没反应。
+ *
+ *  2026-11-16 第二十八轮：旧版用 hierPathOf 严格字符串相等过滤，把
+ *  `file://<host>/...` 授权形态与 `/storage/userExternal/<host>/...` 挂载形态
+ *  判成不同层，scheme 候选全被误删，只剩 1 条未编码纯路径 → fs.listFile
+ *  `13900002` → 降级伪清单。现改用 canonicalLevelKeyOf，并额外补百分号编码形态。 */
 export function upParentCandidates(currentPath: string, rawUri: string,
   explicitTarget?: string): string[] {
   const target: string = explicitTarget !== undefined && explicitTarget.length > 0
@@ -494,15 +606,16 @@ export function upParentCandidates(currentPath: string, rawUri: string,
   if (target.length === 0) {
     return [];                          // 真的没有父级：没有候选
   }
-  const curKey: string = stripTrailingSlash(hierPathOf(currentPath));
+  const curKey: string = canonicalLevelKeyOf(currentPath);
+  const targetKey: string = canonicalLevelKeyOf(target);
   const out: string[] = [];
   const seen: Set<string> = new Set<string>();
   const add = (s: string): void => {
     if (s.length === 0 || seen.has(s)) {
       return;
     }
-    const k: string = stripTrailingSlash(hierPathOf(s));
-    if (k.length === 0 || k === curKey || !sameDirPath(s, target)) {
+    const k: string = canonicalLevelKeyOf(s);
+    if (k.length === 0 || k === curKey || k !== targetKey) {
       return;
     }
     seen.add(s);
@@ -515,14 +628,16 @@ export function upParentCandidates(currentPath: string, rawUri: string,
     const p: string = j === 0 ? '/' : r.substring(0, j);
     add(p);
     add(safeDecode(p));                 // ② 解码写法（中文 / %20 目录名）
+    add(encodePathForm(p));             // ③ 百分号编码写法（空格 / 方括号 / 中文）
   }
-  // ③ 其它已知写法，仍按「同一层」过滤
+  // ④ 其它已知写法，仍按「同一层」过滤
   const extra: string[] = parentDirCandidates(rawUri).concat(parentDirCandidates(currentPath));
   for (let i = 0; i < extra.length; i++) {
     add(extra[i]);
   }
-  // ④ 真实路径目标永远兜底，保证至少有一个 fs.listFile 能认的形态
+  // ⑤ 真实路径目标永远兜底，保证至少有一个 fs.listFile 能认的形态
   add(target);
+  add(encodePathForm(target));
   return out;
 }
 
