@@ -107,6 +107,13 @@ import { BusinessError } from '@ohos.base';
 
 const TAG = 'HeicViewer';
 const DOMAIN = 0x0000;
+/** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
+ *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
+ *  进出全屏后用 focusControl.requestFocus(ROOT_FOCUS_ID) 把焦点抢回来。 */
+const ROOT_FOCUS_ID: string = 'heicRootKeys';
+/** 第二十轮：全屏切换后重聚焦的延时（ms）。等 ArkUI 完成整块布局重建再请求焦点，
+ *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
+const ESC_REFOCUS_DELAY_MS: number = 120;
 
 /** 版本号（与 AppScope/app.json5 的 versionName 保持一致），用于窗口标题栏。
  *  Win64 版 3ea7419 起标题栏带版本号；鸿蒙没有「读取程序集版本」的等价物，故用常量。 */
@@ -1782,6 +1789,18 @@ struct Index {
   /** 最近一次「全屏→普通」退出的时刻（仅日志 / 诊断；第十八轮起不再参与 ESC
    *  分派，避免时间冷却误吞用户主动按键），0 = 从未退出。 */
   private lastFullExitAt: number = 0;
+  // ---- 第二十轮：ESC 真机链路诊断（界面状态栏 + hilog ESCDBG 双通道，可回传断点）----
+  /** 收到的 ESC（含 Down/Up）累计次数，只在按 ESC 时递增。 */
+  private escSeen: number = 0;
+  /** 界面可见的链路诊断串，例如 `ESC#2 full=F act=3 → quitApp → terminateSelf()`。
+   *  真机按两次 ESC 后若 APP 没退出，把状态栏这行截图回传即可定位断在事件 / 分派 / 退出哪一环。 */
+  @State escDiag: string = '';
+  /** 本次按键的 Down 是否已由 preIme 通道处理（防同一事件被两个通道各处理一次）。 */
+  private escHandledByPreIme: boolean = false;
+  /** 本轮 ESC 的 Down 是否已处理：用于兼容「只派发 KeyType.Up」的 2in1 键盘。 */
+  private escDownHandled: boolean = false;
+  /** 全屏切换后重聚焦的延时句柄（等 UI 重建完成）。 */
+  private keyRefocusTimer: number = -1;
 
   // ---- 第十六轮：放大镜 >1:1 重采样专用高分辨率图源 ----
   /** 按放大后像素需求重新解码的一张 PixelMap，供放大镜圆内绘制（1:1 旁路时不生成）。
@@ -1960,6 +1979,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.stopSlide();
+    this.clearKeyRefocusTimer();
     if (this.dirPollTimer !== -1) {
       clearInterval(this.dirPollTimer);
       this.dirPollTimer = -1;
@@ -6254,25 +6274,47 @@ struct Index {
   }
 
   /** 退出应用。Esc（非全屏时）触发。
-   *  `terminateSelf()` 是 UIAbility 的能力，故要把 UI 上下文转回 UIAbilityContext 才能调；
-   *  它返回 Promise 且可能失败（例如进程正在被系统回收），失败只记日志，不做任何 UI 提示。
-   *  注意：必须 `await flushPos()` 之后再退出 —— 落盘是异步文件 I/O，不等就退会丢最后一次位置。 */
+   *  第二十轮重大修正：**不再 `await flushPos()`**。它是 preferences 的 put / flush /
+   *  大快照异步文件 I/O，历史上出现过死路径、慢速 NAS 导致 Promise 长期不 resolve；
+   *  一旦挂住，`terminateSelf()` 永远执行不到 —— 实机表现正是「按 ESC 无任何响应」，
+   *  而纯函数 / 源码静态契约测试完全测不到这一层。改用同步 `flushPosSync()`
+   *  （putSync + flushSync，毫秒级、进程被杀也不丢），随后立即调用 terminateSelf。
+   *  context 增加 AppStorage 兜底（避免 getHostContext 偶发为空导致静默 return）。 */
   private async quitApp(): Promise<void> {
+    // 同步落盘：绝不 await 任何文件 I/O；保留 async 签名只为兼容既有调用点与静态契约。
+    this.flushPosSync();
+    await Promise.resolve();
+    this.escDiag = this.escDiag + ' → quitApp';
+    hilog.info(DOMAIN, TAG, 'ESCDBG quitApp enter');
     try {
-      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
-      if (!ctx) {
-        this.status = '无法获取上下文，退出失败';
+      let ability: common.UIAbilityContext | undefined =
+        AppStorage.get<common.UIAbilityContext>('abilityContext');
+      const host: common.Context | undefined = this.getUIContext().getHostContext();
+      if (host !== undefined) {
+        ability = host as common.UIAbilityContext;
+      }
+      if (ability === undefined) {
+        this.escDiag = this.escDiag + ' NO_CONTEXT';
+        this.status = '[ESC诊断] 拿不到 UIAbilityContext（请回传此行）';
+        hilog.warn(DOMAIN, TAG, 'ESCDBG no UIAbilityContext');
         return;
       }
-      // 必须先等落盘完成再退出：flushPos 是异步文件 I/O，不等的话进程先死，最后一次位置就丢了
-      await this.flushPos();
-      const ability: common.UIAbilityContext = ctx as common.UIAbilityContext;
+      this.escDiag = this.escDiag + ' → terminateSelf()';
+      this.status = '[ESC诊断] terminateSelf() 已调用（若未退出请回传此行）';
+      hilog.info(DOMAIN, TAG, 'ESCDBG terminateSelf called');
       ability.terminateSelf()
+        .then(() => {
+          hilog.info(DOMAIN, TAG, 'ESCDBG terminateSelf resolved');
+        })
         .catch(() => {
-          hilog.warn(DOMAIN, TAG, 'terminateSelf failed');
+          this.escDiag = this.escDiag + ' REJECTED';
+          this.status = '[ESC诊断] terminateSelf 被拒绝（请回传此行）';
+          hilog.warn(DOMAIN, TAG, 'ESCDBG terminateSelf rejected');
         });
     } catch (e) {
-      hilog.warn(DOMAIN, TAG, 'quitApp failed: %{public}s', JSON.stringify(e));
+      this.escDiag = this.escDiag + ' EXCEPTION';
+      this.status = '[ESC诊断] quitApp 异常（请回传此行）';
+      hilog.warn(DOMAIN, TAG, 'ESCDBG quitApp failed: %{public}s', JSON.stringify(e));
     }
   }
 
@@ -6440,6 +6482,10 @@ struct Index {
     }
     this.applyWindowFullScreen(on, 0); // 标题栏 / dock / 状态栏 / 导航栏一起处理与还原
     this.armCanvasReloadFallback();    // 窗口 API 静默失败时也能按当前画布重解
+    // 第二十轮：进出全屏后重抢焦点。整块布局重建 + 沉浸态切换会把根组件焦点弄丢，
+    // 焦点一丢，返回普通模式后用户主动按的第二次 ESC 根本到不了 onKey —— 这正是
+    // 前三轮改纯函数始终无效的运行时根因之一。
+    this.scheduleKeyRefocus();
   }
 
   /** 根容器收到鼠标移动：
@@ -6648,7 +6694,12 @@ struct Index {
 
   private onKey(event: KeyEvent): void {
     const code: number = event.keyCode;
-    const down: boolean = (event.type === KeyType.Down);
+    const rawDown: boolean = (event.type === KeyType.Down);
+    // 第二十轮：少数 2in1 / PC 键盘的 ESC 只把 KeyType.Up 派给应用（Down 被系统
+    // 窗口管理器在沉浸态消费掉）。若本轮没处理过 Down，就把这次 Up 当成一次有效 ESC；
+    // Down 已处理过则忽略 Up，避免一次物理按键被处理两遍（绝不能因此退出两次）。
+    const down: boolean = rawDown ||
+      (code === KeyCode.KEYCODE_ESCAPE && !this.escDownHandled);
     // 单独跟踪 Ctrl / Shift 键值：供 Ctrl+滚轮缩放、Ctrl+B 收栏、Shift+R/H/V 使用
     if (code === KeyCode.KEYCODE_CTRL_LEFT || code === KeyCode.KEYCODE_CTRL_RIGHT) {
       this.ctrlDown = down;
@@ -6714,6 +6765,12 @@ struct Index {
         this.toggleFull();
         break;
       case KeyCode.KEYCODE_ESCAPE: {
+        // 第二十轮：真机可观测诊断 —— 状态栏 + hilog ESCDBG 双通道。
+        // 按两次 ESC 后若 APP 没退出，回传状态栏这行即可定位「事件 / 分派 / 退出」断点。
+        this.escSeen++;
+        this.escDiag = 'ESC#' + this.escSeen + ' full=' + (this.fullscreen ? 'T' : 'F') +
+          ' type=' + (down ? 'D' : 'U');
+        hilog.info(DOMAIN, TAG, 'ESCDBG %{public}s', this.escDiag);
         // 第十九轮：**ESC 严格只按当前窗口状态两态区分**，唯一真值来源 escActionByState。
         //  · 全屏 → EXIT_FULL：首次 ESC 只退出全屏并恢复进入前几何，绝不退出 APP；
         //  · 普通 → QUIT_APP：返回普通模式后再次按 ESC 立即退出 APP。
@@ -6722,6 +6779,9 @@ struct Index {
         //  首次 ESC 后并不补发，标志永不消费 → 把用户主动的第二次 ESC 误吞成 NONE。
         //  现 pendingSystemEcho 恒 false 且不参与分派，第二次 ESC 必然落到 QUIT_APP。
         const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);
+        this.escDiag = this.escDiag + ' act=' + escAct +
+          (escAct === ESC_ACT_EXIT_FULL ? ' (EXIT_FULL)' : ' (QUIT_APP)');
+        this.escDownHandled = rawDown;
         if (escAct === ESC_ACT_EXIT_FULL) {
           this.toggleFull();
         } else if (escAct === ESC_ACT_QUIT_APP) {
@@ -6733,6 +6793,62 @@ struct Index {
       }
       default:
         break;
+    }
+  }
+
+  /** 第二十轮：在 IME / 系统之前拦截 ESC（onKeyPreIme，SDK 12+）。
+   *  真全屏沉浸态下 ESC 常被窗口管理器或输入法先拿走；这里对 ESC Down 返回 true
+   *  主动消费，并复用原 onKey 的完整分派（唯一真值来源仍是 escActionByState）。
+   *  其他键一律返回 false，照常分发给 onKeyEvent，不影响翻页 / 缩放 / 旋转等快捷键。 */
+  private onKeyCapture(event: KeyEvent): boolean {
+    if (event.keyCode === KeyCode.KEYCODE_ESCAPE && event.type === KeyType.Down) {
+      this.escHandledByPreIme = true;
+      this.onKey(event);
+      // 事件分发链结束后立刻清标记：这只是「同一次事件」去重，不是按键冷却，
+      // 用户紧接着主动按下的第二次 ESC 一定会被正常处理。
+      setTimeout(() => {
+        this.escHandledByPreIme = false;
+      }, 0);
+      return true;
+    }
+    return false;
+  }
+
+  /** 第二十轮：onKeyEvent 改用返回 boolean 的重载（SDK 15+），对 ESC 返回 true 消费。
+   *  若同一次 ESC 已由 onKeyPreIme 走过 onKey，这里只消费、不重复执行动作，
+   *  避免「一次按键被处理两遍」导致首次 ESC 就直接退出 APP。 */
+  private onKeyConsumed(event: KeyEvent): boolean {
+    if (event.keyCode === KeyCode.KEYCODE_ESCAPE && this.escHandledByPreIme) {
+      this.escHandledByPreIme = false;
+      return true;
+    }
+    this.onKey(event);
+    return event.keyCode === KeyCode.KEYCODE_ESCAPE;
+  }
+
+  /** 第二十轮：进出全屏后把键盘焦点抢回根组件。
+   *  .defaultFocus(true) 只在首次构建生效；全屏切换会整块重建布局，窗口管理器
+   *  也可能把焦点收走 —— 焦点一丢，之后所有按键（含第二次 ESC）都到不了 onKey。 */
+  private scheduleKeyRefocus(): void {
+    if (this.keyRefocusTimer !== -1) {
+      clearTimeout(this.keyRefocusTimer);
+    }
+    this.keyRefocusTimer = setTimeout(() => {
+      this.keyRefocusTimer = -1;
+      try {
+        focusControl.requestFocus(ROOT_FOCUS_ID);
+        hilog.info(DOMAIN, TAG, 'ESCDBG refocus root');
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'ESCDBG refocus failed');
+      }
+    }, ESC_REFOCUS_DELAY_MS);
+  }
+
+  /** 页面销毁时清掉重聚焦定时器，避免回调打到已释放的组件。 */
+  private clearKeyRefocusTimer(): void {
+    if (this.keyRefocusTimer !== -1) {
+      clearTimeout(this.keyRefocusTimer);
+      this.keyRefocusTimer = -1;
     }
   }
 
@@ -7497,7 +7613,8 @@ struct Index {
       // ============================== 状态栏（全屏时隐藏）==============================
       if (!this.fullscreen) {
         Row() {
-          Text(this.status)
+          // 第二十轮：把 ESC 链路诊断直接拼在状态栏，真机按两下 ESC 即可截图回传断点。
+          Text(this.status + (this.escDiag.length > 0 ? '  ·  ' + this.escDiag : ''))
             .fontSize(11)
             .fontColor('#8b95a8')
             .layoutWeight(1)
@@ -7523,9 +7640,14 @@ struct Index {
       .width('100%')
       .height('100%')
       .backgroundColor('#101216')
+      .id(ROOT_FOCUS_ID)
       .focusable(true)
       .defaultFocus(true)
-      .onKeyEvent((event: KeyEvent) => this.onKey(event))
+      // 第二十轮：双通道按键 —— onKeyPreIme 在 IME / 系统之前拦下 ESC 并主动消费；
+      // onKeyEvent 改用返回 boolean 的重载兜底并消费 ESC（原 void 重载会让事件继续冒泡，
+      // 在真全屏下极易被系统窗口管理器拿走）。原 onKey 签名与 ESC 分派代码一字未动。
+      .onKeyPreIme((event: KeyEvent): boolean => this.onKeyCapture(event))
+      .onKeyEvent((event: KeyEvent): boolean => this.onKeyConsumed(event))
 
       // 第十三轮：非全屏时的整栏「贴顶唤出」浮层。
       // 条件渲染：topBarPeek=false 时组件根本不存在 → 完全不占布局空间（不是占位隐藏），

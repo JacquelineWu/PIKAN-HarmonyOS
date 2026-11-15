@@ -32,7 +32,14 @@
  * 第十八轮「窗口模式重做：ESC 严格两态分派 / 去掉 400ms 冷却误吞 / 系统被动退出
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
- * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」。
+ * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十轮「真机链路修复：onKeyPreIme + boolean 版 onKeyEvent 双通道消费 ESC /
+ * 全屏切换后 focusControl 重抢焦点 / quitApp 去掉 await flushPos 阻塞 /
+ * UIAbilityContext 兜底 / 状态栏 ESCDBG 可观测诊断 / 真实 ArkTS 编译校验」。
+ *
+ * ⚠️ 本文件是**源码静态契约测试**，只验证纯函数语义与源码接线，
+ *    不能证明真机上 ESC 事件真的到达 onKey()、也不能证明 APP 真的退出。
+ *    真机验证步骤与诊断串对照表见 README 第二十轮章节。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -3563,6 +3570,81 @@ check('④ 回归护栏：版本 / 画质三处 / AA 五源 / 放大镜 / 顶栏
   INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
   INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
   INDEX.includes('ability.terminateSelf()'), true);
+
+// ==================== 第二十轮：真机链路修复 —— ESC 到达 / 退出不阻塞 / 可观测诊断 ====================
+// ⚠️ 以下全部是**源码静态契约**，只能证明接线存在，不能证明真机上 ESC 真的到达 APP。
+//   本会话环境实测：hdc list targets=[Empty]、bm install 恒返回
+//   "error: failed to execute your command."、hilog 读取 Permission denied、
+//   无 input/uinput/uitest 注入工具、/dev/input Permission denied
+//   → 无法自行安装 HAP / 启动 APP / 注入 ESC / 读日志。
+//   本轮唯一的机器校验是 hvigorw assembleHap → BUILD SUCCESSFUL（已签名 HAP），
+//   它证明 focusControl / onKeyPreIme / boolean 重载是合法 SDK 用法，但仍不等于按键验证。
+//   真机验证必须由用户在装有 APP 的机器上完成；应用内状态栏已内置 ESCDBG 诊断串供回传断点。
+console.log('--- 第二十轮 ①：运行时事件链路（前三轮改纯函数始终无效的真正病根） ---');
+const ENTRY_SRC = readFileSync(new URL('../entry/src/main/ets/entryability/EntryAbility.ets', import.meta.url), 'utf8');
+check('① onKeyEvent 改用返回 boolean 的重载消费 ESC（原 void 重载让事件继续冒泡被系统拿走）',
+  INDEX.includes('.onKeyEvent((event: KeyEvent): boolean => this.onKeyConsumed(event))') &&
+  INDEX.includes('.onKeyEvent((event: KeyEvent) => this.onKey(event))') === false &&
+  ONKEY18_CODE.includes('return event.keyCode === KeyCode.KEYCODE_ESCAPE;'), true);
+check('① 新增 onKeyPreIme 在 IME / 系统之前拦下 ESC 并主动消费，其他键照常分发',
+  INDEX.includes('.onKeyPreIme((event: KeyEvent): boolean => this.onKeyCapture(event))') &&
+  ONKEY18_CODE.includes('if (event.keyCode === KeyCode.KEYCODE_ESCAPE && event.type === KeyType.Down) {') &&
+  ONKEY18_CODE.includes('this.onKey(event);') &&
+  ONKEY18_CODE.includes('return true;') && ONKEY18_CODE.includes('return false;'), true);
+check('① 双通道只防「同一次事件」重复处理：setTimeout(0) 清标记，绝不吞用户主动的第二次 ESC',
+  ONKEY18_CODE.includes('this.escHandledByPreIme = true;') &&
+  ONKEY18_CODE.includes('this.escHandledByPreIme = false;') &&
+  /setTimeout\(\(\) => \{\s*this\.escHandledByPreIme = false;\s*\}, 0\);/.test(ONKEY18_CODE) &&
+  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS') === false &&
+  INDEX.includes('escActionOf(') === false, true);
+check('① 进出全屏后延时重抢焦点（.defaultFocus 只在首次构建生效，焦点丢失则 ESC 到不了 onKey）',
+  INDEX.includes('.id(ROOT_FOCUS_ID)') &&
+  INDEX.includes('focusControl.requestFocus(ROOT_FOCUS_ID)') &&
+  SET_FULL16_CODE.includes('this.scheduleKeyRefocus();') &&
+  INDEX.includes('this.clearKeyRefocusTimer();') &&
+  INDEX.includes('const ESC_REFOCUS_DELAY_MS: number = 120;'), true);
+check('① 兼容只派发 KeyType.Up 的 2in1 键盘：未收到 Down 时把 Up 当一次有效 ESC，且绝不双触发',
+  ONKEY18_CODE.includes('const rawDown: boolean = (event.type === KeyType.Down);') &&
+  ONKEY18_CODE.includes('(code === KeyCode.KEYCODE_ESCAPE && !this.escDownHandled)') &&
+  ONKEY18_CODE.includes('this.escDownHandled = rawDown;'), true);
+
+console.log('--- 第二十轮 ②：退出不再被异步 I/O 卡住 + 真机可观测诊断 ---');
+check('② quitApp 不再 await flushPos()（异步 I/O 挂住 → terminateSelf 永不执行 → ESC 无响应）',
+  QUIT_FN.includes('await this.flushPos()') === false &&
+  QUIT_FN.includes('this.flushPosSync();') &&
+  QUIT_FN.includes('ability.terminateSelf()'), true);
+check('② UIAbilityContext 双来源兜底：EntryAbility 缓存 AppStorage，quitApp 优先 hostContext',
+  ENTRY_SRC.includes("AppStorage.setOrCreate('abilityContext', this.context);") &&
+  QUIT_FN.includes("AppStorage.get<common.UIAbilityContext>('abilityContext')") &&
+  QUIT_FN.includes('if (host !== undefined) {') &&
+  QUIT_FN.includes('NO_CONTEXT'), true);
+check('② 真机可观测：状态栏显示 ESCDBG 链路串 + hilog 打点 + terminateSelf 结果回写',
+  INDEX.includes("@State escDiag: string = '';") &&
+  INDEX.includes("'  ·  ' + this.escDiag") &&
+  (INDEX.match(/ESCDBG/g) || []).length >= 6 &&
+  QUIT_FN.includes('terminateSelf() 已调用') &&
+  QUIT_FN.includes('REJECTED') && QUIT_FN.includes('EXCEPTION'), true);
+check('② 诊断串直接拼在既有状态栏 Text 上，不新增组件 / 不改布局 / 不占空间',
+  /Text\(this\.status \+ \(this\.escDiag\.length > 0 \?/.test(INDEX) &&
+  INDEX.includes('Text(this.status)') === false, true);
+
+console.log('--- 第二十轮 ③：源码静态契约（第十九轮定稿未坏 / 回归护栏 / 声明验证边界） ---');
+check('③ 第十九轮定稿未被改坏：严格两态纯函数 / Index ESC 分派一字未动 / onKey 仍是 void 签名',
+  escActionByState(true, true) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, true) === ESC_ACT_QUIT_APP &&
+  shouldArmSystemEcho(true, true, false) === false &&
+  INDEX.includes('private onKey(event: KeyEvent): void {') &&
+  INDEX.includes('const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);') &&
+  INDEX.includes('this.quitApp();') && INDEX.includes('this.toggleFull();'), true);
+check('③ 回归护栏：版本 / 画质三处 / AA 五源 / 右键 toggle / 几何自愈 全部未破坏',
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  LOUPE13_CODE.split('.antialiased(LOUPE_AA_ENABLED)').length - 1 === 5 &&
+  INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  INDEX.includes('this.setFull(false, true);') &&
+  INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,'), true);
+console.log('  ⚠️ 本组为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十轮章节。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

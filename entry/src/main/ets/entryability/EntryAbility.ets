@@ -10,6 +10,10 @@ const DOMAIN = 0x0000;
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, '%{public}s', 'Ability onCreate');
+    // 第二十轮：缓存 UIAbilityContext 供页面退出 APP 时兜底 terminateSelf。
+    // 页面侧 getUIContext().getHostContext() 偶发为空（尤其在窗口形态刚切换后），
+    // 旧实现拿到 undefined 就直接 return，表现是「按 ESC 无任何响应」。
+    AppStorage.setOrCreate('abilityContext', this.context);
   }
 
   onDestroy(): void {

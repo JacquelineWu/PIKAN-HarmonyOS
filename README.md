@@ -39,12 +39,12 @@
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
-| 关闭应用 | **`Esc`** 严格按当前窗口状态两态区分（**第十九轮定稿** `escActionByState`）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的窗口尺寸位置（**绝不退出 APP**），返回普通模式后再按一次立即关闭；**已彻底废除**第十六轮 400ms 时间冷却与第十八轮 `pendingSystemEcho` 一次性补发标志 —— 两者都基于「系统会补发 ESC」的错误假设，实机系统消费首次 ESC 后并不补发，标志永不消费反而把用户主动的第二次 ESC 误吞成「无响应」。现 `pendingSystemEcho` 恒 false 且不参与分派，第二次 `Esc` 必然退出 APP，见第十九轮章节 |
+| 关闭应用 | **`Esc`** 严格按当前窗口状态两态区分（`escActionByState`，第十九轮定稿、第二十轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的窗口尺寸位置（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十轮**：前三轮都只改「ESC 到达 APP 之后」的纯函数，实机仍不退出 —— 真正病根在运行时链路：`onKeyEvent` 用 `void` 重载不消费事件、真全屏下系统/IME 先拿走 ESC、进出全屏后根组件焦点丢失、`quitApp()` 的 `await flushPos()` 异步 I/O 可能挂住导致 `terminateSelf()` 永不执行。现改为 `onKeyPreIme` + boolean 版 `onKeyEvent` 双通道主动消费、全屏切换后 `focusControl.requestFocus` 重抢焦点、`quitApp` 改同步 `flushPosSync()` 后立即 `terminateSelf()` 并加 AppStorage 上下文兜底。状态栏内置 `ESCDBG` 诊断串可供真机回传断点，见第二十轮章节 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
-| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态，且**自愈后不再置任何补发标志**（第十九轮：随后用户主动的第二次 `Esc` 直接退出 APP）；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
+| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态，且**自愈后不再置任何补发标志**（第十九轮：随后用户主动的第二次 `Esc` 直接退出 APP）；**第二十轮**：进出全屏后延时重抢键盘焦点、ESC 走 `onKeyPreIme` 前置拦截并主动消费，另兼容只派发 `KeyType.Up` 的 2in1 键盘；**真全屏**：系统标题栏与 dock（任务栏）都不显示，应用内顶栏 / 工具条 / 按钮也全部不画，画面只剩图片与左上角信息浮层 |
 | 色彩 / HDR / EXIF | 解码时按 EXIF Orientation 自动摆正（含 4 种镜像）；识别内嵌 ICC 映射到的标准色彩空间（sRGB / Display P3 / BT.2020…）并显示；HDR 图按 HDR 解码 + 显示端 HIGH 动态范围，平台不支持时自动降 SDR。**平台边界**：HarmonyOS 26 没有「从 ICC profile 字节流构造色彩空间」API，详见专章 |
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
@@ -532,7 +532,110 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第二十轮：真机链路修复 —— ESC 到达 / 退出不阻塞 / 可观测诊断（2026-11-15）
+
+用户第四次反馈：**「全屏模式后按两次 ESC 不能退出 APP，请在真实 APP 中测试验证」**。
+本轮不再改状态机纯函数 —— 那部分第十九轮已经对了；改的是**运行时事件链路**，并第一次把
+「真机验证」做成可观测、可回传的形式。
+
+> ⚠️ **诚实声明：本会话无法自行完成「在真实 APP 中按两次 ESC」**。前几轮把
+> `ALL PASS xxxx passed` 当作「验证结果」，其实那只是纯函数 + 源码文本匹配的**静态契约测试**，
+> 它证明不了 ESC 事件真的到达 `onKey()`。这是同一个故障连修三次仍失败的根本原因。
+> 本轮能做到的机器校验是**真实 ArkTS 编译**（`hvigorw assembleHap` → `BUILD SUCCESSFUL`，
+> 产出已签名 HAP）；按键与日志仍需在装有 APP 的机器上由用户执行，步骤见下方「真机验证」。
+
+### 环境限制实测（为什么我装不了、按不了、看不到日志）
+
+| 通道 | 命令 | 实测结果 |
+|---|---|---|
+| 设备连接 | `hdc list targets` / `hdc -s 127.0.0.1:8710 list targets` / `hdc tconn` | `[Empty]` / `Connect failed`，无可用设备 |
+| 安装 HAP | `bm install -p <signed.hap>` / `bm dump -a` / `bm help` | 恒返回 `error: failed to execute your command.`（本进程 uid=20020176，无 BMS 权限） |
+| 启动 ability | `aa start -b com.workbuddy.heicviewer -a EntryAbility` | 回报 `start ability successfully.` 但 `ps` 无对应进程、`aa dump -l` 为空 |
+| 读取日志 | `hilog -x` / `hilog -s` | `Socket client init failed [CODE: -46]` / `Errno: 13, Permission denied` |
+| 注入按键 | `input` / `uinput` / `uitest` / `/dev/input` | 命令不存在；`/dev/input` `Permission denied`；`sendevent` 为 toybox 未知命令 |
+
+结论：本会话能编译、能改源码、能跑静态契约，**但不能安装 HAP、不能启动窗口、不能注入 ESC、不能读 hilog**。
+因此「真机验证」的执行者与观察者只能是用户；本轮把所有可观测信息直接做进 APP 界面，让这一步一次就能定位。
+
+### 真正病根（为什么前三轮改纯函数无效）
+
+`escActionByState(true/false, …)` 只在 **ESC 事件已经进入 `onKey()` 之后** 才被调用。
+静态契约测试覆盖的完全是这段「事后分派」，对下面四个运行时断点一无所知：
+
+| # | 断点 | 实机表现 |
+|---|---|---|
+| 1 | `.onKeyEvent((event) => this.onKey(event))` 命中 SDK 的 **`(event: KeyEvent) => void` 重载**（since 7），返回 `void` 即**不消费事件**，事件继续冒泡 | 真全屏 / 沉浸态下 ESC 被窗口管理器或 IME 优先拿走，APP 的 `onKey()` 收不到 |
+| 2 | `.defaultFocus(true)` 只在**首次构建**生效；进出全屏会整块重建 `if (!this.fullscreen)` 子树，窗口管理器切换沉浸态也会收走焦点 | 返回普通模式后焦点已丢，第二次 ESC 同样到不了 `onKey()` |
+| 3 | `quitApp()` 里 `await this.flushPos()`：`put` / `flush` / 大快照都是异步 preferences I/O，历史上出现过死路径 / 慢速 NAS 导致 Promise 长期不 resolve | `terminateSelf()` 永远执行不到，按 ESC **完全静默、无任何响应** |
+| 4 | `getUIContext().getHostContext()` 偶发为空时旧实现直接 `return`，`terminateSelf()` 抛错也只写 hilog（用户看不到） | 退出失败但无任何可见提示，看起来像「按键没生效」 |
+
+另外补齐一个平台差异：部分 2in1 / PC 键盘的 ESC 只把 `KeyType.Up` 派给应用（`Down` 在沉浸态被系统消费），
+而原 `onKey()` 有 `if (!down) return;`，这类按键会被整条丢掉。
+
+### 改动范围（4 文件）
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/pages/Index.ets` | ① 根组件加 `.id(ROOT_FOCUS_ID)`；② 新增 `onKeyPreIme` 通道（`onKeyCapture`，SDK 12+）在 IME/系统之前拦 ESC 并 `return true` 消费；③ `onKeyEvent` 改用 **`Callback<KeyEvent, boolean>` 重载**（SDK 15+，`onKeyConsumed`）主动消费 ESC；④ 双通道用 `setTimeout(0)` 清标记做「同一次事件」去重（**不是按键冷却**，不会吞第二次主动 ESC）；⑤ `setFull()` 末尾 `scheduleKeyRefocus()` 延时 120ms `focusControl.requestFocus(ROOT_FOCUS_ID)` 抢回焦点，`aboutToDisappear` 清定时器；⑥ `onKey` 兼容只发 `KeyType.Up` 的 ESC；⑦ `quitApp()` 去掉 `await flushPos()`，改同步 `flushPosSync()` 后立即 `terminateSelf()`，加 AppStorage 上下文兜底与 `.then/.catch` 结果日志；⑧ **状态栏内置 `ESCDBG` 诊断串** + hilog 打点；⑨ 原 `onKey` 签名、ESC 分派代码、几何恢复、放大镜、画质接线一字未动 |
+| `entry/src/main/ets/entryability/EntryAbility.ets` | `onCreate` 用 `AppStorage.setOrCreate('abilityContext', this.context)` 缓存 UIAbilityContext，供 `quitApp()` 在 `getHostContext()` 为空时兜底 |
+| `tests/dirname.test.mjs` | 新增 11 条第二十轮断言（双通道 / 焦点 / Up 兼容 / 去阻塞 / 上下文兜底 / 诊断可观测 / 回归护栏），**1171 → 1182**；并在组内**明确写出「静态契约不替代真机验证」**及环境实测证据 |
+| `README.md` | 功能表订正 + 本节（环境限制 / 病根 / 改动 / 真机验证 / 诊断对照表） |
+
+### 验证结果（区分两种「验证」）
+
+| 类型 | 结果 | 能证明什么 |
+|---|---|---|
+| **真实 ArkTS 编译** | `hvigorw --mode module -p product=default assembleHap --no-daemon` → **`BUILD SUCCESSFUL in 14 s 80 ms`**（33 tasks，已签名 `entry-default-signed.hap` 832,692 bytes） | `focusControl.requestFocus` / `onKeyPreIme` / boolean 版 `onKeyEvent` / `AppStorage` 上下文均为**合法 SDK 26 用法**，不是纸面代码；产物可安装 |
+| 静态契约测试 | `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 1182 passed, 0 failed** | 接线存在、既有 1171 条回归护栏未坏；**不证明按键到达** |
+| 语法 / 补丁 | `node --check`、`git diff --check`、括号净平衡 | 源码可解析、无空白错误 |
+| **真机按两次 ESC** | **本会话无法执行**，待用户按下方步骤验证 | 唯一能证明故障已消除的验证 |
+
+按既定约束：**未跑 `build.sh`、未把 HAP 放桌面、未升版本（`1.0.7` / `versionCode: 7`）、未 push**；
+编译产物留在项目 `entry/build/default/outputs/default/`。
+
+### 真机验证步骤（请在装有 APP 的机器上执行）
+
+1. 安装本次签名包 `entry/build/default/outputs/default/entry-default-signed.hap`
+   （或在 DevEco Studio 里重新编译运行；状态栏出现 `ESC#` 字样即表示装的是本轮新包）。
+2. 启动 APP，按原有方式**双击鼠标进入全屏**。
+3. **第一次按 ESC** → 应返回普通模式并恢复进入前窗口尺寸位置。
+4. **第二次按 ESC** → 应立即退出 APP。
+5. 若第 4 步仍没退出：**把状态栏那一行的文字截图发我**（或贴 `hilog` 中 `ESCDBG` 过滤结果）。
+   状态栏形如 `已退出全屏  ·  ESC#2 full=F type=D act=3 (QUIT_APP) → quitApp → terminateSelf()`。
+6. 若状态栏**完全没有 `ESC#` 字样**，请补做一个判别：在普通模式下按一次 **F11**。
+   F11 能切换全屏 → 键盘焦点在、是 ESC 被系统/IME 优先消费；F11 也无反应 → 根组件焦点确实丢了。
+   把结果一并回传，可直接定位是该改焦点策略还是加系统级按键订阅。
+
+### 诊断串对照表（按完两次 ESC 看状态栏）
+
+| 状态栏显示 | 断点定位 | 下一步 |
+|---|---|---|
+| 完全没有 `ESC#` 字样 | ESC 事件**根本没到 `onKey()`**（系统/IME 消费或焦点丢失） | 回传截图；检查窗口焦点，必要时加系统级按键订阅 |
+| `ESC#1 full=T … (EXIT_FULL)`，之后没有 `ESC#2` | 第二次 ESC 没到达（返回普通模式后焦点仍丢） | 回传截图；调整重聚焦时机 / 焦点目标 |
+| 两次都是 `full=T act=2 (EXIT_FULL)` | 首次 ESC 后 `fullscreen` 没同步回 false（自愈未触发） | 回传截图；查 `onAreaChange` 缩小判据 |
+| `ESC#2 full=F … (QUIT_APP) → quitApp → terminateSelf()` 但 APP 未关闭 | `terminateSelf()` 被系统拒绝 / 该形态下不生效 | 回传截图；改用窗口销毁或进程退出兜底 |
+| `NO_CONTEXT` / `REJECTED` / `EXCEPTION` | 上下文获取失败 / 退出 Promise 拒绝 / 抛异常 | 回传截图，按具体标记修 |
+| APP 在第二次 ESC 正常关闭 | ✅ 修复完成 | 无需回传 |
+
+### 覆盖的验证场景
+
+| # | 场景 | 预期 |
+|---|---|---|
+| 1 | 用户复现路径：双击进全屏 → 两次 ESC | 首次返回并恢复几何，第二次立即退出 APP |
+| 2 | 真全屏沉浸态 ESC 被系统/IME 优先拿 | `onKeyPreIme` 消费或系统自愈 + 重聚焦，两态分派仍生效 |
+| 3 | 连贯快按两次 ESC（间隔 <100ms） | 无按键冷却、无补发标志，第一次 `EXIT_FULL`、第二次 `QUIT_APP` |
+| 4 | 只派发 `KeyType.Up` 的 2in1 键盘 | 当作一次有效 ESC 处理，且不会双触发 |
+| 5 | `onKeyPreIme` 与 `onKeyEvent` 都收到同一次 ESC | `setTimeout(0)` 标记去重，只处理一次，首次 ESC 不会误退 APP |
+| 6 | 退出时 preferences I/O 慢 / 死路径 | 同步 `flushPosSync()` 毫秒级必达，`terminateSelf()` 不被阻塞 |
+| 7 | `getHostContext()` 为空 | AppStorage 缓存的 UIAbilityContext 兜底；仍失败则状态栏显示 `NO_CONTEXT` |
+| 8 | 双击 / F11 / 退出按钮主动退全屏、多次往返 | 严格两态、几何快照幂等、重聚焦不干扰 |
+| 9 | 回归：放大镜开关 / 右键 toggle / 画质三处 / AA 五源 / 顶栏 / 缓存 / 版本 | 全部不变（`1.0.7`） |
+
 ## 第十九轮：第二次 ESC 无响应修复 —— ESC 严格两态定稿 / 彻底废除补发吞键（2026-11-15）
+
+> ⚠️ **订正（第二十轮）**：本节把 `ALL PASS 1171` 当成「验证结果」，但它只是静态契约测试。
+> 用户第四次反馈仍未修好 —— 病根不在纯函数，而在 ESC 事件到达与退出执行链路。
+> 本节「严格两态」结论**保留且未被推翻**，但「已修复」的判断**以最上方第二十轮章节及真机验证为准**。
 
 用户实机复现：**进入 APP 后按原有方式双击鼠标（进全屏），第一次按 ESC 可返回，第二次按 ESC 无任何响应**；
 按预期「首次 ESC 返回、再次 ESC 正常退出」不符。本轮只修这一处交互，**不改动任何页面布局、既有功能与 `Index.ets` 代码行**。
