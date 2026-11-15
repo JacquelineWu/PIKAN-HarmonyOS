@@ -5,9 +5,10 @@
 基于 **HarmonyOS SDK（ArkTS + ArkUI）** 开发的 PC 端看图软件，界面布局仿 ACDSee：
 
 - **左侧**：文件浏览器（档案名 / 字节 / 日期三栏，含 `..` 与子目录），**不常驻缩略图**，鼠标悬停整行才浮出小图；可滚动、点击切换
-- **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标**只显示两项**：
-  **缓存数量**（`缓存 N 张`）与**缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
-  （11-11 起，见「预览右下角角标精简」章节）
+- **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
+  **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
+  （11-11 起，见「预览右下角角标精简」章节）。**11-15 ESC 排查期起**角标另带 `R23` 构建标记、
+  `full/win/keys/dsp/hk/wf` 诊断与可点「退出 APP」入口（见第二十三轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
 > 分 5 批用 DevEco CLI 编译验证；详见下文「完全对齐 PIKAN-Win64 11-04 版」。
@@ -39,12 +40,12 @@
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
-| 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。见第二十二轮章节 |
+| 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。**第二十三轮（R22 截图 `keys=0 · fc=Y f=N r12`）**：判定 ESC 被系统全局消费且焦点树未建立，恢复 `USE_SYSTEM_IMMERSIVE=true`，改走 `inputConsumer.keyPressed` 单键通道（SDK 明确拦截系统默认响应）+ `hotkeyChange` 兜底，补窗口级 `setWindowFocusable` 与「退出全屏瞬间重启焦点重试」，角标加 `dsp/hk/wf`；另提供**右下角可点「退出 APP」**作为不依赖键盘 / 焦点 / 窗口形态的确定解。见第二十二、二十三轮章节 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
-| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态，且**自愈后不再置任何补发标志**（第十九轮：随后用户主动的第二次 `Esc` 直接退出 APP）；**第二十轮**：进出全屏后延时重抢键盘焦点、ESC 走 `onKeyPreIme` 前置拦截并主动消费，另兼容只派发 `KeyType.Up` 的 2in1 键盘；**第二十一轮**：窗口状态变化由系统直发同步 APP 全屏态（不再靠画布缩小猜）、Button 焦点锚点、首帧即抢焦点、`sawWindowFull` 前置证据防止 2in1 上首次 ESC 误退出；**第二十二轮**：`USE_SYSTEM_IMMERSIVE=false` 默认关闭系统沉浸最大化（2in1 上 `This API is unavailable to 2in1`、实机两张截图的系统窗口外观一致，无可见效果却可能让窗口管理器保留 ESC），全屏改为**纯应用内三栏切换**、窗口形态不变，把常量改回 `true` 可恢复旧行为；**画面**：应用内顶栏 / 工具条 / 左栏全部不画，只剩图片与左上角信息浮层 |
+| 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态，且**自愈后不再置任何补发标志**（第十九轮：随后用户主动的第二次 `Esc` 直接退出 APP）；**第二十轮**：进出全屏后延时重抢键盘焦点、ESC 走 `onKeyPreIme` 前置拦截并主动消费，另兼容只派发 `KeyType.Up` 的 2in1 键盘；**第二十一轮**：窗口状态变化由系统直发同步 APP 全屏态（不再靠画布缩小猜）、Button 焦点锚点、首帧即抢焦点、`sawWindowFull` 前置证据防止 2in1 上首次 ESC 误退出；**第二十二轮**：曾把 `USE_SYSTEM_IMMERSIVE` 关成 `false`（纯应用内三栏切换、窗口形态不变），但 R22 截图证明关掉后连「首次 ESC 返回」都失效、`keys` 仍为 0 —— **第二十三轮已恢复 `true`**（保留 `false` 早返回分支作可逆开关）；**画面**：应用内顶栏 / 工具条 / 左栏全部不画，只剩图片与左上角信息浮层 |
 | 色彩 / HDR / EXIF | 解码时按 EXIF Orientation 自动摆正（含 4 种镜像）；识别内嵌 ICC 映射到的标准色彩空间（sRGB / Display P3 / BT.2020…）并显示；HDR 图按 HDR 解码 + 显示端 HIGH 动态范围，平台不支持时自动降 SDR。**平台边界**：HarmonyOS 26 没有「从 ICC profile 字节流构造色彩空间」API，详见专章 |
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
@@ -531,6 +532,116 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第二十三轮：系统级按键通道 / 窗口级焦点 / 鼠标确定解（2026-11-15，R23）
+
+用户第七次反馈并发来第三张实机截图：「**有 R22，ESC 没有反应**」。
+R22 把诊断做到「一刀切」级别，这一张截图终于把断点**精确定位到通道本身**，
+也推翻了上一轮「关掉系统沉浸就能让 ESC 变成普通按键」的推测。
+
+> ⚠️ 本会话仍**无法自行在真机按 ESC**（环境限制实测见第二十轮章节：
+> `hdc list targets` 空 / `bm install` 恒失败 / `hilog` 权限拒绝 / 无按键注入工具）。
+> 以下「真机按两次 ESC」一律标为**待用户验证**，不与编译校验、静态契约混为一谈。
+
+### 三张截图串起来的证据链
+
+| 轮次 | 角标 | 新增信息 |
+|---|---|---|
+| R21 | `R21 · full=F · win=T`，**无黄色诊断行** | `escDiag` 为空 → `onKey()` 从未被调用；`full=F` 证明 `windowStatusChange` 同步生效 |
+| R22 | `keys=0 · fc=Y f=N r12 · 未收到任何按键`、`full=T · win=T · keys=0` | 任意键都没到 APP；12 次全局 `requestFocus` **全部返回 false**；**关掉系统沉浸后连「首次 ESC 返回」都消失** |
+| R23 | 待回传 | 用 `dsp` / `hk` / `wf` 三个新字段判定通道与窗口焦点 |
+
+### 根因（五条，逐条有证据）
+
+| # | 发现 | 证据 / 影响 |
+|---|---|---|
+| 1 | **ESC 被系统窗口管理器全局消费，与是否沉浸无关** | R22 关掉 `USE_SYSTEM_IMMERSIVE` 后 `keys` **依然为 0**，却把「首次 ESC 返回」弄丢了（`full=T`）；对比 R21（开关为 true）的 `full=F` 可证：系统消费首次 ESC 时会退出沉浸并产生 `windowStatusChange`，APP 才能同步回普通态 |
+| 2 | **焦点树根本没建立** | `f=N r12` = 全局 `focusControl.requestFocus()` 12 次全失败；`fc=Y` 只说明 `FocusController` 调用没抛异常（该 API 返回 void，**不等于成功**） |
+| 3 | 焦点锚点自身不可聚焦 | `Button() { }` 空 builder 可能不生成真实可聚焦节点，且 `.hitTestBehavior(HitTestMode.None)` 让组件完全不参与命中 / 焦点 |
+| 4 | **12 次焦点重试在启动后约 4.2s 永久耗尽** | `focusRetryCount` 从不重置；而「第二次 ESC」几乎总在那之后（截图 `r12` 即铁证） |
+| 5 | 窗口本身可能 `focusable=false` | ArkUI 只能抢**应用内**焦点；窗口不可聚焦时 `requestFocus()` 恒 false。SDK 提供 `setWindowFocusable()` / `isFocused()`，前几轮完全没用 |
+
+结论：继续改状态机或再加组件级按键通道没有意义，必须换**不经 ArkUI 焦点树**的链路，
+并同时给出一个**不依赖键盘**的确定解。
+
+### 为什么是 `inputConsumer`（SDK 26 逐条核对）
+
+| API | 关键语义 | 本轮用法 | 风险 |
+|---|---|---|---|
+| `inputConsumer.on('keyPressed', KeyPressedConfig, cb)` | SDK 明确「**订阅成功后会拦截系统对该键的默认响应**」，且支持**单键**；要求应用处于前台焦点窗口 | **第一顺位**：`key: KEYCODE_ESCAPE`、`action: 1`、`isRepeat: false` | 该通道文档主要列举音量 / 媒体 / 指纹等系统功能键，**未明确列出 ESC**，实机可能抛 `401` 或不回调；要求窗口有焦点 |
+| `inputConsumer.on('hotkeyChange', HotkeyOptions, cb)` | 组合键订阅，同步抛 `4200002`（系统占用）/ `4200003`（他人占用） | **第二顺位**：`preKeys: []` 尝试单键 ESC | ESC 常被注册为全局快捷键，`4200002` 概率高 |
+| `Window.setWindowFocusable(true)` / `isFocused()` | 窗口级可聚焦与焦点真值 | 注册窗口监听成功后、以及系统退出全屏瞬间各保障一次 | 2in1 上可能不支持；已用 `try` + `Promise.catch` 双重兜住 |
+
+两通道**互斥**（`subscribed` 标志），避免一次 ESC 触发两次分派；
+回调统一走 `applyEscFromSystemChannel()`，与 `onKey` **共用同一套 `escActionByState` 两态真值来源**。
+即使 `keyPressed` 拦截了系统默认 ESC 响应，`setFull(false, true)` 内部仍会
+`applyWindowFullScreen(false)` 主动退出沉浸，窗口形态不会卡在全屏。
+
+### 改动范围（3 文件）
+
+| 文件 | 改动 |
+|---|---|
+| `Index.ets` | ① `ESC_BUILD_TAG` → `R23`，**恢复 `USE_SYSTEM_IMMERSIVE=true`**（保留 `false` 早返回分支作可逆开关）；② 新增 `import inputConsumer` 与 `KeyEvent as InputKeyEvent` 别名（避免与 ArkUI 全局 `KeyEvent` 同名不同型）；③ `registerEscHotkey()` 双通道订阅 + `applyEscFromSystemChannel()` 共用分派，`aboutToAppear()` 主动注册；④ `ensureWindowFocusable()` 设窗口可聚焦并读 `isFocused()` 真值；⑤ `onWindowStatusChanged` 在**系统退出全屏瞬间**重置 `focusRetryCount=0` 并重抢焦点；⑥ 修焦点锚点：`Button('·')` 带内容 / 4vp / 移除 `HitTestMode.None`；⑦ 角标新增 `dsp=N`（分发通道到达数）、`hk=kp\|hk\|N`（订阅结果）、`wf=T\|F\|?`（窗口焦点）；⑧ **新增右下角可点击「退出 APP」**，鼠标点击不依赖键盘 / 焦点 / 窗口形态 |
+| `tests/dirname.test.mjs` | 更新 10 条旧护栏（`R22→R23` / `USE_SYSTEM_IMMERSIVE` / 锚点 / `setFull` 3→4 处 / 角标 Text 2→3 个 / `onKeyDispatch` 正则）+ 新增 16 条第二十三轮断言。**1209 → 1225 ALL PASS** |
+| `README.md` | 功能表「关闭应用」「全屏」两行订正 + 本节 |
+
+第十九轮严格两态、第二十一轮窗口真值同步、第二十二轮 `keys` 诊断与 `destroyWindow()` 兜底
+**全部原样保留**；`quitApp` / 几何恢复 / 放大镜 / 画质接线未动；版本仍 `1.0.7` / `versionCode 7`。
+
+### 验证结果（三类证据分开说）
+
+| 类型 | 结果 | 能证明什么 |
+|---|---|---|
+| **真实 ArkTS 编译** | `hvigorw --mode module -p product=default assembleHap --no-daemon` → **BUILD SUCCESSFUL in 12 s 17 ms**，已签名 HAP **864,490 bytes**；`modules.abc` 含 `R23` / `keyPressed` / `hotkeyChange` / `setWindowFocusable` | 新 API 均为合法 SDK 26 用法，签名链路通；仅剩既有 2in1 系统栏告警与 `READ_IMAGEVIDEO` 权限告警 |
+| 静态契约 | **ALL PASS 1225 passed, 0 failed**；`node --check` / `git diff --check` / 括号净平衡 / 版本守卫全绿 | 接线存在、既有护栏未坏；**不证明按键到达、不证明 APP 退出** |
+| **真机按两次 ESC** | **本会话无法执行**，待用户验证 | 唯一能证明故障消除的验证 |
+
+按既定约束：未跑 `build.sh`、未把 HAP 放桌面、未升版本、未 push；
+产物留 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+### ⭐ 确定解（不依赖键盘，100% 可用）
+
+右下角缩放角标左侧新增红色 **「退出 APP」**，全屏与普通模式都可见、都可点。
+它走 `quitApp()`（同步落盘 → `terminateSelf()` → 400ms 后 `destroyWindow()` 兜底），
+**完全不经过任何按键事件、焦点树或窗口形态判定**。
+在 `hk=N`（ESC 被平台全局占用）时，这是本应用提供的确定退出入口。
+
+### 真机验证步骤
+
+1. 卸载旧包，装 `R23` 签名包 → 先看右下角角标是否出现 `R23`。**没有就是旧包。**
+2. 读三个新字段：`hk=kp`（单键通道成功）/ `hk=hk`（组合键通道成功）/ `hk=N`（均失败 = ESC 被系统占用）、
+   `wf=T/F`（窗口是否有焦点）、`dsp=N`（组件分发通道到达数）。
+3. 双击进全屏 → 第一次 ESC（三栏回来、`full=F`）→ 第二次 ESC（应退出 APP）。
+4. 若仍不退出：**点右下角「退出 APP」**，验证确定解是否生效。
+5. 把**右下角整片（含 `hk` / `wf` / `dsp` 与红黄诊断行）截图发我**。
+
+### 诊断对照表（R23 截图速查）
+
+| 角标 | 断点定位 | 下一步 |
+|---|---|---|
+| 没有 `R23` | 旧包 | 重新卸载安装签名 HAP |
+| `hk=kp` 且两次 ESC 正常 | ✅ 单键通道接管成功，修复完成 | 无需回传 |
+| `hk=hk` 且两次 ESC 正常 | ✅ 组合键通道接管成功，修复完成 | 无需回传 |
+| `hk=N` | **ESC 被系统全局占用或该键不在 `keyPressed` 支持列表**（平台限制） | 应用级无解 → 用「退出 APP」按钮；或改非 ESC 退出交互 |
+| `hk=kp/hk` 但 `keys=0`、按 ESC 无反应 | 通道订阅成功却未回调（多半 `wf=F` 窗口无焦点） | 回传截图，看 `wf` 与 `r` 计数 |
+| `wf=F` 且 `f=N` | 窗口不可聚焦 | 回传截图；`setWindowFocusable` 在 2in1 可能不生效 |
+| `dsp≥1` 但 `keys=0` | 分发通道有事件、`onKey` 去重异常 | 回传截图 |
+| `ESC#2 … (QUIT_APP)` 但仍未退出 | 退出 API 在该窗口形态无效 | 回传截图 |
+
+### 覆盖的验证场景
+
+| # | 场景 | 预期 |
+|---|---|---|
+| 1 | 用户复现路径：双击进全屏 → 两次 ESC | 首次返回并恢复几何，第二次立即退出 APP |
+| 2 | `keyPressed` 订阅成功 | `hk=kp`；按 ESC 由系统级回调分派，系统默认响应被拦截但 APP 主动退出沉浸 |
+| 3 | `keyPressed` 被拒（401 / 801） | 自动降级到 `hotkeyChange`，`hk=hk` 或 `hk=N`，不崩溃 |
+| 4 | 两通道都被拒（`4200002`） | `hk=N`，UI 仍完整可用，鼠标「退出 APP」可退出 |
+| 5 | 系统消费首次 ESC 退出沉浸 | `windowStatusChange` 触发，重置焦点重试上限并重抢焦点 |
+| 6 | 首次 ESC 后隔很久（>4.2s）再按第二次 | 焦点重试已重启，不再停在 `r12` |
+| 7 | 窗口 `focusable=false` | `ensureWindowFocusable()` 显式置 true，`wf=` 常显真值 |
+| 8 | 全屏 / 普通模式下点「退出 APP」 | 均立即退出，不依赖键盘 |
+| 9 | 一次 ESC | 双通道互斥 + `onKey` 对象引用去重，只分派一次 |
+| 10 | 第十九轮两态 / 二十一~二十二轮接线 / 画质放大镜 | 静态契约全绿，零回归 |
 
 ## 第二十二轮：零按键到达 APP —— 分发通道 / 焦点冲突 / 常显 keys 诊断（2026-11-15）
 

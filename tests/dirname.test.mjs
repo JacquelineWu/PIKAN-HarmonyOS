@@ -33,6 +33,9 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十三轮「系统级按键通道：inputConsumer.keyPressed 单键优先 + hotkeyChange 兜底 /
+ *    恢复系统沉浸 / 窗口级 setWindowFocusable + wf 诊断 / 退出全屏瞬间重启焦点重试 /
+ *    Button('·') 锚点修可聚焦 / 鼠标『退出 APP』确定解 / dsp=hk= 常显诊断」、
  * 第二十二轮「零按键到达修复：onKeyEventDispatch 分发通道 / 修双 defaultFocus 冲突 /
  *    FocusController + ANCESTOR_EVENT / 关闭系统沉浸 / keys= 与焦点结果常显」；
  * 第二十一轮「窗口真值同步：windowStatusChange 直发链路 / ESC 前读系统状态 /
@@ -1231,17 +1234,18 @@ check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
 check('诊断行的渲染被开关包住，diagLine 赋值点一个没删',
   /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(BADGE) &&
   (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
-check('右下角恒显示区：缩放百分比 1 个 Text + 第二十二轮诊断 1 个 Text，缓存 N 张仍移除',
-  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 2 &&
+check('右下角恒显示区：缩放百分比 + 诊断 + R23「退出 APP」共 3 个 Text，缓存 N 张仍移除',
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 3 &&
+  /Text\('退出 APP'\)/.test(BADGE_CODE) &&
   /if \(this\.escDiag\.length > 0 \|\| this\.keySeen === 0\)/.test(BADGE_CODE) &&
   /Text\(this\.escDiag\.length > 0/.test(BADGE_CODE) &&
   /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比仍在右下角且带 R22 + keys=N 常显，100% = 原图像素 1:1 口径未改',
+check('缩放百分比仍在右下角且带 R23 + keys=N 常显，100% = 原图像素 1:1 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R22';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R23';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3467,8 +3471,8 @@ check('③ 自愈分支 setFull(false, true) + 第二十一轮两处窗口真值
   /this\.setFull\(false, true\);\s*return;/.test(INDEX) &&
   /const shrinkBig: boolean = shouldExitFullOnResize\(/.test(INDEX) &&
   /const shrinkSmall: boolean = shouldSelfHealOnResize\(/.test(INDEX) &&
-  // 三处：自愈 / windowStatusChange 回调 / ESC 分派前主动读真值
-  INDEX.split('this.setFull(false, true);').length - 1 === 3, true);
+  // 四处：自愈 / windowStatusChange 回调 / ESC 分派前主动读真值 / R23 系统通道分派
+  INDEX.split('this.setFull(false, true);').length - 1 === 4, true);
 check('③ 几何快照放宽：上升沿清 preFullFloating + 记录 floating 形态 + resize/move 前判形态',
   CAPTURE18_CODE.includes('this.preFullFloating = false;') &&
   CAPTURE18_CODE.includes('this.preFullFloating = floating;') &&
@@ -3694,13 +3698,15 @@ check('② 两处窗口真值同步都要求 sawWindowFull 前置证据（2in1 �
 check('② ESC 分派前先读系统窗口真值（兜底 windowStatusChange 未派发）',
   /case KeyCode\.KEYCODE_ESCAPE: \{[\s\S]{0,400}this\.syncFullWithWindow\(\);/.test(INDEX) &&
   INDEX.includes('st = Number(win.getWindowStatus());'), true);
-check('② 三处 setFull(false, true) 仍在：自愈 / 窗口状态回调 / ESC 前兜底',
-  INDEX.split('this.setFull(false, true);').length - 1 === 3, true);
+check('② 四处 setFull(false, true) 仍在：自愈 / 窗口状态回调 / ESC 前兜底 / R23 系统通道',
+  INDEX.split('this.setFull(false, true);').length - 1 === 4, true);
 
 console.log('--- 第二十一轮 ③：焦点锚点 / 去重 / 常显诊断 / 退出兜底 ---');
-check('③ 1vp 透明 Button 焦点锚点：天然可聚焦 + 双通道按键 + 不挡鼠标',
-  /Button\(\) \{ \}[\s\S]{0,500}\.id\(KEY_FOCUS_ID\)/.test(INDEX) &&
-  INDEX.includes('.hitTestBehavior(HitTestMode.None)') &&
+check('③ R23 修可聚焦锚点：Button(\'·\') 带内容 / 4vp / 代码行不再有 HitTestMode.None',
+  /Button\('·'\)[\s\S]{0,300}\.id\(KEY_FOCUS_ID\)/.test(INDEX) &&
+  /\.width\(4\)[\s\S]{0,80}\.height\(4\)/.test(INDEX) &&
+  // 只看非注释代码行：注释里说明「已移除」仍会提到 HitTestMode.None。
+  /\.hitTestBehavior\(HitTestMode\.None\)/.test(CODE_LINES) === false &&
   (INDEX.match(/\.onKeyPreIme\(\(event: KeyEvent\): boolean => this\.onKeyCapture\(event\)\)/g) || []).length === 2 &&
   (INDEX.match(/\.onKeyEvent\(\(event: KeyEvent\): boolean => this\.onKeyConsumed\(event\)\)/g) || []).length === 2, true);
 check('③ 重聚焦优先抢 Button 锚点，且 aboutToAppear 也主动抢（不再等 setFull 被调用）',
@@ -3710,8 +3716,8 @@ check('③ KeyEvent 对象引用去重：零时间窗，不吞用户连按的第
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('this.lastKeyEvent = event;') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 常显 R22 构建标记 + 全屏/普通都可见的诊断行（第二十二轮 keys=0 时也常显红字）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") &&
+check('③ 常显 R23 构建标记 + 全屏/普通都可见的诊断行（第二十二轮 keys=0 时也常显红字）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3737,19 +3743,19 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：右下角角标必须出现 R22，否则说明装的是旧包，需重新安装签名 HAP。');
+console.log('  ⚠️ 截图判定：右下角角标必须出现 R23，否则说明装的是旧包，需重新安装签名 HAP。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
 // escDiag 只在 onKey() 内赋值 → 为空即证明「零个按键到达 onKey()」（不只是 ESC）。
 // full=F + 三栏恢复则说明第二十一轮 windowStatusChange 同步已生效。
 console.log('\n--- 第二十二轮 ①：关闭在 2in1 上无效果却可能吞掉 ESC 的系统沉浸形态 ---');
-check('① USE_SYSTEM_IMMERSIVE 默认 false + applyWindowFullScreen 早返回（全屏只切应用内三栏）',
-  INDEX.includes('const USE_SYSTEM_IMMERSIVE: boolean = false;') &&
-  /private async applyWindowFullScreen\(on: boolean, retry: number\): Promise<void> \{[\s\S]{0,300}if \(!USE_SYSTEM_IMMERSIVE\) \{\s*hilog\.info/.test(INDEX) &&
+check('① USE_SYSTEM_IMMERSIVE 恢复 true（R22 关闭后连首次 ESC 返回都失效）+ 保留早返回分支',
+  INDEX.includes('const USE_SYSTEM_IMMERSIVE: boolean = true;') &&
+  /private async applyWindowFullScreen\(on: boolean, retry: number\): Promise<void> \{[\s\S]{0,600}if \(!USE_SYSTEM_IMMERSIVE\) \{[\s\S]{0,200}hilog\.info/.test(INDEX) &&
   INDEX.includes('ESCDBG skip system immersive'), true);
-check('① 保留开关可逆：注释写明改回 true 即可恢复旧行为，窗口几何/画质接线未动',
-  /改 true 即可|改回 true/.test(INDEX) &&
+check('① 保留开关可逆：注释写明改回 false 可复现 R22，窗口几何/画质接线未动',
+  /改回 false|可逆开关/.test(INDEX) &&
   INDEX.includes('this.armCanvasReloadFallback();') &&
   INDEX.includes('this.capturePreFullRect(prevFull, on);'), true);
 
@@ -3757,8 +3763,9 @@ console.log('--- 第二十二轮 ②：新增分发阶段通道 + 修双 default
 check('② onKeyEventDispatch 第三通道（SDK 15+，分发阶段不依赖焦点）挂在根组件且只挂一次',
   (INDEX.match(/\.onKeyEventDispatch\(\(event: KeyEvent\): boolean => this\.onKeyDispatch\(event\)\)/g) || []).length === 1 &&
   INDEX.includes('private onKeyDispatch(event: KeyEvent): boolean {') &&
-  /private onKeyDispatch\(event: KeyEvent\): boolean \{\s*this\.onKey\(event\);/.test(INDEX) &&
-  /private onKeyDispatch[\s\S]{0,200}return event\.keyCode === KeyCode\.KEYCODE_ESCAPE;/.test(INDEX), true);
+  // R23 在 onKeyDispatch 入口插入 dispatchSeen++，允许注释/计数位于 onKey 之前。
+  /private onKeyDispatch\(event: KeyEvent\): boolean \{[\s\S]{0,250}this\.dispatchSeen\+\+;[\s\S]{0,150}this\.onKey\(event\);/.test(INDEX) &&
+  /private onKeyDispatch[\s\S]{0,400}return event\.keyCode === KeyCode\.KEYCODE_ESCAPE;/.test(INDEX), true);
 check('② 根组件不再声明 defaultFocus（消除双声明冲突），焦点统一给 Button 锚点',
   // 只看根组件的绑定块：全文另有 2 处历史注释提到 defaultFocus，不能用全文计数。
   INDEX.slice(INDEX.indexOf('.id(ROOT_FOCUS_ID)'),
@@ -3797,8 +3804,9 @@ check('④ 角标常显 keys=N；keys=0 时无条件显示红字「未收到任�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R22 构建标记已升级（R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") &&
+check('④ R23 构建标记已升级（R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R21';") === false, true);
 
 console.log('--- 第二十二轮 ⑤：回归护栏 + 验证边界声明 ---');
@@ -3817,8 +3825,96 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
-console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十二轮章节。');
-console.log('  ⚠️ 截图判定：角标须出现 R22 与 keys=N；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
+console.log('  ⚠️ 截图判定：角标须出现 R23；keys=0 且有红字即证明键盘事件未到 APP。');
+
+// ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
+// R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
+// 结论：ArkUI 组件级按键通道零到达、12 次全局 requestFocus 全失败；继续改状态机无意义。
+console.log('\n--- 第二十三轮 ①：恢复系统沉浸（R22 关掉后连首次 ESC 返回都失效）---');
+check('① USE_SYSTEM_IMMERSIVE 恢复 true，applyWindowFullScreen 仍保留可逆早返回分支',
+  INDEX.includes('const USE_SYSTEM_IMMERSIVE: boolean = true;') &&
+  /private async applyWindowFullScreen\(on: boolean, retry: number\): Promise<void> \{[\s\S]{0,600}if \(!USE_SYSTEM_IMMERSIVE\) \{/.test(INDEX) &&
+  INDEX.includes('ESCDBG skip system immersive'), true);
+
+console.log('--- 第二十三轮 ②：inputConsumer 双通道（唯一不经 ArkUI 焦点的应用级链路）---');
+check('② import inputConsumer + InputKeyEvent 别名（避免与 ArkUI KeyEvent 同名不同型）',
+  INDEX.includes("import inputConsumer from '@ohos.multimodalInput.inputConsumer';") &&
+  INDEX.includes("import { KeyEvent as InputKeyEvent } from '@ohos.multimodalInput.keyEvent';"), true);
+check('② keyPressed 单键通道优先：KeyPressedConfig / action=1 / isRepeat=false / ESC',
+  INDEX.includes('const cfg: inputConsumer.KeyPressedConfig = {') &&
+  INDEX.includes('key: KeyCode.KEYCODE_ESCAPE,') &&
+  /action: 1,/.test(INDEX) &&
+  /inputConsumer\.on\('keyPressed', cfg, \(ev: InputKeyEvent\): void =>/.test(INDEX) &&
+  INDEX.includes("this.hkDiag = 'kp';"), true);
+check('② hotkeyChange 仅作兜底且与 keyPressed 互斥（一次 ESC 不双分派）',
+  INDEX.includes('if (!subscribed) {') &&
+  INDEX.includes("inputConsumer.on('hotkeyChange', opts, (o: inputConsumer.HotkeyOptions): void => {") &&
+  INDEX.includes('const opts: inputConsumer.HotkeyOptions = {') &&
+  INDEX.includes('preKeys: [],') &&
+  INDEX.includes('finalKey: KeyCode.KEYCODE_ESCAPE,') &&
+  INDEX.includes("this.hkDiag = 'hk';") &&
+  INDEX.includes("this.hkDiag = 'N';"), true);
+check('② 系统通道与 onKey 共用同一套两态真值来源，退出全屏会主动还原系统沉浸',
+  INDEX.includes('private applyEscFromSystemChannel(): void {') &&
+  INDEX.includes('const act: number = escActionByState(this.fullscreen, false);') &&
+  INDEX.includes('this.applyEscFromSystemChannel();') &&
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP, true);
+check('② aboutToAppear 主动注册系统级订阅（不等 setFull / 不等焦点）',
+  /this\.registerWindowStatusSync\(0\);\s*this\.scheduleKeyRefocus\(\);\s*this\.registerEscHotkey\(\);/.test(INDEX), true);
+
+console.log('--- 第二十三轮 ③：窗口级焦点保障 + 退出全屏瞬间重启焦点重试 ---');
+check('③ ensureWindowFocusable：isFocused 真值 + setWindowFocusable(true) + Promise catch 兜底',
+  INDEX.includes('private ensureWindowFocusable(): void {') &&
+  INDEX.includes("this.winFocusDiag = 'wf=' + (win.isFocused() ? 'T' : 'F');") &&
+  INDEX.includes('win.setWindowFocusable(true).then(() => {') &&
+  INDEX.includes('.catch((e: BusinessError) => {') &&
+  INDEX.includes("this.winFocusDiag = 'wf=?';"), true);
+check('③ 窗口状态监听注册成功后立即保障一次窗口可聚焦',
+  /this\.winStatusListenerOn = true;[\s\S]{0,250}this\.ensureWindowFocusable\(\);/.test(INDEX), true);
+check('③ 系统退出全屏瞬间重置 12 次焦点重试上限并重抢（修复 r12 永久耗尽）',
+  /if \(!sysFull && this\.sawWindowFull\) \{\s*this\.ensureWindowFocusable\(\);\s*this\.focusRetryCount = 0;\s*this\.scheduleKeyRefocus\(\);/.test(INDEX), true);
+
+console.log('--- 第二十三轮 ④：焦点锚点修可聚焦 + 诊断可观测 + 鼠标确定解 ---');
+check("④ 锚点从空 builder 改 Button('·') 带内容 / 4vp / 代码行不再有 HitTestMode.None",
+  INDEX.includes("Button('·')") &&
+  /\.width\(4\)[\s\S]{0,80}\.height\(4\)/.test(INDEX) &&
+  /\.hitTestBehavior\(HitTestMode\.None\)/.test(CODE_LINES) === false, true);
+check('④ 分发通道到达计数 dsp=N 常显，且不受 onKey 去重影响',
+  INDEX.includes('@State dispatchSeen: number = 0;') &&
+  INDEX.includes('this.dispatchSeen++;') &&
+  INDEX.includes("' · dsp=' + this.dispatchSeen"), true);
+check('④ hk=kp/hk/N 与 wf=T/F/? 全部常显在右下角角标',
+  INDEX.includes('@State hkDiag: string') &&
+  INDEX.includes('@State winFocusDiag: string') &&
+  INDEX.includes("' · hk=' + this.hkDiag +") &&
+  INDEX.includes("' · ' + this.winFocusDiag)"), true);
+check('④ 鼠标「退出 APP」入口：不依赖键盘 / 焦点 / 窗口形态，全屏与普通模式都能点',
+  /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
+
+console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
+check('⑤ R23 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R21';") === false, true);
+check('⑤ 第十九轮两态 / 第二十一轮窗口真值同步 / 第二十二轮 keys 诊断 / 版本全部未坏',
+  shouldArmSystemEcho(true, true, false) === false &&
+  windowStatusIsFullscreen(1) === true &&
+  shouldSyncFullFromWindow(true, false) === true &&
+  INDEX.includes("win.on('windowStatusChange'") &&
+  INDEX.includes("' · keys=' + this.keySeen") &&
+  INDEX.includes('未收到任何按键') &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
+check('⑤ 画质 / 放大镜 / 右键 toggle / 自愈判据等既有接线零回归',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  LOUPE13_CODE.split('.antialiased(LOUPE_AA_ENABLED)').length - 1 === 5 &&
+  INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,'), true);
+console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
+console.log('  ⚠️ 截图判定：hk=kp/hk=有系统通道，hk=N=ESC 被系统占用（平台限制）。');
+console.log('  ⚠️ 确定解：右下角「退出 APP」可点击，不依赖任何键盘事件 / 焦点 / 窗口形态。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
