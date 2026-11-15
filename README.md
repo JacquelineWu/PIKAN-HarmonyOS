@@ -30,7 +30,7 @@
 | 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` **恒亮恒可点，永不 grey out / 永不禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
-| 鼠标键 | **右键 toggle 放大镜开关**（预设关闭，见第十五轮）、**双击切换全屏**；左键单击不放大（第七轮起）、右键拖拽平移；双击档案名同样切换全屏。**放大镜放大画质见第十六轮**：>1:1 时按放大后像素需求重解码高清图源补足真实像素 + 按倍率分档插值 + 整像素对齐，消锯齿 / 像素化 / 边缘粗糙，1:1 显示不受影响 |
+| 鼠标键 | **右键 toggle 放大镜开关**（预设关闭，见第十五轮）、**双击切换全屏**；左键单击不放大（第七轮起）、右键拖拽平移；双击档案名同样切换全屏。**放大镜放大画质见第十七轮**：>1:1 一律 High(Cubic) 插值 + 五个图源全开 PixelMap 边缘 AA + 真实设备密度 + 按原图上限夹界的重解码（无真实增益则跳过），消锯齿 / 像素化 / 边缘粗糙，1:1 显示不受影响（第十六轮的三档 / MipMap 方案已被推翻，见第十七轮章节） |
 | 缩放 | 滚轮(Ctrl) / 双指捏合 / 键盘 `↑` `↓` / 左键放大 ×1.5；右下角角标 **100% = 原图像素 1:1**（ACDSee / Photoshop 口径，适应窗口通常 13%~30%）。**11-10 起取消 `＋` `－` 按钮** |
 | 平移 / 旋转 / 镜像 | 拖拽画布 / `R` 右旋、`Shift+R` 左旋 / `Shift+H` 水平、`Shift+V` 垂直（可叠加）。**11-10 起取消 `左旋` `右旋` `镜像H` `镜像V` 按钮** |
 | 复位 / 1:1 | 键盘 `0` 复位适应；`F` 切 1:1（**第十五轮起右键不再复位，改为 toggle 放大镜**）。**11-10 起取消 `适应` `1:1` 按钮** |
@@ -532,7 +532,101 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第十七轮：放大镜边缘抗锯齿 —— SDK 插值档语义修正 / 真实密度 / 原图上限夹界 / 增益跳过 / PixelMap 边缘 AA（2026-11-15）
+
+第十六轮把画质全押在「按倍率重解码高清图源」上，并主动放弃了插值档。实机反馈**放大后仍有锯齿**。
+本轮核对本机 SDK 26 官方声明后发现：第十六轮把一个关键 API 的限制**张冠李戴**了，
+且插值档位完全选反 —— 这才是「仍有锯齿 / 发糊」的直接主因。本轮在**完全不改交互、页面布局与既有功能**
+的前提下重定位并修复，覆盖不同放大倍率、不同尺寸图片、常见屏幕显示条件，并保持性能稳定。
+
+> ⚠️ **本节推翻第十六轮关于 `.interpolation()` 的结论**：第十六轮「`.interpolation()` 对 PixelMap
+> 不生效」是错的 —— 那其实是 `sourceSize()` 的限制。详见下方「根因」表与第十六轮章节的订正说明。
+
+### 诉求
+
+> 请优化现有图片放大镜功能，修复放大后的图片仍出现锯齿的问题。在保留当前交互、页面布局和已有功能的
+> 前提下，定位造成边缘不平滑的关键原因并完成相应代码修改，使不同放大倍率、不同尺寸图片和常见屏幕显示
+> 条件下都能保持边缘平滑、细节清晰，避免明显锯齿、像素化和过度模糊；同时确保性能稳定。
+> 请列出需要覆盖的验证场景及对应预期效果。
+
+拆解：① 定位真根因（而非继续加码重解码）；② 任意放大倍率都边缘平滑、细节清晰；
+③ 不同尺寸图片都避免锯齿 / 像素化 / 过度模糊；④ 常见屏幕条件（尤其高 DPI / 不同 density）下稳定；
+⑤ 性能稳定；⑥ 列出验证场景与对应预期效果。
+
+### 根因（核对本机 SDK 26 `component/image.d.ts`）
+
+| # | 根因 | 官方证据 |
+|---|---|---|
+| 1 | **SDK 误判**：第十六轮断言「`.interpolation()` 对 `PixelMap` 不生效」，于是放弃插值档 | L1070-1086 `interpolation()` 官方注释 "mitigates aliasing during image scaling"，**只排除 SVG / AnimatedDrawableDescriptor**，对 `PixelMap` 正常生效；真正对 PixelMap 不生效的是 L1088-1089 的 **`sourceSize()`** —— 两者被搞混了 |
+| 2 | **插值档完全选反（锯齿主因）** | L190-236：`None`=最近邻（锯齿之源）、`Low`=双线性（SDK 默认）、`Medium`=**MipMap（缩小专用低分辨率金字塔）**、`High`=**Cubic（官方 "highest possible quality" 放大档）**。第十六轮 `scale>2 → Medium`，而放大镜 `loupeScale()` 恒为 `3×zoom×1` → **默认恒走 MipMap**，放大既不锐利也不平滑；`≤1:1` 还用 `None`。等于把最该用 Cubic 的场景送进了缩小专用档 |
+| 3 | **PixelMap 边缘 AA 默认关闭** | L1723-1745 `antialiased`（since 23，本工程 compileSdk 26 可用）官方 "enable anti-aliasing for the **edges of a pixel map image**"、"If the attribute is not set, anti-aliasing is **disabled by default**"。放大镜正是「PixelMap 放大后裁成圆」的典型场景，五个图源此前一个都没开 |
+| 4 | **密度比写死 1，高 DPI 屏低估倍率** | `@ohos.display` `Display.densityPixels ∈ [0.5, 4.0]`（常见 1.0 / 3.0）。第十六轮 `LOUPE_DENSITY_RATIO = 1` 写死，高 DPI 屏 1vp = 2~3 物理像素，有效倍率与「放大后所需真实像素」被严重低估 —— 这是「常见屏幕显示条件下仍发虚」的缺口 |
+| 5 | **目标解码边可能超过原图，白解码 + 白占内存** | `decodePx` 的 `desiredSize` **只能降采样、不能升采样**（L1088 "works only when the target size is smaller than the source size"）。第十六轮 `主视图解码边 × 3` 不夹原图长边，小图时请求超过原图边毫无意义，只会白解码一次 + 白占一张大 `PixelMap` |
+
+### 做法
+
+| 环节 | 改动 |
+|---|---|
+| 纯函数（`InteractionPlan.ts` ⑧ 节） | 新增 `loupeDensityRatioOf`（NaN / 非法回退 1、夹 [0.5,4.0]）、`loupeQualityTierOf`（任意 >1:1 → HIGH，≤1:1 / NaN → LOW）、`loupeResampleEdge2Of`（`base × scale` 夹 cap **再夹原图长边**）、`loupeResampleGainOf`（无真实像素增益返回 false）；常量 `LOUPE_DENSITY_MIN/MAX/FALLBACK`、`LOUPE_AA_ENABLED`、`LOUPE_QA_HIGH/LOW`。**第十六轮旧函数 / 常量保留供回归断言，但 Index.ets 不再 import / 调用** |
+| 真实设备密度 | `import display from '@ohos.display'`；`loupeDensityOf()` **懒读一次并缓存** `display.getDefaultDisplaySync().densityPixels`，try/catch 兜底 `LOUPE_DENSITY_RATIO=1` 再经 `loupeDensityRatioOf` 归一化；字段 `loupeDensity` 写在放大镜区，**绝不进 `aboutToAppear` 启动路径**（启动只打常量快照，不引入新的同步 IO）；`loupeScale()` 由写死 1 改为接 `loupeDensityOf()` |
+| 插值档修正（核心） | `loupeInterpolation()` 改由 `loupeQualityTierOf(this.loupeScale())` 驱动：**>1:1 一律 `ImageInterpolation.High`(Cubic)**、≤1:1 一律 `Low`(双线性)；**彻底移除 `Medium`(MipMap) 与 `None`(最近邻)** 两处返回 |
+| PixelMap 边缘 AA | `loupeLayer()` 的 **5 个图源**（高清 `loupeHiPx` / 右页 `rightPixelMap` / 主视图 `viewPixelMap` / 低清 `lowPixelMap` / `Image(uri)` 兜底）全部加 `.antialiased(LOUPE_AA_ENABLED)`；参数是 `Optional<boolean>`，工程未用 `resizable`、未设 `backgroundColor`，官方两个失效条件都不触发 |
+| 目标解码边夹到原图 | `loupeResampleTargetEdge(uri)` 改为 `loupeResampleEdge2Of(this.viewEdge(), this.loupeScale(), this.srcLongOf(uri), 8192)`；`>1:1` 时按真实倍率算需求，夹 `8192` cap 后**再夹到原图长边**（`Math.floor(srcLong)`），`≤1:1` 返回 base 旁路 |
+| 无增益跳过（性能稳定） | `ensureLoupeHiRes()` 先过 `loupeResampleGainOf(edge, srcLongOf(uri), viewEdge(), 96)`：**小图 / 原图分辨率不足 / 已按原图满分辨率解过时不重解码**，直接靠 Cubic + AA 保证边缘平滑，并 `clearLoupeHiRes()` 释放已有高清源让它回退到既有 4 个分支 —— 省一次解码、省一张大图内存 |
+| 高清源无效正确回退 | `loupeHiUsable()` 保持 `loupeHiPx` 非空 + `loupeHiUri`/`loupeHiPane` 双重校验 + `loupeNeedsResampleOf`；无增益分支清掉高清源后自动落到既有 4 个兜底分支，且这 4 个分支现在也已开 AA + 两档插值，画质不塌陷 |
+| 保持不动 | 右键 toggle、6cm 双页独立、全屏保留 / 退出全屏不失效、点选零滚动、顶栏贴顶唤出、hover 缩略图、主视图三处画质计数、resize 实时重解、缓存账目、ESC 分状态 / 窗口几何、版本号 **1.0.7**、整像素对齐、`loupeHiToken` 迟到结果作废、`loupeResampleStableOf` 稳定阈值，全部原样保留 |
+
+### 验证场景及对应预期效果（需覆盖）
+
+| # | 场景 | 操作 | 预期效果 |
+|---|---|---|---|
+| 1 | 默认放大镜（1:1 以上） | 右键开放大镜，悬停主视图 | 圆内边缘平滑、线条清晰、形状颜色不失真；**不再有 MipMap 造成的发糊 / 像素块**（本轮修复前默认恒走 `Medium`） |
+| 2 | 低倍放大（1:1 < 有效倍率 ≤ 2×） | 主视图缩放到刚好 >100% | 走 `High`(Cubic) 而非 `None`/`Medium`；边缘平滑不锯齿 |
+| 3 | 高倍放大（有效倍率 > 2×，直至 3× / 9×） | Ctrl+滚轮继续放大 | **仍走 `High`(Cubic)**，不会退化成 `Medium`(MipMap) 或 `None`(最近邻)；细节清晰、无过冲光晕 / 振铃伪影 |
+| 4 | 正好 1:1（100%） | 按 `F` / 缩放到 100% | `loupeNeedsResampleOf=false` 完全旁路：不额外解码、不改主视图画质；`Low` 档逐像素对应，画质与修复前一致 |
+| 5 | 缩小显示（<100%） | 缩小主视图 | 同 #4 完全旁路，插值 `Low` 比最近邻更平滑，无回归 |
+| 6 | 小尺寸图片（原图 1024px 以下） | 打开低分辨率相片并放大 | 目标边夹到原图长边、`loupeResampleGainOf=false` **跳过重解码**；靠 Cubic + AA 保持边缘平滑，不像素化；不白占一张大 `PixelMap` |
+| 7 | 大尺寸图片（4000px+ / HEIC 高分辨率） | 打开高分辨率相片并放大 | 目标边按真实倍率补足、夹 8192 cap，重解码出真实像素；细节清晰不模糊、不锯齿 |
+| 8 | 常见高 DPI 屏（density 2.0 / 3.0） | 高 DPI 显示器 / 缩放 150%~300% | `densityPixels` 参与有效倍率，所需真实像素不再被低估；边缘仍平滑、不发虚 |
+| 9 | 低 DPI / 异常 density（0.5 / 越界 / 读不到） | 低 DPI 屏或 display 读失败 | `loupeDensityRatioOf` 夹到 [0.5,4.0] / 回退 1；放大镜不失效、不崩溃 |
+| 10 | 鼠标圆内高频微动（性能） | 在圆内快速来回移动 | `loupeResampleStableOf`（差 <64 复用）+ 无增益跳过，**不反复重解码、不掉帧**；`loupeHiToken` 作废迟到结果不泄漏 |
+| 11 | 切图 / 换页 / 对开双页 | 滚轮翻页、左右页各自悬停 | uri/pane 双重校验，绝不把上一张高清图错画到新图上；左右页独立、画质一致（5 源统一 AA） |
+| 12 | 全屏 / 退出全屏 | 双击进全屏、ESC 退出 | 放大镜保留且画质不失效；ESC 分状态、窗口几何恢复不受影响 |
+| 13 | 开关 / 生命周期 | 右键 toggle 关闭、切模式、页面销毁 | `clearLoupeHiRes()` 释放并作废旧代号；不泄漏 PixelMap |
+| 14 | 既有交互回归 | 点选零滚动 / 顶栏贴顶 / hover 缩略图 / resize / 缓存账目 / 往上层 | 全部行为不变（静态契约逐条断言） |
+| 15 | 启动路径（性能护栏） | 冷启动 APP | `display` 只在放大镜首次使用时懒读，**不进 `aboutToAppear`**；不引入新的启动同步 IO，无 `APP_INPUT_BLOCK` 回归 |
+
+### 验证（本地，未编译 HAP）
+
+- `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 1132 passed, 0 failed**
+  （1116 → 1132，新增 16 条第十七轮契约：4 组纯函数 + 边界矩阵「不同倍率 × 不同尺寸 × 不同 DPI」、
+  8 条源码静态契约、旧误判清除断言、回归护栏；**改写 3 条第十六轮旧静态断言**到新接线）。
+- 纯函数边界用例：`densityPixels` NaN / 0 / 负 / 越界 / 高 DPI；画质档 `1.0001 / 2 / 3 / 6 / 12 / NaN`；
+  目标边 `scale=9` 夹 cap 与原图、原图 1500.9 → 1500、`≤1:1` 旁路；增益阈值 1096/1097、原图未知保守放行。
+- `git diff --check` / 剥离字符串注释后括号净平衡全 0 / `node --check` / `node --experimental-strip-types --check` 全绿；
+  版本仍 `1.0.7`，`AppScope/app.json5` 未改。
+- 计数型护栏：`.antialiased(LOUPE_AA_ENABLED)` **恰好 5 处**、`.interpolation(this.loupeInterpolation())` 5 处、
+  `.objectFit(ImageFit.Contain)` 5 处；主视图三处 `autoResize(false)` / `dynamicRangeMode(` / `High` 未动。
+
+### 待用户侧确认（DevEco Studio 编译 + 实机）
+
+1. 在 DevEco Studio（API 26）编译通过 —— 重点确认 `import display from '@ohos.display'`、
+   `getDefaultDisplaySync().densityPixels`、`.antialiased(Optional<boolean>)` 三处 API 在真机 SDK 下无签名报错。
+2. 按上表 **#1~#9** 逐档实机观察：任意倍率边缘平滑、细节清晰，无锯齿 / 像素化 / 过度模糊；
+   高 DPI 屏不发虚；小图不像素化、大图不模糊。
+3. **#10~#15** 交互与性能回归：圆内高频移动不掉帧、切图换页不串图、全屏往返不失效、冷启动无卡顿。
+
+**本次仍未编译 HAP / 未放桌面 / 未跑 `build.sh` / 未升版本 / 未 push**；DevEco Studio 编译、
+HAP 安装与实机验证仍由用户侧完成。
+
+
 ## 第十六轮：全屏往返窗口几何 / ESC 分状态 / 放大镜 >1:1 重采样（2026-11-15）
+
+> ⚠️ **订正（第十七轮）**：本节「做法（放大镜重采样）」中关于
+> 「ArkUI `.interpolation()` 对 `PixelMap` 图源不生效」的判断**有误**（那是 `sourceSize()` 的限制），
+> 且三档插值（`None / High / Medium`）档位选反 —— 放大镜恒 3× 却恒落 `Medium`(MipMap，缩小专用)。
+> 这两点已在**第十七轮**修正为「放大一律 `High`(Cubic) + 五源全开 `.antialiased(true)` + 真实设备密度」。
+> 本节其余内容（窗口几何 / ESC 分状态 / 整像素对齐 / token 性能护栏）仍然有效。详见上方第十七轮章节。
 
 两件事：① 双击进全屏保留普通模式的窗口尺寸与位置，ESC 首次退全屏并精确还原、
 再次 ESC 才退出 APP；② 修复放大镜放大后的锯齿 / 像素化 / 边缘粗糙，>1:1 才补足像素、

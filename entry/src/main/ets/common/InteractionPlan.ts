@@ -9,6 +9,9 @@
  *  ⑥ 第十六轮窗口模式：ESC 按当前窗口状态分派、全屏往返窗口几何保存 / 恢复；
  *  ⑦ 第十六轮放大镜重采样：>1:1 才分档插值 + 按放大倍率重解码补足真实像素、
  *    整数像素对齐、1:1 旁路；≤1:1 完全不触碰既有显示路径。
+ *  ⑧ 第十七轮放大镜边缘抗锯齿：修正 SDK 插值档语义错配（放大一律 Cubic，
+ *    绝不用 MipMap / 最近邻）、接入真实设备像素密度比、重解码按原图上限夹界 +
+ *    无增益跳过、PixelMap 边缘 AA。
  *
  * 只做数值判定，不碰任何 SDK / IO / 状态，便于静态契约测试直接 import。
  */
@@ -316,14 +319,19 @@ export const LOUPE_CUBIC_MAX_SCALE: number = 2;
 
 /** 图像插值档（脱离 SDK 的语义常量，Index.ets 映射到 ImageInterpolation）。
  *  按 HarmonyOS ArkUI 官方枚举：None=最近邻、Low=双线性、Medium=MipMap、High=Cubic。
- *  名字直接表达「该倍率下该用哪一档插值」，helper 只做 number → 枚举的映射。
- *  ⚠️ 官方文档明确：`.interpolation()` 对 **PixelMap 资源不生效**（只作用于放大时
- *  由组件自行解码的图源）。所以本轮不能只改插值档 —— 还必须给放大镜换成「按放大后
- *  像素需求重新解码的高分辨率 PixelMap」（见 Index.ets 的 loupeHiPx 链），
- *  否则 3 倍拉伸的仍是 1:1 显示框位图，锯齿 / 像素化一个都不会少。 */
+ *
+ *  ⚠️ 第十六轮注释曾断言「`.interpolation()` 对 PixelMap 不生效」，这是把
+ *  `sourceSize()` 的限制张冠李戴了：SDK 26 `component/image.d.ts` L1088 明确
+ *  `sourceSize` 不适用于 SVG / **PixelMap**；而 L1070 的 `interpolation()` 只排除
+ *  SVG / AnimatedDrawableDescriptor，**对 PixelMap 正常生效**，官方注释就是
+ *  "mitigates aliasing during image scaling"。第十七轮 ⑧ 节据此修正：插值档选错
+ *  （放大镜恒 3× 却恒落 Medium/MipMap，缩小专用档用于放大）才是锯齿的直接主因。
+ *
+ *  下列 ⑦ 节常量 / 函数保留供第十六轮回归断言使用，第十七轮起 Index.ets 的放大镜
+ *  **实际画质决策改用 ⑧ 节**，不再调用 loupeInterpolationTierOf。 */
 export const LOUPE_IP_NONE: number = 0;      // ≤1:1：最近邻 / 不插值（旁路，1:1 显示不受影响）
 export const LOUPE_IP_HIGH: number = 1;      // 1~2×：High(Cubic) 锐利重采样，补足像素、线条清晰
-export const LOUPE_IP_MEDIUM: number = 2;    // >2×：Medium(MipMap) 平滑重采样，抑制 Cubic 过冲光晕 / 伪影
+export const LOUPE_IP_MEDIUM: number = 2;    // >2×：Medium(MipMap)，第十六轮方案（已证语义错配）
 
 /** 放大镜「有效放大倍率」= 局部放大倍率 × 主视图缩放 × 设备像素密度比。
  *  三者任一非法（<=0 / NaN）都按 1 处理，绝不把脏值传进档位判定。
@@ -392,4 +400,98 @@ export function loupeResampleStableOf(prevEdge: number, nextEdge: number,
   }
   const d: number = minDelta > 0 ? minDelta : 1;
   return Math.abs(nextEdge - prevEdge) < d;
+}
+
+// ==================================================================
+// ⑧ 第十七轮：放大镜边缘抗锯齿（SDK 语义修正 / 真实密度 / 真实像素增益）
+// ==================================================================
+
+/** 设备逻辑像素密度比的合法区间：SDK 26 `@ohos.display` Display.densityPixels
+ *  明确为 [0.5, 4.0]，常见 1.0 / 3.0。高 DPI 屏 1vp 对应 2~3 物理像素，
+ *  放大镜写死 density=1 会低估倍率与所需真实像素 —— 这是「常见屏幕显示条件」的缺口。 */
+export const LOUPE_DENSITY_MIN: number = 0.5;
+export const LOUPE_DENSITY_MAX: number = 4.0;
+/** 读不到 / 非法密度时回退：1vp = 1px，与屏幕 dpi 解耦的保守值（第十六轮口径）。 */
+export const LOUPE_DENSITY_FALLBACK: number = 1;
+
+/** PixelMap 边缘抗锯齿开关。SDK 26 `component/image.d.ts` L1723 `antialiased`
+ *  （since 23，@stagemodelonly）明确 "enable anti-aliasing for the edges of a pixel
+ *  map image"，且 **"If the attribute is not set, anti-aliasing is disabled by default"**。
+ *  放大镜正是「把 PixelMap 放大后裁成圆」的典型场景，恒开启；未用 resizable / 未设
+ *  backgroundColor，官方两个失效条件都不触发。 */
+export const LOUPE_AA_ENABLED: boolean = true;
+
+/** 归一化设备像素密度比：NaN / 非有限 / <=0 一律回退 1，越界夹到 [0.5, 4.0]，
+ *  绝不把脏值传进倍率判定与解码边计算。 */
+export function loupeDensityRatioOf(raw: number): number {
+  if (!(raw === raw) || raw <= 0) {
+    return LOUPE_DENSITY_FALLBACK;
+  }
+  if (raw < LOUPE_DENSITY_MIN) {
+    return LOUPE_DENSITY_MIN;
+  }
+  if (raw > LOUPE_DENSITY_MAX) {
+    return LOUPE_DENSITY_MAX;
+  }
+  return raw;
+}
+
+/** 第十七轮画质档（SDK 官方枚举语义修正版）。
+ *  依据 `component/image.d.ts` L190-236：
+ *    · High   = Cubic，官方 "produces scaled images of the **highest possible
+ *      quality**"，是**放大**该用的档；
+ *    · Medium = MipMap，预生成低分辨率金字塔，是**缩小**(minification) 专用档，
+ *      放大时只会退化 / 发糊 —— 第十六轮把放大镜恒 3× 判成它，是锯齿 / 模糊的直接主因；
+ *    · None   = 最近邻，锯齿 / 像素化之源，绝不用于放大镜；
+ *    · Low    = 双线性，1:1 逐像素对应不受影响、缩小时比最近邻平滑。
+ *  · scale > 1:1 → HIGH：任意放大倍率都走 Cubic，边缘平滑 + 线条清晰 + 不失真；
+ *  · scale <= 1:1 → LOW：1:1 显示不受影响，缩小也比最近邻平滑；
+ *  · 脏值(NaN) → LOW 安全兜底，绝不让放大镜落到最近邻。 */
+export const LOUPE_QA_HIGH: number = 1;
+export const LOUPE_QA_LOW: number = 0;
+
+export function loupeQualityTierOf(scale: number): number {
+  if (!(scale === scale)) {
+    return LOUPE_QA_LOW;
+  }
+  return scale > LOUPE_RESAMPLE_1X ? LOUPE_QA_HIGH : LOUPE_QA_LOW;
+}
+
+/** 第十七轮目标解码边：按「放大后真实像素需求 = base × scale」算（scale 已含
+ *  真实密度比），夹到 cap 后**再夹到原图长边 srcLong**。
+ *  ⚠️ `decodePx` 的 desiredSize 只能降采样、不能升采样（SDK L1088 "works only when
+ *  the target size is smaller than the source size"）：请求超过原图边毫无意义，
+ *  只会白解码一次 + 白占一张大 PixelMap。小图 / 原图尺寸未知时由本函数与
+ *  loupeResampleGainOf 一起把画质交回 Cubic + AA，性能稳定。
+ *  · <=1:1 返回 base（1:1 旁路，不额外解码）；base 非法返回 0。 */
+export function loupeResampleEdge2Of(baseEdge: number, scale: number,
+  srcLong: number, cap: number): number {
+  const base: number = baseEdge > 0 && baseEdge === baseEdge ? baseEdge : 0;
+  if (base <= 0 || !loupeNeedsResampleOf(scale)) {
+    return base;
+  }
+  const want: number = Math.ceil(base * scale);
+  const c: number = cap > 0 && cap === cap ? cap : 0;
+  let edge: number = c > 0 ? Math.min(want, c) : want;
+  if (srcLong > 0 && srcLong === srcLong) {
+    edge = Math.min(edge, Math.floor(srcLong));
+  }
+  return edge;
+}
+
+/** 重解码是否有「真实像素增益」：desiredSize 不升采样，实际最多只能拿到
+ *  min(目标边, 原图长边)。只有当它明显超过主视图当前解码边时，重解码才补得出像素；
+ *  否则（小图 / 原图分辨率不足 / 已按原图满分辨率解过）**跳过重解码**，直接靠
+ *  Cubic + antialiased 保证边缘平滑 —— 省一次解码、省一张大图内存，性能稳定。
+ *  srcLong <= 0（尺寸未知 / 缓存未命中）保守返回 true，交给 stable 阈值与 token 兜底。 */
+export function loupeResampleGainOf(targetEdge: number, srcLong: number,
+  currentEdge: number, minGain: number): boolean {
+  if (!(targetEdge === targetEdge) || targetEdge <= 0) {
+    return false;
+  }
+  const avail: number = srcLong > 0 && srcLong === srcLong
+    ? Math.min(targetEdge, srcLong) : targetEdge;
+  const cur: number = currentEdge > 0 && currentEdge === currentEdge ? currentEdge : 0;
+  const g: number = minGain > 0 && minGain === minGain ? minGain : 1;
+  return avail > cur + g;
 }

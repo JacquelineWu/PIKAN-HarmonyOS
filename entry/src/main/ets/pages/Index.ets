@@ -51,6 +51,7 @@ import abilityAccessCtrl from '@ohos.abilityAccessCtrl';
 import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
 import window from '@ohos.window';
+import display from '@ohos.display';
 import colorSpaceManager from '@ohos.graphics.colorSpaceManager';
 import util from '@ohos.util';
 import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
@@ -95,10 +96,10 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,
   loupeVisibleOf, ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,
   escActionOf, shouldCaptureWindowRect, shouldRestoreWindowRect, msSinceFullExitOf,
-  LOUPE_IP_NONE, LOUPE_IP_MEDIUM, LOUPE_IP_HIGH,
-  loupeEffectiveScaleOf, loupeNeedsResampleOf, loupeInterpolationTierOf,
-  loupePixelAlignOf, loupeResampleEdgeOf,
-  loupeResampleStableOf } from '../common/InteractionPlan';
+  loupeEffectiveScaleOf, loupeNeedsResampleOf,
+  loupePixelAlignOf, loupeResampleStableOf,
+  LOUPE_AA_ENABLED, LOUPE_QA_HIGH, loupeDensityRatioOf, loupeQualityTierOf,
+  loupeResampleEdge2Of, loupeResampleGainOf } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import { BusinessError } from '@ohos.base';
 
@@ -190,15 +191,19 @@ const TOPBAR_PEEK_KEEP_VP: number = TOPBAR_H + TOPBAR_KEEP_PX;
 const LOUPE_CM: number = LOUPE_CM_14;
 const LOUPE_ZOOM: number = 3;
 const LOUPE_D_VP: number = loupeDiameterVp(LOUPE_CM);
-/** 第十六轮：放大镜放大倍率换算用的密度比基准（1vp ≈ 1px 的保守值，与屏幕 dpi 解耦）；
- *  有效放大倍率 = LOUPE_ZOOM × 主视图 zoom × 该基准，仅用于插值分档判定，不参与几何。 */
+/** 第十七轮：密度比兜底基准（读不到 display 时 1vp ≈ 1px，与屏幕 dpi 解耦）。
+ *  真实密度由 loupeDensityOf() 懒读 display.getDefaultDisplaySync().densityPixels
+ *  并经 loupeDensityRatioOf 归一化；有效放大倍率 = LOUPE_ZOOM × 主视图 zoom × 真实密度。 */
 const LOUPE_DENSITY_RATIO: number = 1;
 /** 第十六轮：重采样目标解码边上限（防止超大画布 ×3 放大把解码分辨率推到失控）。
- *  是 loupeResampleEdgeOf 的 cap；decodePx 只在原图更大时按它降采样，
- *  原图比它小则按原图分辨率解，故绝大多数相片实际占用远低于该上限。 */
+ *  第十七轮：作为 loupeResampleEdge2Of 的 cap，并额外夹到原图长边 ——
+ *  decodePx 的 desiredSize 只能降采样不能升采样，请求超过原图边毫无意义。 */
 const LOUPE_RESAMPLE_MAX_EDGE: number = 8192;
 /** 第十六轮：解码边稳定阈值 —— 相邻两档目标边差小于该值就不重解，性能稳定。 */
 const LOUPE_RESAMPLE_STABLE_MIN_DELTA: number = 64;
+/** 第十七轮：重解码「真实像素增益」阈值 —— 目标边相对主视图解码边的提升不足该值时
+ *  跳过重解码（小图 / 原图分辨率不足时补不出像素），省一次解码与一张大图内存。 */
+const LOUPE_RESAMPLE_MIN_GAIN: number = 96;
 /** 第十六轮：退出全屏后的 ESC 冷却期（ms）。真全屏下 ESC 常被窗口管理器先消费，
  *  系统自行退出沉浸 → 画布缩小触发自愈 setFull(false) → 随后补发 / 迟到的那一次 ESC
  *  会落到「非全屏」而被误当成「再次 ESC 退出 APP」。冷却期内只吞一次，避免首次 ESC
@@ -1771,6 +1776,10 @@ struct Index {
   private loupeHiPane: number = LOUPE_PANE_NONE;
   private loupeHiEdge: number = 0;
   private loupeHiToken: number = 0;
+  /** 第十七轮：设备逻辑像素密度比（1vp = dpr px），懒读一次并缓存；0 = 尚未读取。
+   *  SDK 26 @ohos.display: display.getDefaultDisplaySync().densityPixels ∈ [0.5, 4.0]。
+   *  写在放大镜字段区，绝不进 aboutToAppear 启动路径（启动只打常量快照）。 */
+  private loupeDensity: number = 0;
 
   // ---- 滚轮翻页：去抖 + 合并（见 onWheel / flushWheel 注释）----
   private lastAxisMs: number = 0;     // 最近一次轴事件（滚轮/触控板）的时刻，用于屏蔽「被当成拖拽」的伪平移
@@ -3910,37 +3919,57 @@ struct Index {
   // 第十六轮：放大镜 >1:1 重采样（分档插值 / 高分辨率图源 / 1:1 旁路）
   // ------------------------------------------------------------------
 
-  /** 有效放大倍率 = 局部 3× × 主视图缩放 × 密度比。
+  /** 第十七轮：设备像素密度比，懒读一次并缓存（绝不进启动路径）。
+   *  SDK 26 `@ohos.display` Display.densityPixels ∈ [0.5, 4.0]，常见 1.0 / 3.0；
+   *  读失败 / 平台差异时经 loupeDensityRatioOf 回退 1，绝不让放大镜失效。
+   *  第十六轮把密度写死 1，高 DPI 屏上 1vp = 2~3 物理像素，倍率与所需像素被
+   *  严重低估 —— 这是「常见屏幕显示条件」下仍锯齿 / 发虚的根因之一。 */
+  private loupeDensityOf(): number {
+    if (this.loupeDensity > 0) {
+      return this.loupeDensity;
+    }
+    let raw: number = LOUPE_DENSITY_RATIO;
+    try {
+      raw = display.getDefaultDisplaySync().densityPixels;
+    } catch (e) {
+      raw = LOUPE_DENSITY_RATIO;
+    }
+    this.loupeDensity = loupeDensityRatioOf(raw);
+    return this.loupeDensity;
+  }
+
+  /** 有效放大倍率 = 局部 3× × 主视图缩放 × **真实**设备密度比。
    *  这是「是否严格超过原图 1:1（100%）」的唯一真值来源，不在 UI 里另算。 */
   private loupeScale(): number {
-    return loupeEffectiveScaleOf(LOUPE_ZOOM, this.zoom, LOUPE_DENSITY_RATIO);
+    return loupeEffectiveScaleOf(LOUPE_ZOOM, this.zoom, this.loupeDensityOf());
   }
 
-  /** 按倍率分档选 ArkUI 插值档：
-   *  ≤1:1 → None（最近邻，旁路：未缩放 / 正好 1:1 / 缩小完全不受影响）；
-   *  1:1 < scale ≤ 2 → High(Cubic)：补足像素、线条清晰、形状颜色不失真；
-   *  scale > 2 → Medium(MipMap)：3 倍放大镜这类高倍改用平滑重采样，
-   *  消锯齿、边缘平滑、不过冲，避免 Cubic 锐化核放大振铃带来的光晕 / 伪影。
-   *  ⚠️ 官方限制：`.interpolation()` 对 PixelMap 图源不生效，故它主要作用于
-   *  `Image(uri)` 兜底分支；PixelMap 分支的画质由下面的高分辨率重解码补足真实像素。 */
+  /** 第十七轮：按 SDK 官方枚举语义修正插值档（放大锯齿的直接主因就在这里）。
+   *  SDK `component/image.d.ts` L190-236：High=Cubic 是官方「放大最高质量」档；
+   *  Medium=MipMap 是**缩小专用**的低分辨率金字塔，放大时只会退化 / 发糊；
+   *  None=最近邻是锯齿 / 像素化之源；Low=双线性是 SDK 默认值。
+   *  · 任意 >1:1 放大 → High(Cubic)：边缘平滑 + 线条清晰 + 形状颜色不失真，
+   *    绝不再用第十六轮误配的 Medium(MipMap)；
+   *  · ≤1:1 → Low(双线性)：1:1 逐像素对应不受影响，缩小也比最近邻平滑，
+   *    绝不再用 None(最近邻)。
+   *  ⚠️ SDK L1070 明确 `.interpolation()` 只排除 SVG / AnimatedDrawableDescriptor，
+   *  对 PixelMap **生效**（第十六轮把它与 L1088 sourceSize 的限制混淆了）；
+   *  配合 loupeLayer 的 `.antialiased(LOUPE_AA_ENABLED)` 打开 PixelMap 边缘抗锯齿。 */
   private loupeInterpolation(): ImageInterpolation {
-    const tier: number = loupeInterpolationTierOf(this.loupeScale());
-    if (tier === LOUPE_IP_NONE) {
-      return ImageInterpolation.None;
-    }
-    if (tier === LOUPE_IP_HIGH) {
+    const tier: number = loupeQualityTierOf(this.loupeScale());
+    if (tier === LOUPE_QA_HIGH) {
       return ImageInterpolation.High;
     }
-    if (tier === LOUPE_IP_MEDIUM) {
-      return ImageInterpolation.Medium;
-    }
-    return ImageInterpolation.None;
+    return ImageInterpolation.Low;
   }
 
-  /** 目标解码边 = 主视图解码边 × 局部放大倍率，夹到上限控内存。
-   *  ≤1:1 时 loupeResampleEdgeOf 原样返回 baseEdge（1:1 旁路，不额外解图）。 */
-  private loupeResampleTargetEdge(): number {
-    return loupeResampleEdgeOf(this.viewEdge(), LOUPE_ZOOM, LOUPE_RESAMPLE_MAX_EDGE);
+  /** 第十七轮：目标解码边 = 放大后真实像素需求（scale 已含真实密度），
+   *  夹到 cap 后**再夹到原图长边**（decodePx 的 desiredSize 只能降采样、不能升采样，
+   *  请求超过原图边毫无意义，只会白解码一次 + 白占一张大 PixelMap）。
+   *  ≤1:1 返回 baseEdge（1:1 旁路，不额外解图）。 */
+  private loupeResampleTargetEdge(uri: string): number {
+    return loupeResampleEdge2Of(this.viewEdge(), this.loupeScale(),
+      this.srcLongOf(uri), LOUPE_RESAMPLE_MAX_EDGE);
   }
 
   /** 当前 pane 对应的档案 uri：左页 = 当前张，右页 = 对开第二张。 */
@@ -3961,12 +3990,14 @@ struct Index {
       loupeNeedsResampleOf(this.loupeScale());
   }
 
-  /** >1:1 时按放大后像素需求补解一张高分辨率 PixelMap 给放大镜 —— 本轮画质修复的核心。
-   *  根因：圆内原来画的是「1:1 显示框分辨率」的 viewPixelMap，再硬拉 3 倍 →
-   *  每个源像素被放大成像素块（锯齿 / 像素化 / 边缘粗糙）；而 ArkUI 的
-   *  `.interpolation()` 对 PixelMap 不生效，光换插值档救不了。
-   *  这里改用项目自己的 decodePx()（EXIF 旋转 / ICC / HDR 全链路一致）按目标边重解，
-   *  放大后每个显示像素都有真实源像素；配合整像素对齐，边缘平滑且线条清晰。
+  /** >1:1 时按放大后像素需求补解一张高分辨率 PixelMap 给放大镜 —— 画质修复核心。
+   *  第十七轮修正：ArkUI `.interpolation()` 对 PixelMap **生效**（SDK 26
+   *  `component/image.d.ts` L1070 只排除 SVG / AnimatedDrawableDescriptor；
+   *  L1088 才是对 PixelMap 不生效的 `sourceSize`）。第十六轮把两者混淆，于是
+   *  放大镜恒 3× 却恒落 Medium(MipMap，缩小专用) → 锯齿 / 发糊的直接主因。
+   *  本轮：放大一律 High(Cubic) + 五个源统一 `.antialiased(true)` 开边缘 AA；
+   *  同时仍按真实像素需求重解码补足像素（desiredSize 只能降采样，故目标边
+   *  夹到原图长边，且无真实增益时直接跳过，靠 Cubic + AA 保证平滑）。
    *  性能稳定：同图同页 + 目标边变化小于阈值时直接复用，鼠标在圆内高频微动
    *  不反复重解码；代号作废的迟到结果立即释放，`1:1 及以下` 完全旁路。 */
   private ensureLoupeHiRes(pane: number): void {
@@ -3974,8 +4005,21 @@ struct Index {
       return;
     }
     const uri: string = this.loupeUriOf(pane);
-    const edge: number = this.loupeResampleTargetEdge();
-    if (uri.length === 0 || edge <= 0) {
+    if (uri.length === 0) {
+      return;
+    }
+    const edge: number = this.loupeResampleTargetEdge(uri);
+    if (edge <= 0) {
+      return;
+    }
+    // 第十七轮：无真实像素增益 → 跳过重解码。desiredSize 只能降采样，小图 /
+    // 原图分辨率不足时按目标边也补不出像素，白解码一次还白占一张大 PixelMap；
+    // 此时直接靠 Cubic + antialiased 保证边缘平滑，并释放已有高清源让它回退。
+    if (!loupeResampleGainOf(edge, this.srcLongOf(uri), this.viewEdge(),
+      LOUPE_RESAMPLE_MIN_GAIN)) {
+      if (this.loupeHiPx !== undefined) {
+        this.clearLoupeHiRes();
+      }
       return;
     }
     if (this.loupeHiPx !== undefined && this.loupeHiUri === uri &&
@@ -6694,21 +6738,24 @@ struct Index {
    *  边缘 clamp 保证圆 (0..d) 始终被放大图覆盖，不空白、不错位。
    *  圆本身用 borderRadius(d/2) + clip(true) 裁出；Transparent 命中模式让浮层不吞鼠标事件，
    *  否则圆一出现就挡住光标、触发 leave → 闪烁。
-   *  第十六轮：>1:1 时优先画「按放大后像素需求重解码」的高分辨率图源（loupeHiPx），
-   *  圆内放大图的尺寸 / 偏移全部整像素对齐，插值档按有效倍率分档；≤1:1 完全旁路，
-   *  既不额外解码也不改插值，未缩放 / 1:1 显示不受影响。 */
+   *  第十七轮：>1:1 时优先画「按放大后像素需求重解码」的高分辨率图源（loupeHiPx），
+   *  五个源统一开 High(Cubic) / Low 插值 + `.antialiased(true)` 边缘 AA；
+   *  圆内放大图的尺寸 / 偏移全部整像素对齐；≤1:1 完全旁路（不额外解码、
+   *  不改主视图画质属性），未缩放 / 1:1 显示不受影响。 */
   @Builder
   loupeLayer(pane: number, uri: string, half: boolean) {
     if (loupeVisibleOf(this.loupeEnabled, this.loupePane, pane,
       this.loupeHover, this.hasLoupeImage(pane))) {
       Stack() {
         if (this.loupeHiUsable(uri, pane)) {
-          // 第十六轮：>1:1 时优先用「按放大后像素需求重解码」的高分辨率图源。
+          // 第十七轮：>1:1 时优先用「按放大后像素需求重解码」的高分辨率图源。
           // 真实像素补足 → 无像素块 / 无锯齿；objectFit(Contain) 保证与主图逐点对应、不变形。
-          // 官方 .interpolation() 对 PixelMap 不生效，这里靠源分辨率而非插值档取胜。
+          // SDK 26 官方：.interpolation() 对 PixelMap 生效（High=Cubic 放大最高质量），
+          // .antialiased(true) 再补 PixelMap 边缘 AA（默认关闭，since 23）。
           Image(this.loupeHiPx!)
             .objectFit(ImageFit.Contain)
             .interpolation(this.loupeInterpolation())
+            .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
             .width(this.loupeContentW(half))
             .height(this.loupeContentH())
@@ -6721,6 +6768,7 @@ struct Index {
             Image(this.rightPixelMap!)
               .objectFit(ImageFit.Contain)
               .interpolation(this.loupeInterpolation())
+              .antialiased(LOUPE_AA_ENABLED)
               .draggable(false)
               .width(this.loupeContentW(half))
               .height(this.loupeContentH())
@@ -6730,8 +6778,9 @@ struct Index {
           Image(this.viewPixelMap!)
             .objectFit(ImageFit.Contain)
             // 放大镜是「放大显示」的临时浮层，不参与主视图 / 兜底 / 右页那三处
-            // autoResize(false) 的画质契约计数；插值按倍率分档取最佳视觉。
+            // autoResize(false) 的画质契约计数；插值 High/Low 两档 + 边缘 AA。
             .interpolation(this.loupeInterpolation())
+            .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
             .width(this.loupeContentW(half))
             .height(this.loupeContentH())
@@ -6740,6 +6789,7 @@ struct Index {
           Image(this.lowPixelMap!)
             .objectFit(ImageFit.Contain)
             .interpolation(this.loupeInterpolation())
+            .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
             .width(this.loupeContentW(half))
             .height(this.loupeContentH())
@@ -6748,6 +6798,7 @@ struct Index {
           Image(uri)
             .objectFit(ImageFit.Contain)
             .interpolation(this.loupeInterpolation())
+            .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
             .width(this.loupeContentW(half))
             .height(this.loupeContentH())

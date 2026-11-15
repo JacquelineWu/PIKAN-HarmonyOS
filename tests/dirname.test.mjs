@@ -25,7 +25,10 @@
  * 第十二轮「切换 NAS 目录时 pumpAll 换源竞态崩溃（Cannot read property uri of undefined）」、
  * 第十三轮「点选零自动滚动 / 整栏贴顶唤出 / 预览图 3cm 3 倍放大镜」、
  * 第十四轮「放大镜 6cm / 左右并排双页独立 / 全屏保留 / 退出全屏后不失效」、
- * 第十五轮「放大镜预设关闭 / 鼠标右键 toggle 开关」。
+ * 第十五轮「放大镜预设关闭 / 鼠标右键 toggle 开关」、
+ * 第十六轮「ESC 分状态 / 全屏往返窗口几何 / 放大镜 >1:1 重采样」、
+ * 第十七轮「放大镜边缘抗锯齿：SDK 插值档语义修正 / 真实设备密度 / 原图上限夹界 /
+ * 真实像素增益跳过 / PixelMap 边缘 AA」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -74,7 +77,11 @@ import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
   LOUPE_IP_NONE, LOUPE_IP_HIGH, LOUPE_IP_MEDIUM,
   loupeEffectiveScaleOf, loupeNeedsResampleOf, loupeInterpolationTierOf,
   loupePixelAlignOf, loupeResampleEdgeOf,
-  loupeResampleStableOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
+  loupeResampleStableOf,
+  LOUPE_DENSITY_MIN, LOUPE_DENSITY_MAX, LOUPE_DENSITY_FALLBACK,
+  LOUPE_AA_ENABLED, LOUPE_QA_HIGH, LOUPE_QA_LOW,
+  loupeDensityRatioOf, loupeQualityTierOf, loupeResampleEdge2Of,
+  loupeResampleGainOf } from '../entry/src/main/ets/common/InteractionPlan.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -3098,10 +3105,13 @@ const CAPTURE16_CODE = stripComments(INDEX.slice(
   INDEX.indexOf('  private capturePreFullRect('), INDEX.indexOf('  private setFull(')));
 const LOUPE16_CODE = stripComments(LOUPE13_CODE);
 
-check('② 第十六轮纯函数 / 常量全部 import 到 Index.ets',
+check('② 第十七轮画质纯函数 / 常量全部 import 到 Index.ets（第十六轮旧三档函数已退役）',
   INDEX.includes('ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,') &&
   INDEX.includes('shouldCaptureWindowRect, shouldRestoreWindowRect, msSinceFullExitOf,') &&
-  INDEX.includes('loupeResampleEdgeOf,') && INDEX.includes('loupeResampleStableOf'), true);
+  INDEX.includes('loupeEffectiveScaleOf, loupeNeedsResampleOf') &&
+  INDEX.includes('loupePixelAlignOf, loupeResampleStableOf') &&
+  INDEX.includes('LOUPE_AA_ENABLED, LOUPE_QA_HIGH, loupeDensityRatioOf, loupeQualityTierOf') &&
+  INDEX.includes('loupeResampleEdge2Of, loupeResampleGainOf'), true);
 check('② 四个新常量就位（密度比 / 解码边上限 / 稳定阈值 / ESC 冷却）',
   INDEX.includes('const LOUPE_DENSITY_RATIO: number = 1;') &&
   INDEX.includes('const LOUPE_RESAMPLE_MAX_EDGE: number = 8192;') &&
@@ -3147,13 +3157,19 @@ check('② 全屏快照字段就位（本次往返专用，用完即清）',
   INDEX.includes('private hasPreFullRect: boolean') &&
   INDEX.includes('private restoreRectPending: boolean') &&
   INDEX.includes('private lastFullExitAt: number'), true);
-check('② loupeInterpolation 三档映射完整（None / Medium / High）',
-  LOUPE_HELP16_CODE.includes('return ImageInterpolation.None;') &&
-  LOUPE_HELP16_CODE.includes('return ImageInterpolation.Medium;') &&
+check('② loupeInterpolation 两档映射（第十七轮）：>1:1→High(Cubic) / ≤1:1→Low，绝不用 MipMap / 最近邻',
   LOUPE_HELP16_CODE.includes('return ImageInterpolation.High;') &&
-  LOUPE_HELP16_CODE.includes('loupeInterpolationTierOf(this.loupeScale())'), true);
-check('② 高分辨率图源链：按倍率重解码 + 整像素对齐 + 1:1 旁路 + 性能稳定',
-  LOUPE_HELP16_CODE.includes('loupeResampleEdgeOf(this.viewEdge(), LOUPE_ZOOM, LOUPE_RESAMPLE_MAX_EDGE)') &&
+  LOUPE_HELP16_CODE.includes('return ImageInterpolation.Low;') &&
+  LOUPE_HELP16_CODE.includes('return ImageInterpolation.None;') === false &&
+  LOUPE_HELP16_CODE.includes('return ImageInterpolation.Medium;') === false &&
+  LOUPE_HELP16_CODE.includes('loupeQualityTierOf(this.loupeScale())'), true);
+check('② 高分辨率图源链（第十七轮）：真实密度倍率 + 原图上限夹界 + 无增益跳过 + 1:1 旁路 + 性能稳定',
+  LOUPE_HELP16_CODE.includes('loupeResampleEdge2Of(this.viewEdge(), this.loupeScale(),') &&
+  LOUPE_HELP16_CODE.includes('this.srcLongOf(uri), LOUPE_RESAMPLE_MAX_EDGE)') &&
+  LOUPE_HELP16_CODE.includes('this.loupeResampleTargetEdge(uri)') &&
+  LOUPE_HELP16_CODE.includes('loupeResampleGainOf(edge, this.srcLongOf(uri), this.viewEdge(),') &&
+  LOUPE_HELP16_CODE.includes('LOUPE_RESAMPLE_MIN_GAIN') &&
+  LOUPE_HELP16_CODE.includes('this.clearLoupeHiRes();') &&
   LOUPE_HELP16_CODE.includes('loupeNeedsResampleOf(this.loupeScale())') &&
   LOUPE_HELP16_CODE.includes('loupeResampleStableOf(this.loupeHiEdge, edge,') &&
   LOUPE_HELP16_CODE.includes('this.decodeTo(uri, edge, false)') &&
@@ -3193,6 +3209,134 @@ check('② 第十六轮回归护栏：三处画质计数 / 版本 / 往上层 / 
   INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
   INDEX.includes('this.toolBtn(\'往上层\', \'up\', true)') &&
   INDEX.includes('@State topBarPeek: boolean = false;') &&
+  INDEX.includes('quitApp()') && INDEX.includes('ability.terminateSelf()'), true);
+
+// ==================== 第十七轮：放大镜边缘抗锯齿（SDK 语义修正 / 真实密度 / 增益跳过 / AA）====================
+console.log('--- 第十七轮 ①：InteractionPlan.ts 纯函数（密度 / 画质档 / 目标边 / 真实增益） ---');
+check('① 常量就位：密度区间 [0.5,4.0] / 兜底 1 / AA 恒开 / 画质档 HIGH=1 LOW=0',
+  LOUPE_DENSITY_MIN === 0.5 && LOUPE_DENSITY_MAX === 4.0 &&
+  LOUPE_DENSITY_FALLBACK === 1 && LOUPE_AA_ENABLED === true &&
+  LOUPE_QA_HIGH === 1 && LOUPE_QA_LOW === 0, true);
+check('① 密度归一化：NaN / 0 / 负数回退 1，越界夹到 [0.5,4.0]，合法值原样（含高 DPI 2 / 3）',
+  loupeDensityRatioOf(NaN) === 1 && loupeDensityRatioOf(0) === 1 &&
+  loupeDensityRatioOf(-1) === 1 && loupeDensityRatioOf(Infinity) === 4 &&
+  loupeDensityRatioOf(0.3) === 0.5 && loupeDensityRatioOf(5) === 4 &&
+  loupeDensityRatioOf(0.5) === 0.5 && loupeDensityRatioOf(4) === 4 &&
+  loupeDensityRatioOf(1) === 1 && loupeDensityRatioOf(2) === 2 &&
+  loupeDensityRatioOf(3) === 3, true);
+check('① 画质档：任意 >1:1 一律 HIGH(Cubic)，≤1:1 与 NaN 落 LOW(双线性)，绝不 MipMap / 最近邻',
+  loupeQualityTierOf(1.0001) === LOUPE_QA_HIGH &&
+  loupeQualityTierOf(2) === LOUPE_QA_HIGH &&
+  loupeQualityTierOf(3) === LOUPE_QA_HIGH &&
+  loupeQualityTierOf(6) === LOUPE_QA_HIGH &&
+  loupeQualityTierOf(12) === LOUPE_QA_HIGH &&
+  loupeQualityTierOf(1) === LOUPE_QA_LOW &&
+  loupeQualityTierOf(0.5) === LOUPE_QA_LOW &&
+  loupeQualityTierOf(NaN) === LOUPE_QA_LOW, true);
+check('① 目标解码边：按真实倍率放大、夹 cap、再夹原图长边（desiredSize 不升采样）',
+  loupeResampleEdge2Of(1000, 3, 6000, 8192) === 3000 &&
+  loupeResampleEdge2Of(1000, 3, 2000, 8192) === 2000 &&
+  loupeResampleEdge2Of(1000, 9, 100000, 8192) === 8192 &&
+  loupeResampleEdge2Of(1000, 9, 6000, 8192) === 6000 &&
+  loupeResampleEdge2Of(1000, 3, 1500.9, 8192) === 1500, true);
+check('① 目标解码边：≤1:1 / NaN / 缩小完全旁路返回 base，非法 base 返回 0，原图未知不夹原图',
+  loupeResampleEdge2Of(1000, 1, 6000, 8192) === 1000 &&
+  loupeResampleEdge2Of(1000, 0.5, 6000, 8192) === 1000 &&
+  loupeResampleEdge2Of(1000, NaN, 6000, 8192) === 1000 &&
+  loupeResampleEdge2Of(1000, 3, 0, 8192) === 3000 &&
+  loupeResampleEdge2Of(0, 3, 6000, 8192) === 0 &&
+  loupeResampleEdge2Of(-5, 3, 6000, 8192) === 0 &&
+  loupeResampleEdge2Of(NaN, 3, 6000, 8192) === 0, true);
+check('① 真实像素增益：目标边明显超当前边才重解；小图 / 增益不足跳过；尺寸未知保守放行',
+  loupeResampleGainOf(3000, 6000, 1000, 96) === true &&
+  loupeResampleGainOf(1097, 6000, 1000, 96) === true &&
+  loupeResampleGainOf(1096, 6000, 1000, 96) === false &&
+  loupeResampleGainOf(5000, 1200, 1000, 96) === true &&
+  loupeResampleGainOf(5000, 1050, 1000, 96) === false &&
+  loupeResampleGainOf(5000, 0, 1000, 96) === true &&
+  loupeResampleGainOf(0, 6000, 1000, 96) === false &&
+  loupeResampleGainOf(NaN, 6000, 1000, 96) === false &&
+  loupeResampleGainOf(3000, 6000, 0, 96) === true &&
+  loupeResampleGainOf(3000, 6000, 1000, 0) === true, true);
+check('① 边界矩阵：不同倍率 × 不同尺寸 × 不同 DPI（有效倍率 = 3× × zoom × dpr）',
+  // 高 DPI(dpr=3) + 放大镜 3× + zoom=1 → 有效倍率 9，大图放大走 HIGH + 目标边夹 cap
+  loupeQualityTierOf(loupeEffectiveScaleOf(3, 1, loupeDensityRatioOf(3))) === LOUPE_QA_HIGH &&
+  loupeResampleEdge2Of(1000, 9, 100000, 8192) === 8192 &&
+  // 低 DPI(dpr=0.5) + 缩小视图 zoom=0.5 → 有效倍率 0.75，1:1 旁路不解码
+  loupeQualityTierOf(loupeEffectiveScaleOf(3, 0.5, loupeDensityRatioOf(0.5))) === LOUPE_QA_LOW &&
+  loupeResampleEdge2Of(1000, 0.75, 6000, 8192) === 1000 &&
+  // 小图（原图 1080）即使高倍率，目标边也夹到原图且增益不足 → 跳过重解码
+  loupeResampleEdge2Of(1000, 9, 1080, 8192) === 1080 &&
+  loupeResampleGainOf(1080, 1080, 1000, 96) === false &&
+  // 超大图 + 高 DPI：夹到 cap 后仍有巨大增益 → 重解码
+  loupeResampleGainOf(8192, 12000, 1000, 96) === true, true);
+
+console.log('--- 第十七轮 ②：Index.ets 源码静态契约（真实密度 / 两档 / AA / 增益 / 回退护栏） ---');
+const LOUPE_HELP17_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('  private loupeDensityOf('), INDEX.indexOf('  /** fillSizes')));
+const LOUPE17_CODE = stripComments(INDEX.slice(
+  INDEX.indexOf('  loupeLayer('), INDEX.indexOf('  previewImage(')));
+check('② 接入真实设备密度：import display / densityPixels / 懒读缓存字段 / 归一化 / 不进启动路径',
+  INDEX.includes("import display from '@ohos.display';") &&
+  LOUPE_HELP17_CODE.includes('display.getDefaultDisplaySync().densityPixels') &&
+  LOUPE_HELP17_CODE.includes('private loupeDensityOf(): number') &&
+  LOUPE_HELP17_CODE.includes('this.loupeDensity = loupeDensityRatioOf(raw);') &&
+  INDEX.includes('private loupeDensity: number = 0;') &&
+  LOUPE_HELP17_CODE.includes('loupeEffectiveScaleOf(LOUPE_ZOOM, this.zoom, this.loupeDensityOf())') &&
+  INDEX.includes('const LOUPE_DENSITY_RATIO: number = 1;'), true);
+check('② 修正 SDK 插值档语义：放大镜恒 3× 一律 High(Cubic)，≤1:1 用 Low，绝无 Medium(MipMap) / None(最近邻)',
+  LOUPE_HELP17_CODE.includes('loupeQualityTierOf(this.loupeScale())') &&
+  LOUPE_HELP17_CODE.includes('return ImageInterpolation.High;') &&
+  LOUPE_HELP17_CODE.includes('return ImageInterpolation.Low;') &&
+  LOUPE_HELP17_CODE.includes('return ImageInterpolation.Medium;') === false &&
+  LOUPE_HELP17_CODE.includes('return ImageInterpolation.None;') === false, true);
+check('② 目标解码边按真实倍率 + 原图长边夹界（srcLongOf）+ cap（decodePx 只能降采样）',
+  LOUPE_HELP17_CODE.includes('loupeResampleEdge2Of(this.viewEdge(), this.loupeScale(),') &&
+  LOUPE_HELP17_CODE.includes('this.srcLongOf(uri), LOUPE_RESAMPLE_MAX_EDGE)') &&
+  LOUPE_HELP17_CODE.includes('private loupeResampleTargetEdge(uri: string): number') &&
+  LOUPE_HELP17_CODE.includes('this.loupeResampleTargetEdge(uri)'), true);
+check('② 无真实像素增益跳过重解码并释放高清源（省一次解码 + 一张大 PixelMap 内存）',
+  LOUPE_HELP17_CODE.includes('loupeResampleGainOf(edge, this.srcLongOf(uri), this.viewEdge(),') &&
+  LOUPE_HELP17_CODE.includes('LOUPE_RESAMPLE_MIN_GAIN') &&
+  LOUPE_HELP17_CODE.includes('this.clearLoupeHiRes();') &&
+  INDEX.includes('const LOUPE_RESAMPLE_MIN_GAIN: number = 96;'), true);
+check('② loupeLayer 五个图源全部开 PixelMap 边缘 AA（antialiased 默认关闭，since 23）',
+  LOUPE17_CODE.split('.antialiased(LOUPE_AA_ENABLED)').length - 1 === 5 &&
+  LOUPE17_CODE.split('.interpolation(this.loupeInterpolation())').length - 1 === 5 &&
+  LOUPE17_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 5, true);
+check('② 高清源无效正确回退：uri/pane 双重校验 + >1:1 判据，无高清源自动落到既有的 4 个兜底分支',
+  LOUPE_HELP17_CODE.includes('this.loupeHiPx !== undefined &&') &&
+  LOUPE_HELP17_CODE.includes('this.loupeHiUri === uri && this.loupeHiPane === pane') &&
+  LOUPE_HELP17_CODE.includes('loupeNeedsResampleOf(this.loupeScale())') &&
+  LOUPE17_CODE.includes('if (this.loupeHiUsable(uri, pane))') &&
+  LOUPE17_CODE.includes('if (pane === LOUPE_PANE_RIGHT)') &&
+  LOUPE17_CODE.includes('Image(this.viewPixelMap!)') &&
+  LOUPE17_CODE.includes('Image(this.lowPixelMap!)') &&
+  LOUPE17_CODE.includes('Image(uri)'), true);
+check('② 1:1 旁路 + 性能护栏：≤1:1 不额外解码 / 稳定阈值复用 / token 作废迟到结果 / 无动画',
+  LOUPE_HELP17_CODE.includes('if (!this.loupeEnabled || !loupeNeedsResampleOf(this.loupeScale()))') &&
+  LOUPE_HELP17_CODE.includes('loupeResampleStableOf(this.loupeHiEdge, edge, LOUPE_RESAMPLE_STABLE_MIN_DELTA)') &&
+  LOUPE_HELP17_CODE.includes('if (token !== this.loupeHiToken)') &&
+  LOUPE_HELP17_CODE.includes('this.releaseUncachedEntry(e);') &&
+  NO_ANIM.some(s => LOUPE_HELP17_CODE.includes(s)) === false, true);
+check('② 第十六轮 SDK 误判已纠正：源码不再宣称「interpolation 对 PixelMap 不生效 / 靠源分辨率而非插值档」',
+  INDEX.includes("`.interpolation()` 对 PixelMap 不生效") === false &&
+  INDEX.includes('靠源分辨率而非插值档取胜') === false &&
+  INDEX.includes('loupeInterpolationTierOf') === false &&
+  INDEX.includes('LOUPE_IP_') === false &&
+  INDEX.includes('LOUPE_DENSITY_FALLBACK') === false, true);
+check('② 第十七轮回归护栏：三处画质计数 / 版本 / 右键 toggle / 顶栏滞回 / 全屏几何 / ESC 全未动',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  INDEX.split('.interpolation(ImageInterpolation.High)').length - 1 >= 3 &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes('回上层') === false &&
+  INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
+  INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  INDEX.includes('@State topBarPeek: boolean = false;') &&
+  INDEX.includes('shouldCaptureWindowRect(prevFull, nextFull, floating)') &&
+  INDEX.includes('escActionOf(this.fullscreen,') &&
   INDEX.includes('quitApp()') && INDEX.includes('ability.terminateSelf()'), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
