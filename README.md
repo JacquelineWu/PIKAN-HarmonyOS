@@ -7,8 +7,9 @@
 - **左侧**：文件浏览器（档案名 / 字节 / 日期三栏，含 `..` 与子目录），**不常驻缩略图**，鼠标悬停整行才浮出小图；可滚动、点击切换
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
-  （11-11 起，见「预览右下角角标精简」章节）。**11-15 ESC 排查期起**角标另带 `R24` 构建标记、
-  `full/win/keys/dsp/hk/wf` 诊断与可点「退出 APP」入口（见第二十三轮章节）
+  （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R25` 构建标记、
+  `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
 > 分 5 批用 DevEco CLI 编译验证；详见下文「完全对齐 PIKAN-Win64 11-04 版」。
@@ -40,7 +41,7 @@
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
-| 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。**第二十三轮（R22 截图 `keys=0 · fc=Y f=N r12`）**：判定 ESC 被系统全局消费且焦点树未建立，恢复 `USE_SYSTEM_IMMERSIVE=true`，改走 `inputConsumer.keyPressed` 单键通道（SDK 明确拦截系统默认响应）+ `hotkeyChange` 兜底，补窗口级 `setWindowFocusable` 与「退出全屏瞬间重启焦点重试」，角标加 `dsp/hk/wf`；另提供**右下角可点「退出 APP」**作为不依赖键盘 / 焦点 / 窗口形态的确定解。**第二十四轮（R23 截图 `keys=168 · ESC#1 … (EXIT_FULL)`）**：按键到达与首次 ESC 已完全正常，定位到 `escDownHandled` 永不复位 + 永久对象引用去重吞掉第二次 ESC，改为 Up 配对清除 + ESC 单轮去重，并新增 `Ctrl+Q` 键盘确定解、通道级 `cap/con/dsp` 可观测。**✅ 2026-11-16 实机核验：第二次 ESC 已能正常退出 APP**。见第二十二～二十四轮章节 |
+| 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。**第二十三轮（R22 截图 `keys=0 · fc=Y f=N r12`）**：判定 ESC 被系统全局消费且焦点树未建立，恢复 `USE_SYSTEM_IMMERSIVE=true`，改走 `inputConsumer.keyPressed` 单键通道（SDK 明确拦截系统默认响应）+ `hotkeyChange` 兜底，补窗口级 `setWindowFocusable` 与「退出全屏瞬间重启焦点重试」，角标加 `dsp/hk/wf`；另提供**右下角可点「退出 APP」**作为不依赖键盘 / 焦点 / 窗口形态的确定解。**第二十四轮（R23 截图 `keys=168 · ESC#1 … (EXIT_FULL)`）**：按键到达与首次 ESC 已完全正常，定位到 `escDownHandled` 永不复位 + 永久对象引用去重吞掉第二次 ESC，改为 Up 配对清除 + ESC 单轮去重，并新增 `Ctrl+Q` 键盘确定解、通道级 `cap/con/dsp` 可观测。**✅ 2026-11-16 实机核验：第二次 ESC 已能正常退出 APP**。见第二十二～二十四轮章节。**第二十五轮**：排查期诊断 UI 收成默认关闭的可开关诊断层（`Ctrl+D` / 单击角标），ESC 退出逻辑一字未改。见第二十五轮章节 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
@@ -533,6 +534,63 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第二十五轮：诊断层默认关闭 + 可开关入口（2026-11-16，R25）
+
+第二十四轮 ESC 两态退出已实机核验通过。用户要求「**保留一个可开关的诊断入口**」：
+把排查期铺在界面上的诊断 UI 收成正式版，但回归复查时仍能一键展开。
+
+### 之前的问题
+
+第十九～二十四轮为定位 ESC 故障，在右下角与状态栏累积了一批**常显**诊断：
+`R24` 构建标记、`full/win/keys/dsp/hk/wf` 角标、黄色 `ESC#…` 链路诊断行、
+状态栏拼入的 `ESC#1 …`、以及「退出 APP」按钮。故障修好后，这些元素在正式看图时
+占预览区、干扰视觉，尤其右下角一长串字段盖在图片上。
+
+### 做法：运行时开关（不是改代码重新编译）
+
+| 项 | 内容 |
+|---|---|
+| 开关 | `DIAG_OVERLAY_DEFAULT = false` + `@State diagOverlayOn`（**运行时可切**，与编译期 `SHOW_DIAG_BADGE` 不同） |
+| 正式版（默认关闭） | 右下角**只显示缩放百分比**（如 `14 %`）；黄色诊断行、「退出 APP」按钮、全字段角标、状态栏 `ESC#…` 全部不画 |
+| 展开诊断层 | 显示全部 ESC 排查诊断：`R25` 构建标记 / `full win keys dsp hk wf` / `ESC#` 链路 / `fc=f=rN` 焦点结果 / `cap con dsp` 通道计数 / 「退出 APP」按钮。（目录诊断串 `diagLine` 仍由独立的编译期开关 `SHOW_DIAG_BADGE` 控制，默认关闭，不受本开关影响） |
+| 入口 ①（键盘） | **`Ctrl+D`**（`KEYCODE_D = 2020`）—— 不占任何 UI 空间，全屏 / 普通模式都能切 |
+| 入口 ②（鼠标） | **单击右下角缩放百分比** —— 关闭时展开、展开时收起；两个分支都绑 `onClick` |
+| 日志 | 切换时 `hilog` 打 `DIAG overlay=0/1` |
+
+### 明确不动的部分（零回归）
+
+- ESC 严格两态分派（`escActionByState`）、`escDownHandled` Up 配对修复、ESC 单轮去重：**一字未改**
+- 焦点 / 窗口链路：`ensureWindowFocusable()` / `windowStatusChange` / `Button('·')` 锚点
+- `inputConsumer` 双通道订阅、`Ctrl+Q` 退出、`quitApp()` 及 `destroyWindow()` 兜底
+- `SHOW_DIAG_BADGE` 编译期目录诊断开关与 `diagLine` 全部赋值点（保持原样，独立通道）
+- 画质 / 放大镜 / 几何恢复 / 状态恢复 / 版本 `1.0.7` / `versionCode 7`
+
+**本轮只改 UI 显示条件与新增两个开关入口**，不触碰任何按键分派逻辑。
+
+### 构建标记
+
+`ESC_BUILD_TAG` → `R25`。诊断层**展开后**右下角才会显示 `R25`；正式版界面不显示构建标记，
+如需确认新包，按 `Ctrl+D` 展开看一眼即可。
+
+### 验证结果
+
+| 类型 | 结果 |
+|---|---|
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 2 min 15 s 484 ms**，签名 HAP **870,311 bytes**，`modules.abc` 含 `R25`；仅剩既有 2in1 系统栏与 `READ_IMAGEVIDEO` 权限告警 |
+| 静态契约 | **ALL PASS 1244 passed, 0 failed**；`git diff --check` / `node --check` / 括号净平衡 / 版本守卫全绿 |
+| ESC 两态退出 | ✅ 已在第二十四轮由用户实机验证通过；本轮不改其逻辑，19～24 轮回归护栏全绿 |
+
+未跑 `build.sh`、未把 HAP 放桌面、未升版本、未 push。
+
+### 使用方式
+
+| 场景 | 操作 |
+|---|---|
+| 日常看图 | 直接打开即可，右下角只有缩放百分比，界面干净 |
+| 回归复查 / 出问题时截图 | `Ctrl+D` 或单击右下角百分比 → 诊断层展开 → 截图发回 |
+| 收起诊断层 | 再按一次 `Ctrl+D`，或单击展开后的全字段角标 |
+| 非 ESC 退出 | `Ctrl+Q` 恒可用；诊断层展开时另有「退出 APP」鼠标入口；系统标题栏关闭按钮也可用 |
+
 ## 第二十四轮：第二次 ESC 被吞 —— `escDownHandled` 永不复位 / 单轮去重 / Ctrl+Q（2026-11-16，R24）
 
 用户发来第四张实机截图（R23 包）。这一张是**转折**：前面几轮卡在「按键根本到不了 APP」，
@@ -621,7 +679,7 @@ R23 的 `inputConsumer` 双通道、`ensureWindowFocusable()`、窗口真值同�
 
 | # | 项 | 性质 | 建议 |
 |---|---|---|---|
-| 1 | 右下角 `R24` / `full/win/keys/dsp/hk/wf` 角标、黄色 `ESC#…` 诊断行、状态栏拼入的 `ESC#1 …`、「退出 APP」按钮 | 排查期临时可观测 UI；正式看图时占预览区、干扰视觉 | 用开关（如 `SHOW_DIAG_BADGE`）默认收起，回归复查时再打开 |
+| 1 | 右下角 `R24` / `full/win/keys/dsp/hk/wf` 角标、黄色 `ESC#…` 诊断行、状态栏拼入的 `ESC#1 …`、「退出 APP」按钮 | 排查期临时可观测 UI；正式看图时占预览区、干扰视觉 | ✅ **第二十五轮已实现**：运行时开关 `diagOverlayOn` 默认关闭，`Ctrl+D` / 单击角标展开 |
 | 2 | `inputConsumer` 的 `keyPressed` / `hotkeyChange` 双通道订阅 | 实机 `hk=N` 证明两条均被系统拒绝；组件通道修好后已无实际作用，每次启动仍尝试两次 | 可移除以简化启动路径，或保留作 `hk` 诊断 |
 | 3 | 窗口最大化时 `win=T` 恒为真 | `windowStatusIsFullscreen` 把 `MAXIMIZE(2)` 也算全屏；仅用于诊断显示，**不参与分派**（`sawWindowFull` 前置证据防误判） | 标签改 `max=` 或不显示，避免误读为「还在全屏」 |
 | 4 | 编译期 `This API is unavailable to 2in1`（系统栏 / maximize API）与 `READ_IMAGEVIDEO` 权限告警 | 平台既有告警，代码已 try/catch 兜住 | 无需处理 |

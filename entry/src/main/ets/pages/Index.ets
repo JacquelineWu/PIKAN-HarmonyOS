@@ -120,7 +120,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R24';
+const ESC_BUILD_TAG: string = 'R25';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -195,6 +195,13 @@ const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;
  *  需要实机截图排查时临时改成 true 即可：diagLine 的赋值逻辑全部保留，
  *  不改任何业务流程、不用重新加代码。 */
 const SHOW_DIAG_BADGE: boolean = false;
+/** 第二十五轮：ESC 排查诊断层的**运行时**总开关（默认关闭 = 正式版干净界面）。
+ *  与编译期的 SHOW_DIAG_BADGE 不同，此开关在 APP 内随时可切：
+ *  `Ctrl+D` 或单击右下角缩放百分比。打开后一次性显示构建标记 /
+ *  full win keys dsp hk wf / ESC# 链路 / 焦点结果 / 通道计数 /「退出 APP」按钮，
+ *  供回归复查截图；关闭时右下角只剩缩放百分比。
+ *  纯 UI 状态，不触碰 ESC 分派 / 焦点 / 窗口形态，零回归风险。 */
+const DIAG_OVERLAY_DEFAULT: boolean = false;
 /** 左栏是否隐藏以 . 开头的档案名 / 目录名（Win64 4600bcc） */
 const HIDE_DOT_FILES: boolean = true;
 /** 是否启用「竖图对开」（连续两张竖图左右并排）。对应 Win64 6347756。
@@ -1870,6 +1877,8 @@ struct Index {
    *  第二次 ESC 若没进 onKey，这三个数能区分「压根没派发」与「落在某层被拦下」。 */
   @State capSeen: number = 0;
   @State conSeen: number = 0;
+  /** 第二十五轮：诊断层是否展开（运行时开关，Ctrl+D / 单击角标切换）。 */
+  @State diagOverlayOn: boolean = DIAG_OVERLAY_DEFAULT;
   private hkSeen: number = 0;
   private quitFallbackTimer: number = -1;
 
@@ -6856,6 +6865,11 @@ struct Index {
       this.status = this.listCollapsed ? '已收起左栏（Ctrl+B 展开）' : '已展开左栏';
       return;
     }
+    // 第二十五轮：诊断层开关 Ctrl+D（不占任何 UI 空间，回归复查一键展开）。
+    if (this.ctrlDown && code === KeyCode.KEYCODE_D) {
+      this.toggleDiagOverlay();
+      return;
+    }
     // 第二十四轮：**键盘确定解 Ctrl+Q**。R23 截图证明 ESC 在 2in1 上是系统特殊键
     // （hk=N = 应用级全局订阅被拒），但其它普通键全部能稳定到达（keys=168）。
     // Ctrl+Q 不依赖 ESC / 焦点重建 / 系统沉浸形态，是「退不出 APP」的可靠出口。
@@ -7080,6 +7094,14 @@ struct Index {
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'ESCDBG setWindowFocusable threw');
     }
+  }
+
+  /** 第二十五轮：诊断层开关（键盘 Ctrl+D / 单击右下角角标）。
+   *  默认关闭 → 正式版右下角只显示缩放百分比；打开 → 展开全部排查诊断。
+   *  纯 UI 状态切换，不触碰 ESC 分派 / 焦点 / 窗口形态，零回归风险。 */
+  private toggleDiagOverlay(): void {
+    this.diagOverlayOn = !this.diagOverlayOn;
+    hilog.info(DOMAIN, TAG, 'DIAG overlay=%{public}d', this.diagOverlayOn ? 1 : 0);
   }
 
   /** 第二十轮：进出全屏后把键盘焦点抢回根组件。
@@ -7830,46 +7852,67 @@ struct Index {
             // 恰恰是截图看不到任何诊断的原因，属于上一轮的设计缺陷。
             // 第二十二轮：keys=0 时也常显红色提示（此时 escDiag 必为空），
             // 把焦点请求结果直接摊在截图里，不用再猜「按键到底有没有到 APP」。
-            if (this.escDiag.length > 0 || this.keySeen === 0) {
-              Text((this.escDiag.length > 0
-                ? this.escDiag + ' · ' + this.focusDiag
-                : 'keys=0 · ' + this.focusDiag + ' · 未收到任何按键') +
-                ' · cap=' + this.capSeen + ' con=' + this.conSeen + ' dsp=' + this.dispatchSeen)
-                .fontSize(10)
-                .fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')
-                .maxLines(3)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .constraintSize({ maxWidth: 460 })
-                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                .backgroundColor('#cc12161c')
-                .borderRadius(4)
-                .margin({ bottom: 6 })
+            // 第二十五轮：黄色 ESC 链路诊断只在诊断层展开时显示；
+            // 正式版默认关闭，右下角只剩缩放百分比。
+            if (this.diagOverlayOn) {
+              if (this.escDiag.length > 0 || this.keySeen === 0) {
+                Text((this.escDiag.length > 0
+                  ? this.escDiag + ' · ' + this.focusDiag
+                  : 'keys=0 · ' + this.focusDiag + ' · 未收到任何按键') +
+                  ' · cap=' + this.capSeen + ' con=' + this.conSeen + ' dsp=' + this.dispatchSeen)
+                  .fontSize(10)
+                  .fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')
+                  .maxLines(3)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .constraintSize({ maxWidth: 460 })
+                  .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                  .backgroundColor('#cc12161c')
+                  .borderRadius(4)
+                  .margin({ bottom: 6 })
+              }
             }
             Row() {
-              // 第二十三轮：ESC 被系统全局消费时 **100% 可用** 的退出入口。
-              // 鼠标点击不依赖任何键盘事件 / 焦点 / 窗口形态，全屏与普通模式都可见。
-              // 这是「退不出 APP」痛点的确定解，与按键通道修复互为独立兜底。
-              Text('退出 APP')
-                .fontSize(10)
-                .fontColor('#ff9a9a')
-                .padding({ left: 6, right: 6, top: 4, bottom: 4 })
-                .backgroundColor('#cc12161c')
-                .borderRadius(4)
-                .margin({ right: 6 })
-                .onClick(() => {
-                  this.quitApp();
-                })
-              Text(this.zoomPercentText() + ' · ' + ESC_BUILD_TAG +
-                ' · full=' + (this.fullscreen ? 'T' : 'F') +
-                ' · win=' + (this.winFullBySystem ? 'T' : 'F') +
-                ' · keys=' + this.keySeen +
-                ' · dsp=' + this.dispatchSeen + ' · hk=' + this.hkDiag +
-                ' · ' + this.winFocusDiag)
-                .fontSize(12)
-                .fontColor('#dfe5ef')
-                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                .backgroundColor('#cc12161c')
-                .borderRadius(4)
+              // 第二十五轮：诊断层展开时显示「退出 APP」+ 全字段角标；
+              // 关闭时只留缩放百分比，界面回到正式版。
+              if (this.diagOverlayOn) {
+                // 第二十三轮：ESC 被系统全局消费时 **100% 可用** 的退出入口。
+                // 鼠标点击不依赖任何键盘事件 / 焦点 / 窗口形态，全屏与普通模式都可见。
+                Text('退出 APP')
+                  .fontSize(10)
+                  .fontColor('#ff9a9a')
+                  .padding({ left: 6, right: 6, top: 4, bottom: 4 })
+                  .backgroundColor('#cc12161c')
+                  .borderRadius(4)
+                  .margin({ right: 6 })
+                  .onClick(() => {
+                    this.quitApp();
+                  })
+                Text(this.zoomPercentText() + ' · ' + ESC_BUILD_TAG +
+                  ' · full=' + (this.fullscreen ? 'T' : 'F') +
+                  ' · win=' + (this.winFullBySystem ? 'T' : 'F') +
+                  ' · keys=' + this.keySeen +
+                  ' · dsp=' + this.dispatchSeen + ' · hk=' + this.hkDiag +
+                  ' · ' + this.winFocusDiag)
+                  .fontSize(12)
+                  .fontColor('#dfe5ef')
+                  .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                  .backgroundColor('#cc12161c')
+                  .borderRadius(4)
+                  .onClick(() => {
+                    this.toggleDiagOverlay();
+                  })
+              } else {
+                // 正式版：只有缩放百分比。单击可随时展开诊断层（回归复查入口）。
+                Text(this.zoomPercentText())
+                  .fontSize(12)
+                  .fontColor('#dfe5ef')
+                  .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                  .backgroundColor('#cc12161c')
+                  .borderRadius(4)
+                  .onClick(() => {
+                    this.toggleDiagOverlay();
+                  })
+              }
             }
           }
           .width('100%')
@@ -8025,7 +8068,7 @@ struct Index {
       if (!this.fullscreen) {
         Row() {
           // 第二十轮：把 ESC 链路诊断直接拼在状态栏，真机按两下 ESC 即可截图回传断点。
-          Text(this.status + (this.escDiag.length > 0 ? '  ·  ' + this.escDiag : ''))
+          Text(this.status + (this.diagOverlayOn && this.escDiag.length > 0 ? '  ·  ' + this.escDiag : ''))
             .fontSize(11)
             .fontColor('#8b95a8')
             .layoutWeight(1)

@@ -33,6 +33,7 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十五轮「诊断层收成默认关闭 + 保留 Ctrl+D / 单击角标可开关入口 / R25 构建标记」、
  * 第二十四轮「R23 截图驱动：修 escDownHandled 永不复位 / ESC 单轮去重废除永久对象引用 /
  *    通道级 cap=con=dsp= 可观测 / Ctrl+Q 键盘确定解 / type=U 真实 KeyType」、
  * 第二十三轮「系统级按键通道：inputConsumer.keyPressed 单键优先 + hotkeyChange 兜底 /
@@ -1236,18 +1237,20 @@ check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
 check('诊断行的渲染被开关包住，diagLine 赋值点一个没删',
   /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(BADGE) &&
   (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
-check('右下角恒显示区：缩放百分比 + 诊断 + R24「退出 APP」共 3 个 Text，缓存 N 张仍移除',
-  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 3 &&
+check('右下角：正式版只显示缩放百分比；诊断层展开时显示全部排查项（两分支共 4 个 Text）',
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 4 &&
   /Text\('退出 APP'\)/.test(BADGE_CODE) &&
   /if \(this\.escDiag\.length > 0 \|\| this\.keySeen === 0\)/.test(BADGE_CODE) &&
   /Text\(\(this\.escDiag\.length > 0/.test(BADGE_CODE) &&
+  /if \(this\.diagOverlayOn\) \{/.test(BADGE_CODE) &&
+  /Text\(this\.zoomPercentText\(\)\)/.test(BADGE_CODE) &&
   /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比仍在右下角且带 R24 + keys=N 常显，100% = 原图像素 1:1 口径未改',
+check('缩放百分比恒在右下角；R25 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R24';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R25';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3642,8 +3645,8 @@ check('② 真机可观测：状态栏显示 ESCDBG 链路串 + hilog 打点 + t
   (INDEX.match(/ESCDBG/g) || []).length >= 6 &&
   QUIT_FN.includes('terminateSelf() 已调用') &&
   QUIT_FN.includes('REJECTED') && QUIT_FN.includes('EXCEPTION'), true);
-check('② 诊断串直接拼在既有状态栏 Text 上，不新增组件 / 不改布局 / 不占空间',
-  /Text\(this\.status \+ \(this\.escDiag\.length > 0 \?/.test(INDEX) &&
+check('② 诊断串直接拼在既有状态栏 Text 上（R25 起随诊断层开关），不新增组件 / 不改布局',
+  /Text\(this\.status \+ \(this\.diagOverlayOn && this\.escDiag\.length > 0 \?/.test(INDEX) &&
   INDEX.includes('Text(this.status)') === false, true);
 
 console.log('--- 第二十轮 ③：源码静态契约（第十九轮定稿未坏 / 回归护栏 / 声明验证边界） ---');
@@ -3722,8 +3725,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 常显 R24 构建标记 + 全屏/普通都可见的诊断行（第二十二轮 keys=0 时也常显红字）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
+check('③ 诊断层展开时可见 R25 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3749,7 +3752,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：右下角角标必须出现 R24，否则说明装的是旧包，需重新安装签名 HAP。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R25，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3805,13 +3808,14 @@ check('④ onKey 入口对任意键递增 keySeen（不只 ESC），R24 双轨�
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('this.keySeen++;') &&
   INDEX.includes('@State keySeen: number = 0;'), true);
-check('④ 角标常显 keys=N；keys=0 时无条件显示红字「未收到任何按键」+ 焦点结果',
+check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收到任何按键」+ 焦点结果',
   INDEX.includes("' · keys=' + this.keySeen") &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R24 构建标记已升级（R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
+check('④ R25 构建标记已升级（R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R21';") === false, true);
@@ -3833,7 +3837,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：角标须出现 R24；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R25；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3897,12 +3901,13 @@ check('④ hk=kp/hk/N 与 wf=T/F/? 全部常显在右下角角标',
   INDEX.includes('@State winFocusDiag: string') &&
   INDEX.includes("' · hk=' + this.hkDiag +") &&
   INDEX.includes("' · ' + this.winFocusDiag)"), true);
-check('④ 鼠标「退出 APP」入口：不依赖键盘 / 焦点 / 窗口形态，全屏与普通模式都能点',
+check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键盘 / 焦点 / 窗口形态',
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R24 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
+check('⑤ R25 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R21';") === false, true);
@@ -3922,7 +3927,7 @@ check('⑤ 画质 / 放大镜 / 右键 toggle / 自愈判据等既有接线零�
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,'), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
 console.log('  ⚠️ 截图判定：hk=kp/hk=有系统通道，hk=N=ESC 被系统占用（平台限制）。');
-console.log('  ⚠️ 确定解：右下角「退出 APP」可点击，不依赖任何键盘事件 / 焦点 / 窗口形态。');
+console.log('  ⚠️ 确定解：Ctrl+D 展开诊断层后「退出 APP」可点击，不依赖键盘事件 / 焦点 / 窗口形态。');
 
 // ==================== 第二十四轮：R23 截图驱动 —— 第二次 ESC 被吞 ====================
 // R23 截图：keys=168 · ESC#1 full=T type=D act=1 (EXIT_FULL) · fc=Y f=Y r12，
@@ -3970,8 +3975,9 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R24 构建标记且 R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
+check('④ R25 构建标记且 R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false, true);
 check('④ 第十九轮两态 / 二十一~二十三轮接线 / 画质放大镜 / 版本零回归',
@@ -3986,7 +3992,57 @@ check('④ 第十九轮两态 / 二十一~二十三轮接线 / 画质放大镜 /
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十四轮章节。');
 console.log('  ⚠️ 截图判定：ESC#2 type=U (QUIT_APP) = 修复完成；仍只有 ESC#1 = 第二次按键未派发。');
-console.log('  ⚠️ 确定解：Ctrl+Q 或右下角「退出 APP」，均不依赖 ESC 特殊键。');
+console.log('  ⚠️ 确定解：Ctrl+Q 恒可用；展开诊断层后另有「退出 APP」鼠标入口，均不依赖 ESC。');
+
+// ==================== 第二十五轮：诊断层收成默认关闭 + 可开关入口 ====================
+// ESC 两态退出已实机验证通过；用户要求「保留一个可开关的诊断入口」，
+// 正式版界面回到干净状态，回归复查时仍能一键展开全部排查信息。
+console.log('\n--- 第二十五轮 ①：运行时开关默认关闭（正式版只留缩放百分比）---');
+const DIAG_EXIT_POS = INDEX.indexOf("Text('退出 APP')");
+const DIAG_EXIT_SLICE = INDEX.slice(Math.max(0, DIAG_EXIT_POS - 400), DIAG_EXIT_POS);
+check('① DIAG_OVERLAY_DEFAULT=false + @State diagOverlayOn（运行时可切，非编译期常量）',
+  INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
+  INDEX.includes('@State diagOverlayOn: boolean = DIAG_OVERLAY_DEFAULT;') &&
+  INDEX.includes('private toggleDiagOverlay(): void {') &&
+  INDEX.includes('this.diagOverlayOn = !this.diagOverlayOn;'), true);
+check('① 关闭时黄色诊断行 / 退出按钮 / 全字段角标全部收起，else 分支只画缩放百分比',
+  /if \(this\.diagOverlayOn\) \{\s*if \(this\.escDiag\.length > 0 \|\| this\.keySeen === 0\)/.test(INDEX) &&
+  DIAG_EXIT_SLICE.includes('if (this.diagOverlayOn) {') &&
+  /\} else \{[\s\S]{0,250}Text\(this\.zoomPercentText\(\)\)/.test(INDEX), true);
+check('① 状态栏的 ESC# 诊断串也随诊断层开关，正式版状态栏不带排查文本',
+  INDEX.includes("this.status + (this.diagOverlayOn && this.escDiag.length > 0 ? '  ·  ' + this.escDiag : '')"), true);
+
+console.log('--- 第二十五轮 ②：两个可开关入口（键盘 + 鼠标）---');
+check('② Ctrl+D 切换诊断层（KEYCODE_D=2020，不占任何 UI 空间）',
+  INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_D) {') &&
+  /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_D\) \{\s*this\.toggleDiagOverlay\(\);\s*return;/.test(INDEX), true);
+check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都绑了 onClick）',
+  /Text\(this\.zoomPercentText\(\)\)[\s\S]{0,300}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
+  /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
+  (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
+
+console.log('--- 第二十五轮 ③：R25 构建标记 + 既有链路零回归 ---');
+check('③ R25 构建标记，R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false, true);
+check('③ ESC 分派 / 焦点 / 窗口 / inputConsumer / Ctrl+Q 全部原样保留（只改 UI 显示）',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  INDEX.includes('if (isEsc && !rawDown && this.escDownHandled) {') &&
+  INDEX.includes('if (this.escDedupEvent === event) {') &&
+  INDEX.includes('private ensureWindowFocusable(): void {') &&
+  INDEX.includes("inputConsumer.on('keyPressed', cfg") &&
+  INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
+  INDEX.includes("Text('退出 APP')") &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes("' · cap=' + this.capSeen + ' con=' + this.conSeen + ' dsp=' + this.dispatchSeen"), true);
+check('③ SHOW_DIAG_BADGE 编译期目录诊断开关保持原样、diagLine 赋值点未删',
+  INDEX.includes('const SHOW_DIAG_BADGE: boolean = false;') &&
+  /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(INDEX) &&
+  (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
+console.log('  ⚠️ 正式版右下角只显示缩放百分比；按 Ctrl+D 或单击该百分比即可展开诊断层。');
+console.log('  ⚠️ 本轮只改 UI 显示与开关，不触碰 ESC 两态退出逻辑（已实机验证通过）。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
