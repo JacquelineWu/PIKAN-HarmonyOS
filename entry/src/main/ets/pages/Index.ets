@@ -116,7 +116,17 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R21';
+const ESC_BUILD_TAG: string = 'R22';
+/** 第二十二轮：是否调用系统沉浸最大化 API。
+ *  实机两张截图对比：APP「全屏」与「普通」两态下系统窗口外观几乎一致（都带
+ *  PIKAN 标题栏），且真编译明确告警 `This API is unavailable to 2in1` —— 这些
+ *  maximize / 系统栏 API 在鸿蒙 PC 上没带来可见全屏效果，却可能让窗口管理器把
+ *  ESC 保留为「退出沉浸」全局快捷键、永不派发给应用（零按键到达 onKey）。
+ *  默认关闭：全屏只切应用内三栏，ESC 保持普通按键。想恢复旧行为改 true 即可。 */
+const USE_SYSTEM_IMMERSIVE: boolean = false;
+/** 抢焦点重试：PC 上窗口键盘焦点可能晚于页面首帧才到位，前几秒持续重试。 */
+const FOCUS_RETRY_MS: number = 350;
+const FOCUS_RETRY_MAX: number = 12;
 /** 第二十一轮：天然可聚焦的 Button 锚点 id。Column / Stack 布局容器在 PC 上即使
  *  .focusable(true) 也未必真能拿到键盘焦点，Button 一定可以。 */
 const KEY_FOCUS_ID: string = 'heicKeyFocusAnchor';
@@ -1825,6 +1835,13 @@ struct Index {
    *  没有这个前置证据，进全屏后第一次 ESC 就会被误同步成 QUIT_APP 直接退出 APP。 */
   private sawWindowFull: boolean = false;
   private pageAlive: boolean = true;
+  // ---- 第二十二轮：按键到达可观测（零按键到达是本轮要解决的唯一断点）----
+  /** 任意键（不只 ESC）进入 onKey() 的累计次数。常显在右下角角标：
+   *  keys=0 = 键盘事件根本没到 APP（焦点 / 系统消费）；keys>0 = 事件链路通。 */
+  @State keySeen: number = 0;
+  /** 焦点请求结果，例如 `fc=Y f=N r3`（FocusController / 全局 focusControl / 重试次数）。 */
+  @State focusDiag: string = 'fc=- f=- r0';
+  private focusRetryCount: number = 0;
   private quitFallbackTimer: number = -1;
 
   // ---- 第十六轮：放大镜 >1:1 重采样专用高分辨率图源 ----
@@ -6619,6 +6636,14 @@ struct Index {
    *  每步独立 try/catch：某一步在该机型不支持时只记日志，不把后续步骤全带走。
    *  AppStorage 里窗口还没就绪（getMainWindow 是异步）则短延时重试，不弹任何 UI。 */
   private async applyWindowFullScreen(on: boolean, retry: number): Promise<void> {
+    // 第二十二轮：2in1 上这些系统沉浸 API 标注 unavailable、实机也没有可见全屏效果，
+    // 却可能让窗口管理器保留 ESC 作为「退出沉浸」全局快捷键、永不派发给应用
+    // （截图证据：R21 新包 + 零按键到达 onKey）。默认关闭：全屏只切应用内三栏，
+    // 窗口形态保持不变 → ESC 是普通按键。恢复旧行为把 USE_SYSTEM_IMMERSIVE 改 true。
+    if (!USE_SYSTEM_IMMERSIVE) {
+      hilog.info(DOMAIN, TAG, 'ESCDBG skip system immersive on=%{public}d', on ? 1 : 0);
+      return;
+    }
     const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
     if (!win) {
       if (retry < FULLSCREEN_WINDOW_RETRY_MAX) {
@@ -6757,6 +6782,9 @@ struct Index {
       return;
     }
     this.lastKeyEvent = event;
+    // 第二十二轮：任意键到达计数（不只 ESC）。角标常显 keys=N，
+    // 一张截图就能区分「键盘完全没到 APP」与「只有 ESC 被系统吃掉」。
+    this.keySeen++;
     const code: number = event.keyCode;
     const rawDown: boolean = (event.type === KeyType.Down);
     // 第二十轮：少数 2in1 / PC 键盘的 ESC 只把 KeyType.Up 派给应用（Down 被系统
@@ -6894,6 +6922,16 @@ struct Index {
     return event.keyCode === KeyCode.KEYCODE_ESCAPE;
   }
 
+  /** 第二十二轮：**分发阶段**按键通道（SDK 15+ onKeyEventDispatch）。
+   *  onKeyPreIme / onKeyEvent 都要求「当前组件已获焦点」，而 2in1 实测零按键到达；
+   *  onKeyEventDispatch 在按键**分发**阶段触发，挂在根组件上可收到窗口内按键，
+   *  不依赖某个子组件是否拿到焦点。所有键都过 onKey（对象引用去重保证只处理一次），
+   *  ESC 返回 true 主动消费。这是本轮最关键的新通道。 */
+  private onKeyDispatch(event: KeyEvent): boolean {
+    this.onKey(event);
+    return event.keyCode === KeyCode.KEYCODE_ESCAPE;
+  }
+
   /** 第二十轮：进出全屏后把键盘焦点抢回根组件。
    *  .defaultFocus(true) 只在首次构建生效；全屏切换会整块重建布局，窗口管理器
    *  也可能把焦点收走 —— 焦点一丢，之后所有按键（含第二次 ESC）都到不了 onKey。 */
@@ -6903,19 +6941,48 @@ struct Index {
     }
     this.keyRefocusTimer = setTimeout(() => {
       this.keyRefocusTimer = -1;
-      try {
-        // 第二十一轮：优先抢「天然可聚焦」的 Button 锚点。第二十轮只请求根 Column，
-        // 而 Column 在 PC 上未必真能拿到键盘焦点，这是上一轮失效的原因之一。
-        focusControl.requestFocus(KEY_FOCUS_ID);
-        hilog.info(DOMAIN, TAG, 'ESCDBG refocus key anchor');
-      } catch (e) {
-        try {
-          focusControl.requestFocus(ROOT_FOCUS_ID);
-        } catch (e2) {
-          hilog.warn(DOMAIN, TAG, 'ESCDBG refocus failed');
-        }
+      this.requestKeyFocusOnce();
+      // 第二十二轮：只要还没收到任何按键就持续重试。PC 上窗口键盘焦点可能
+      // 晚于页面首帧 / 晚于全屏切换才到位，一次 120ms 的抢焦点很容易落空。
+      // keySeen>0 立即停止，不会干扰正常操作（本应用也没有文本输入框）。
+      if (this.keySeen === 0 && this.focusRetryCount < FOCUS_RETRY_MAX) {
+        this.focusRetryCount++;
+        this.keyRefocusTimer = setTimeout(() => {
+          this.scheduleKeyRefocus();
+        }, FOCUS_RETRY_MS);
       }
     }, ESC_REFOCUS_DELAY_MS);
+  }
+
+  /** 第二十二轮：用官方 `UIContext.getFocusController()` 抢焦点，并把两个 API 的
+   *  结果写进常显诊断 —— 下一张截图就能看出焦点到底有没有抢成功。
+   *  另设 `KeyProcessingMode.ANCESTOR_EVENT`：让「组件不处理」的按键向祖先冒泡，
+   *  提高根组件收到按键的概率（默认 FOCUS_NAVIGATION 会把按键用于移动焦点）。 */
+  private requestKeyFocusOnce(): void {
+    let fcOk: boolean = false;
+    try {
+      const fc = this.getUIContext().getFocusController();
+      fc.setKeyProcessingMode(KeyProcessingMode.ANCESTOR_EVENT);
+      fc.requestFocus(KEY_FOCUS_ID);
+      fcOk = true;
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'ESCDBG FocusController failed');
+    }
+    let globalOk: boolean = false;
+    try {
+      // 全局 focusControl.requestFocus 返回 boolean（SDK 定义），第二十/二十一轮
+      // 一直没接返回值，导致「抢焦点失败」完全不可见。
+      globalOk = focusControl.requestFocus(KEY_FOCUS_ID);
+    } catch (e2) {
+      try {
+        globalOk = focusControl.requestFocus(ROOT_FOCUS_ID);
+      } catch (e3) {
+        hilog.warn(DOMAIN, TAG, 'ESCDBG refocus failed');
+      }
+    }
+    this.focusDiag = 'fc=' + (fcOk ? 'Y' : 'N') + ' f=' + (globalOk ? 'Y' : 'N') +
+      ' r' + this.focusRetryCount;
+    hilog.info(DOMAIN, TAG, 'ESCDBG focus %{public}s', this.focusDiag);
   }
 
   /** 页面销毁时清掉重聚焦定时器，避免回调打到已释放的组件。 */
@@ -7598,10 +7665,14 @@ struct Index {
             // 第二十一轮：按过 ESC 后才出现的黄色链路诊断行。放在右下角角标层，
             // **全屏 / 普通都可见** —— 第二十轮把诊断放在「全屏时整块隐藏」的状态栏，
             // 恰恰是截图看不到任何诊断的原因，属于上一轮的设计缺陷。
-            if (this.escDiag.length > 0) {
-              Text(this.escDiag)
+            // 第二十二轮：keys=0 时也常显红色提示（此时 escDiag 必为空），
+            // 把焦点请求结果直接摊在截图里，不用再猜「按键到底有没有到 APP」。
+            if (this.escDiag.length > 0 || this.keySeen === 0) {
+              Text(this.escDiag.length > 0
+                ? this.escDiag + ' · ' + this.focusDiag
+                : 'keys=0 · ' + this.focusDiag + ' · 未收到任何按键')
                 .fontSize(10)
-                .fontColor('#ffd479')
+                .fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')
                 .maxLines(3)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
                 .constraintSize({ maxWidth: 460 })
@@ -7613,7 +7684,8 @@ struct Index {
             Row() {
               Text(this.zoomPercentText() + ' · ' + ESC_BUILD_TAG +
                 ' · full=' + (this.fullscreen ? 'T' : 'F') +
-                ' · win=' + (this.winFullBySystem ? 'T' : 'F'))
+                ' · win=' + (this.winFullBySystem ? 'T' : 'F') +
+                ' · keys=' + this.keySeen)
                 .fontSize(12)
                 .fontColor('#dfe5ef')
                 .padding({ left: 8, right: 8, top: 4, bottom: 4 })
@@ -7802,12 +7874,16 @@ struct Index {
       .backgroundColor('#101216')
       .id(ROOT_FOCUS_ID)
       .focusable(true)
-      .defaultFocus(true)
+      // 第二十二轮：**移除这里的 defaultFocus 声明**。ArkUI 一页只能有一个
+      // defaultFocus，根 Column 与下面的 Button 锚点同时声明会互相冲突、谁都拿不到
+      // 焦点 —— 这正是「零按键到达 onKey」最可能的直接原因。焦点统一交给 Button 锚点。
       // 第二十轮：双通道按键 —— onKeyPreIme 在 IME / 系统之前拦下 ESC 并主动消费；
       // onKeyEvent 改用返回 boolean 的重载兜底并消费 ESC（原 void 重载会让事件继续冒泡，
       // 在真全屏下极易被系统窗口管理器拿走）。原 onKey 签名与 ESC 分派代码一字未动。
       .onKeyPreIme((event: KeyEvent): boolean => this.onKeyCapture(event))
       .onKeyEvent((event: KeyEvent): boolean => this.onKeyConsumed(event))
+      // 第二十二轮：第三通道 —— 分发阶段，不依赖焦点（见 onKeyDispatch 注释）。
+      .onKeyEventDispatch((event: KeyEvent): boolean => this.onKeyDispatch(event))
 
       // 第十三轮：非全屏时的整栏「贴顶唤出」浮层。
       // 条件渲染：topBarPeek=false 时组件根本不存在 → 完全不占布局空间（不是占位隐藏），
