@@ -33,6 +33,7 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十六轮「上下键改翻页：↑=← 上一张 / ↓=→ 下一张 / 移除上下键缩放 / 其它交互零回归」、
  * 第二十五轮「诊断层收成默认关闭 + 保留 Ctrl+D / 单击角标可开关入口 / R25 构建标记」、
  * 第二十四轮「R23 截图驱动：修 escDownHandled 永不复位 / ESC 单轮去重废除永久对象引用 /
  *    通道级 cap=con=dsp= 可观测 / Ctrl+Q 键盘确定解 / type=U 真实 KeyType」、
@@ -1248,9 +1249,9 @@ check('右下角：正式版只显示缩放百分比；诊断层展开时显示�
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R25 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比恒在右下角；R26 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R25';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R26';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3725,8 +3726,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 诊断层展开时可见 R25 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+check('③ 诊断层展开时可见 R26 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3752,7 +3753,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R25，否则说明装的是旧包。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R26，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3813,8 +3814,8 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R25 构建标记已升级（R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+check('④ R26 构建标记已升级（R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
@@ -3837,7 +3838,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：展开诊断层后须出现 R25；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R26；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3905,8 +3906,8 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R25 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+check('⑤ R26 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
@@ -3975,8 +3976,8 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R25 构建标记且 R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+check('④ R26 构建标记且 R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false, true);
@@ -4021,9 +4022,9 @@ check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
   (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
 
-console.log('--- 第二十五轮 ③：R25 构建标记 + 既有链路零回归 ---');
-check('③ R25 构建标记，R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R25';") &&
+console.log('--- 第二十五轮 ③：R26 构建标记 + 既有链路零回归 ---');
+check('③ R26 构建标记，R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false, true);
 check('③ ESC 分派 / 焦点 / 窗口 / inputConsumer / Ctrl+Q 全部原样保留（只改 UI 显示）',
@@ -4043,6 +4044,77 @@ check('③ SHOW_DIAG_BADGE 编译期目录诊断开关保持原样、diagLine �
   (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
 console.log('  ⚠️ 正式版右下角只显示缩放百分比；按 Ctrl+D 或单击该百分比即可展开诊断层。');
 console.log('  ⚠️ 本轮只改 UI 显示与开关，不触碰 ESC 两态退出逻辑（已实机验证通过）。');
+
+// ==================== 第二十六轮：上下键改翻页、移除上下键缩放 ====================
+// 用户要求：↑ 与 ← 同向（上一张）、↓ 与 → 同向（下一张）；按上下键不再触发缩放；
+// 左右键原行为不变，其它缩放入口与其它看图交互一律不动。
+// 注意：R26 的注释里写着旧的 zoomBy(1.25)/zoomBy(0.8) 字样，断言必须先 stripComments，
+//      否则「已移除」的护栏会被注释自己误报为失败。
+console.log('\n--- 第二十六轮 ①：四个方向键严格同向切换（↑=← / ↓=→）---');
+const SWITCH26_START = INDEX.indexOf('switch (code) {');
+const ARROW26_CODE = stripComments(INDEX.slice(SWITCH26_START,
+  INDEX.indexOf('case KeyCode.KEYCODE_SPACE:', SWITCH26_START)));
+const INDEX_CODE26 = stripComments(INDEX);
+check('① ← / ↑ 都走 go(-1)，→ / ↓ 都走 go(1)（上下键与左右键完全一致）',
+  /case KeyCode\.KEYCODE_DPAD_LEFT:\s*this\.go\(-1\);/.test(ARROW26_CODE) &&
+  /case KeyCode\.KEYCODE_DPAD_RIGHT:\s*this\.go\(1\);/.test(ARROW26_CODE) &&
+  /case KeyCode\.KEYCODE_DPAD_UP:\s*this\.go\(-1\);/.test(ARROW26_CODE) &&
+  /case KeyCode\.KEYCODE_DPAD_DOWN:\s*this\.go\(1\);/.test(ARROW26_CODE), true);
+check('① 方向键片段恰好 4 个 case / 4 次 go()，左右键仍是原来的步长（零改动）',
+  (ARROW26_CODE.match(/case KeyCode\.KEYCODE_DPAD_/g) || []).length === 4 &&
+  (ARROW26_CODE.match(/this\.go\(/g) || []).length === 4 &&
+  SWITCH26_START > 0, true);
+
+console.log('--- 第二十六轮 ②：按上下键不再触发缩放 ---');
+check('② 方向键 switch 片段零 zoomBy 调用（注释已剥离）',
+  ARROW26_CODE.includes('zoomBy(') === false, true);
+check('② 剥离注释后的全源码不再有 zoomBy(1.25) / zoomBy(0.8) 键盘缩放调用',
+  INDEX_CODE26.includes('this.zoomBy(1.25)') === false &&
+  INDEX_CODE26.includes('this.zoomBy(0.8)') === false, true);
+check('② zoomBy 只剩 Ctrl+滚轮一处调用（0.9 / 1.1），上下键彻底不是缩放入口',
+  (INDEX_CODE26.match(/this\.zoomBy\(/g) || []).length === 1 &&
+  INDEX_CODE26.includes('this.zoomBy(d > 0 ? 0.9 : 1.1);'), true);
+
+console.log('--- 第二十六轮 ③：其它缩放入口 / 键盘看图交互零回归 ---');
+check('③ 0 复位 / F 1:1 / 空格幻灯片 / R H V / DEL BACK / Ctrl+B / Ctrl+D / Ctrl+Q 全在',
+  INDEX_CODE26.includes('case KeyCode.KEYCODE_0:') &&
+  INDEX_CODE26.includes('this.resetView();') &&
+  INDEX_CODE26.includes('case KeyCode.KEYCODE_F:') &&
+  INDEX_CODE26.includes('this.zoomPixelPerfect();') &&
+  INDEX_CODE26.includes('case KeyCode.KEYCODE_SPACE:') &&
+  INDEX_CODE26.includes('this.toggleSlide();') &&
+  INDEX_CODE26.includes('case KeyCode.KEYCODE_R:') &&
+  INDEX_CODE26.includes('case KeyCode.KEYCODE_H:') &&
+  INDEX_CODE26.includes('case KeyCode.KEYCODE_V:') &&
+  INDEX_CODE26.includes('case KeyCode.KEYCODE_DEL:') &&
+  INDEX_CODE26.includes('this.browseUp();') &&
+  INDEX_CODE26.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_B) {') &&
+  INDEX_CODE26.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_D) {') &&
+  INDEX_CODE26.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {'), true);
+check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键放大镜 / 画质链路未动',
+  INDEX_CODE26.includes('this.go(d);') &&
+  INDEX_CODE26.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
+  INDEX_CODE26.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX_CODE26.split('.dynamicRangeMode(').length - 1 === 3, true);
+
+console.log('--- 第二十六轮 ④：R26 构建标记 + 既有链路零回归 ---');
+check('④ ESC_BUILD_TAG=R26，R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
+  ['R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+    INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
+check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  shouldArmSystemEcho(true, true, false) === false &&
+  INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
+  INDEX.includes('if (this.escDedupEvent === event) {') &&
+  INDEX.includes('if (isEsc && !rawDown && this.escDownHandled) {') &&
+  INDEX.includes('private ensureWindowFocusable(): void {') &&
+  INDEX.includes("inputConsumer.on('keyPressed', cfg") &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
+console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十六轮章节。');
+console.log('  ⚠️ 截图判定：按 ↑ / ↓ 只换张、右下角缩放百分比不变；百分比若变说明仍是旧包。');
+console.log('  ⚠️ 本轮只改 onKey() 里 2 个 case 分支，不碰任何其它看图交互。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
