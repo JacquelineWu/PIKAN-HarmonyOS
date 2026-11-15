@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R26` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R27` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -43,7 +43,7 @@
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
 | 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。**第二十三轮（R22 截图 `keys=0 · fc=Y f=N r12`）**：判定 ESC 被系统全局消费且焦点树未建立，恢复 `USE_SYSTEM_IMMERSIVE=true`，改走 `inputConsumer.keyPressed` 单键通道（SDK 明确拦截系统默认响应）+ `hotkeyChange` 兜底，补窗口级 `setWindowFocusable` 与「退出全屏瞬间重启焦点重试」，角标加 `dsp/hk/wf`；另提供**右下角可点「退出 APP」**作为不依赖键盘 / 焦点 / 窗口形态的确定解。**第二十四轮（R23 截图 `keys=168 · ESC#1 … (EXIT_FULL)`）**：按键到达与首次 ESC 已完全正常，定位到 `escDownHandled` 永不复位 + 永久对象引用去重吞掉第二次 ESC，改为 Up 配对清除 + ESC 单轮去重，并新增 `Ctrl+Q` 键盘确定解、通道级 `cap/con/dsp` 可观测。**✅ 2026-11-16 实机核验：第二次 ESC 已能正常退出 APP**。见第二十二～二十四轮章节。**第二十五轮**：排查期诊断 UI 收成默认关闭的可开关诊断层（`Ctrl+D` / 单击角标），ESC 退出逻辑一字未改。见第二十五轮章节 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
-| 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
+| 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用）。**第二十七轮起原始档案读取全链路真异步 + 到点即放弃超时闸门**，NAS 路径缓存期间不再占住 UI 主线程（见第二十七轮章节） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
 | 位置记忆 | **退出 / 切后台同步记住**「上次停在第几张 + 那张相片 + 列表快照」；**重开 APP 自动显示上次那张图**并尽量恢复整批列表 + 精确落位（首帧后延迟执行，绝不重扫图库 / 弹权限 / 弹选择器，见 11-11 章节）；`restoreIndex` 按 uri 精确落回上次那张 |
 | 全屏 | 顶栏 `全屏` / **F11** / **双击画布** / **双击档案名** 进入；`Esc` / `F11` / **双击画布** 退出；**第十八轮**：进全屏前对所有普通窗口态（不再 floating-only）抓窗口尺寸位置内存快照并记录进入前形态，退出时自由窗口在 `recover()`/`EXIT_IMMERSIVE` 之后精确 `resize` + `moveWindowTo` 还原、最大化态保持最大化不误缩；系统消费 ESC 自行退出沉浸时按绝对像素缩小（≥8px）可靠自愈同步状态，且**自愈后不再置任何补发标志**（第十九轮：随后用户主动的第二次 `Esc` 直接退出 APP）；**第二十轮**：进出全屏后延时重抢键盘焦点、ESC 走 `onKeyPreIme` 前置拦截并主动消费，另兼容只派发 `KeyType.Up` 的 2in1 键盘；**第二十一轮**：窗口状态变化由系统直发同步 APP 全屏态（不再靠画布缩小猜）、Button 焦点锚点、首帧即抢焦点、`sawWindowFull` 前置证据防止 2in1 上首次 ESC 误退出；**第二十二轮**：曾把 `USE_SYSTEM_IMMERSIVE` 关成 `false`（纯应用内三栏切换、窗口形态不变），但 R22 截图证明关掉后连「首次 ESC 返回」都失效、`keys` 仍为 0 —— **第二十三轮已恢复 `true`**（保留 `false` 早返回分支作可逆开关）；**画面**：应用内顶栏 / 工具条 / 左栏全部不画，只剩图片与左上角信息浮层 |
@@ -533,6 +533,108 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第二十七轮：NAS 路径 `THREAD_BLOCK_6S` —— 原始档案读取真异步化 + 到点即放弃（2026-11-16，R27）
+
+用户提供一份真机 appfreeze 日志，描述「打开 NAS 路径浏览图片，在缓存图中出现严重卡顿」：
+
+```
+Device info:HUAWEI MateBook Pro S   Version:1.0.7   VersionCode:7
+Reason:THREAD_BLOCK_6S   appfreeze: com.workbuddy.heicviewer THREAD_BLOCK_6S at 20261116013719
+Process Memory(kB): 939796(Rss)   I/O read_bytes ≈ 692555776
+Current Running: start at 2026-11-16 01:37:12.100,
+  Event { task name = fs.listFile, caller = [ohos_js_environment_impl.cpp(PostTaskToHandler:72)] }
+  —— completeTime 为空，主线程被这一个任务占住 6 秒
+JS 栈顶：read (Index.ets:1062:30) = fs.readSync(file.fd, buf)
+       → ensure (Index.ets:1035:53) = Promise.resolve(this.read(...))
+       → preloadOne → pumpAll → startAllPreload → schedulePreload → applyItems → openFolder
+native 栈：read+44 / uv_fs_read / libfs.z.so
+```
+
+### 根因：`ensure()` 是**伪异步**
+
+`RawStore.read()` 名义上被 `Promise.resolve<ArrayBuffer | undefined>(this.read(uri, gen))`
+包成 Promise，但 JS 求值顺序决定了 `this.read(...)` 在 `Promise.resolve` 的**参数位置就同步执行完了**：
+
+1. `fs.statSync` / `fs.openSync` / `fs.readSync` / `fs.closeSync` 四次同步跨进程 IO；
+2. `new ArrayBuffer(size)` 大内存清零（第二份 dump 栈顶 `memset` 即此）；
+3. `pumpAll` 一批并发 4 张（`PRELOAD_CONCURRENCY = 4`）连续发起上述同步调用，
+   且 `PRELOAD_ALL_YIELD_MS = 0`，批与批之间不让出主线程。
+
+NAS 网络往返叠加到 6 秒，直接触发 `THREAD_BLOCK_6S`。日志里的
+`read_bytes ≈ 660MB`、`Rss ≈ 918MB` 也与 `RAW_CACHE_MAX_BYTES = 768MB` 的预算吻合 ——
+**不是内存爆了，是主线程被同步 IO 占死了**。
+
+### 改动范围（2 个源码文件 + 测试 + 文档）
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/RawCache.ts` | 新增两个纯函数判据：`rawIoTimeoutMs(size, baseMs, perMbMs, capMs)`（按体积加权、硬上限夹界、非有限数归零、恒返回有限整数）与 `rawDenyAfterFailure(genChanged, ioFailed, timedOut)`（换源绝不拉黑、IO 失败 / 超时立即放弃）；零 SDK 依赖，Node 可直接回归 |
+| `entry/src/main/ets/pages/Index.ets` | ① `RawStore.read()` 改 `private async ... Promise<ArrayBuffer \| undefined>`，`stat/open/read/close` 全换 Promise 版并 `await`，主线程在每个 `await` 让出；② `ensure()` 废除 `Promise.resolve(this.read(...))` 伪异步，改走新增的 `readGuarded()` 超时闸门（`setTimeout` + `settled` 单闸 + `rawIoTimeoutMs` 上限 + `rawDenyAfterFailure` 拉黑）；③ 新增 `RAW_IO_BASE_MS=400` / `RAW_IO_PER_MB_MS=120` / `RAW_IO_CAP_MS=8000` 三个常量；④ `decodePx()` 的 fd 兜底 `fs.openSync` / `fs.closeSync` 也改 `await fs.open` / `await fs.close`；⑤ `ESC_BUILD_TAG` → `R27`；⑥ 同步更正 6 处过时注释 |
+| `tests/dirname.test.mjs` | 7 处构建标记断言 `R26` → `R27`；2 处旧同步 IO 断言改为异步；3 条「全源码零 `new Promise`」护栏**收紧**为「启动恢复路径零 `new Promise`」并新增总数判据；新增第二十七轮 21 条静态契约与纯函数回归 |
+| `README.md` | 抬头构建标记 `R26` → `R27`；功能表「后台预载」行补注；新增本章 |
+
+**没有改动**：`InteractionPlan.ts`、`AppScope/app.json5`（版本仍 `1.0.7` / `versionCode 7`）、
+`FailFast.ts` / `RestoreTimeout.ts` 等其它纯函数模块、`onKey()` 任何分支、UI 布局与任何其它文件。
+
+### 关键设计点
+
+- **真异步是根治，不是缓解**：只有把同步 IO 换成 Promise 版，主线程才会在每个 `await` 处让出；
+  在此之前应用**没有能力**自己设超时（同步 IO 的超时由平台决定、应用无法缩短，见 `FailFast.ts` 的边界声明）。
+- **原子性不变**：所有 `await` 集中在 IO 阶段；`buf` 到手后的 `rawFitOf` 预算计算、LRU 淘汰、
+  `data.set` 插入仍是**同一段无 `await` 的同步代码**，与改前一样不会被同批其它读取插队。
+- **唯一仍同步的操作**：`new ArrayBuffer(size)` 清零 —— 纯内存、无 IPC / 无网络，且被
+  `RAW_SINGLE_MAX_BYTES = 64MB` 夹死，不可能挂 6 秒。
+- **到点即放弃**：死 NAS 上 `fs.read` 的 Promise 可能永不 settle，没有上限会让 `inflight` /
+  `allActive` 永久挂住、整条预载链假死。`readGuarded()` 到点直接 `resolve(undefined)`，
+  按 `rawDenyAfterFailure` 记 `denied`，本次解码降级 fd 路径，**功能绝不受损**。
+  底层 Promise 无法真正取消：超时后它若在后台返回，`read()` 会因 `denied` 已置位而跳过缓存插入，
+  但主线程从始至终空闲，不会再触发 appfreeze。
+- **换源不误杀**：`genChanged = true` 时绝不拉黑，否则新图库里同一个 uri 会被永久误判。
+- **在途合并 / `inflight` 清理 / 预算 LRU / 换源 `gen` / `clear()` 全部保持原语义**。
+
+### 明确不动的部分（零回归）
+
+- **ESC 链路**：严格两态分派、`escDedupEvent` 单轮去重、`inputConsumer`、窗口焦点、
+  `Ctrl+D` 诊断层、`Ctrl+Q` 退出、`quitApp()` / `destroyWindow()`
+- **方向键 / 看图交互**：`←` `↑` = 上一张、`→` `↓` = 下一张（第二十六轮），Ctrl + 滚轮缩放、
+  双指捏合、`0` 复位、`F` 1:1、空格幻灯片、`R/H/V`、`DEL/BACK`、右键放大镜、双击全屏
+- **预载链护栏**：`PRELOAD_CONCURRENCY = 4`、`PRELOAD_ALL_YIELD_MS = 0`、
+  `bulkIoAllowed(restoreMode)` 的 ro1 只读名单总闸门（≥9 处）、失败快速放弃、
+  3 秒恢复看门狗、3 个预算常量、`RAW_CACHE_MAX_*` 全部原值
+- **画质 / 放大镜 / 几何恢复 / 状态恢复 / 诊断层 / 版本**
+
+### 构建标记
+
+`ESC_BUILD_TAG` → `R27`。诊断层默认关闭；按 `Ctrl+D` 或单击右下角缩放百分比展开后可见 `R27`，
+用于从截图一眼排除 `R26` 及更早旧包。
+
+### 验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 37 s 816 ms**（真实 `CompileArkTS` 19 s 498 ms），签名 HAP **874,653 bytes**，`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 `R27`（`R26` 计数 0）；**0 ERROR**，仅剩既有 8 条 `preferences` 可能抛异常、1 条 `READ_IMAGEVIDEO` 权限、8 条 2in1 系统栏告警 |
+| 静态契约 | **ALL PASS 1274 passed, 0 failed**（1253 → 1274）；`node --check` / `git diff --check` / 注释剥离后 `Index.ets`、`RawCache.ts` 括号净平衡 `0/0/0`（与 HEAD 一致）/ 版本守卫全绿 |
+| 真机 NAS 验证 | ⚠️ **本会话无法自行完成**：`hdc` 无目标 / `bm install` 失败 / `hilog` 权限拒绝 / 无按键注入工具 / 无法打开 NAS 目录。**编译校验 ≠ 真机验证**，请按下方步骤在装有 R27 包的机器上确认 |
+
+未跑 `build.sh`、未把 HAP 放桌面、未升版本、未 push。产物仍在
+`entry/build/default/outputs/default/entry-default-signed.hap`。
+
+### 覆盖的验证场景（请在装有 R27 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层，看右下角角标 | 出现 `R27`（若还是 `R26` / `R25` 说明装的是旧包） |
+| 2 | 打开一个**本地**图库，快速滚轮翻页 | 图片照常瞬时上屏、缩放 / 放大镜 / 双击全屏不受影响（零回归基线） |
+| 3 | 打开**NAS 网络目录**，在预载 / 缓存期间持续拖动窗口、点档案列表、按方向键 | 界面**始终可操作**，不再出现 6 秒无响应 / appfreeze |
+| 4 | 同一 NAS 目录连续翻页到较靠后的图片 | 命中原始档案缓存的图仍瞬时上屏；`预载 N 张` 持续增长 |
+| 5 | 拔掉网线 / 让 NAS 路径变为不可达后继续浏览 | 单张最多约 8 秒即放弃（不再无限挂住），其余图片仍能正常显示，APP 不卡死 |
+| 6 | 从 NAS 目录切到另一个图库（换源） | 同一个 uri 不会被误拉黑，新图库图片照常进缓存（验证 `rawDenyAfterFailure` 的换源分支） |
+| 7 | 反复进出全屏、按两次 `Esc` | 首次退全屏、第二次退出 APP（ESC 链路零回归） |
+| 8 | 查看 hilog 中的 `rawCache read TIMEOUT` / `rawCache read FAIL` | 仅在死路径 / IO 失败时出现，正常 NAS 图库不应刷屏 |
+
+> **判据**：NAS 目录缓存期间界面不冻结、无 `THREAD_BLOCK_6S` 日志，即为本轮生效；
+> 若仍出现 6 秒主线程阻塞，请确认装的是 `R27` 包（旧包角标为 `R26` 或更早）。
 
 ## 第二十六轮：上下键改翻页 —— `↑`=`←` / `↓`=`→`、移除上下键缩放（2026-11-16，R26）
 

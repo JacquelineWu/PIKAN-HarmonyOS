@@ -79,7 +79,7 @@ export function rawSingleAllowed(size: number, maxSingle: number): boolean {
   return m === 0 || s <= m;
 }
 
-/** 一次 readSync 是否把整个文件读满。
+/** 一次 fs.read（第二十七轮前是 readSync）是否把整个文件读满。
  *  图片容器（HEIC/JPEG/PNG）截断一字节都可能让 ImageSource 解析失败或只出半张，
  *  所以**没读满就绝不能把这块 ArrayBuffer 交给 createImageSource** —— 调用方降级回 fd 解码。 */
 export function rawReadComplete(readBytes: number, size: number): boolean {
@@ -100,7 +100,51 @@ export function rawCacheTargetOf(total: number, cap: number): number {
 
 /** 是否启动原始档案数据预取链。
  *  ioAllowed 直接对应 ro1 只读名单态的 bulkIoAllowed()：恢复出来的一批死 uri
- *  绝不允许批量 openSync / readSync（历史整机卡死根因）。 */
+ *  绝不允许批量 open / read（历史整机卡死根因；第二十七轮起已真异步，闸门仍保留）。 */
 export function rawPrefetchWanted(ioAllowed: boolean, total: number, cap: number): boolean {
   return ioAllowed && rawCacheTargetOf(total, cap) > 0;
+}
+
+// --------------------------------------------------------------------
+// 第二十七轮：NAS 路径 THREAD_BLOCK_6S —— 真异步读取的「到点即放弃」判据
+// --------------------------------------------------------------------
+// 2026-11-16 实机 appfreeze：Current Running 是 fs.listFile，栈顶
+//   read(Index.ets:1062) = fs.readSync → ensure(1035) 的 Promise.resolve(...)
+//   → preloadOne → pumpAll → startAllPreload → schedulePreload → applyItems
+//   → openFolder。ensure() 名义返回 Promise，实际 read() 在 Promise.resolve
+//   的参数里就同步跑完了 4 个 fs.*Sync + new ArrayBuffer(size)；pumpAll 一批
+//   4 张连续同步调用，NAS 网络往返叠加直接占满 UI 主线程 6 秒。
+// 修复：read() 改 async + fs.stat/open/read/close 的 Promise 版，主线程在每个
+//   await 处让出。异步化之后应用才**有可能**自己设超时（同步 IO 的超时由平台
+//   决定、应用无法缩短，见 FailFast.ts 的边界声明），故补两个纯函数判据。
+
+/** 单次原始档案读取的超时上限（ms）。
+ *  · baseMs：固定基线，覆盖 open / close 的跨进程开销；
+ *  · perMbMs：按文件体积追加，NAS 上的大文件给更宽容的窗口，避免误杀；
+ *  · capMs：硬上限。死 NAS 路径上 fs.read 的 Promise 可能永不 settle，
+ *    没有上限就会让 inflight / allActive 永久挂住，整条预载链假死。
+ *  · 非有限数 / 负值一律按 0 归零；capMs>0 时结果夹在 [0, capMs]。
+ *  · 返回有限整数，绝不把 NaN / Infinity 传进 setTimeout。 */
+export function rawIoTimeoutMs(size: number, baseMs: number, perMbMs: number,
+  capMs: number): number {
+  const base: number = nonNegOf(baseMs);
+  const per: number = nonNegOf(perMbMs);
+  const cap: number = nonNegOf(capMs);
+  const s: number = nonNegOf(size);
+  const want: number = base + per * (s / (1024 * 1024));
+  const bounded: number = cap > 0 ? Math.min(want, cap) : want;
+  return Math.floor(bounded);
+}
+
+/** 读取失败 / 超时后，是否把该 uri 记入 denied（不再重试）。
+ *  · genChanged（换数据源）不是这个 uri 本身的问题：绝不拉黑，
+ *    否则新图库里同一个 uri 会被永久误判，正常图片再也进不了缓存；
+ *  · ioFailed / timedOut：立即放弃（第十轮「遇到问题立即放弃」），
+ *    本次解码仍可降级到 fd 路径，功能绝不受损。 */
+export function rawDenyAfterFailure(genChanged: boolean, ioFailed: boolean,
+  timedOut: boolean): boolean {
+  if (genChanged) {
+    return false;
+  }
+  return ioFailed || timedOut;
 }

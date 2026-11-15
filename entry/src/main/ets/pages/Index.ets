@@ -81,7 +81,8 @@ import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../common/DecodeCache';
 import { RawFit, rawFitOf, rawSingleAllowed, rawReadComplete,
-  rawCacheTargetOf, rawPrefetchWanted } from '../common/RawCache';
+  rawCacheTargetOf, rawPrefetchWanted,
+  rawIoTimeoutMs, rawDenyAfterFailure } from '../common/RawCache';
 import { ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
   enterTimeoutSafe, enterWatchdogWanted, enterSettledOk,
   enterTimeoutAction, enterTimeoutHint } from '../common/RestoreTimeout';
@@ -120,7 +121,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R26';
+const ESC_BUILD_TAG: string = 'R27';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -354,10 +355,11 @@ const PRELOAD_ALL: boolean = true;
 /** 全量缓存的张数上限（与 SCAN_CAP 同量级）。超过就触顶收工，不无限吃内存。 */
 const PRELOAD_ALL_CAP: number = 20000;
 /** 载入时「同时预解码」的受控并发路数。
- *  decodePx 里的 fs.openSync 是同步跨进程调用，一次并发几百个会把主线程打满（历史卡死成因），
- *  故一批最多 PRELOAD_CONCURRENCY 张，整批落地后 setTimeout 让出主线程再灌下一批。 */
+ *  历史上 decodePx 的 fs.openSync 是同步跨进程调用，一次并发几百个会把主线程打满；
+ *  第二十七轮起整条读链路已真异步，仍保留受控并发 —— 限制在途 IO 与内存峰值，
+ *  不让一批几百个 fs.read / ArrayBuffer 同时压上来。整批落地后再灌下一批。 */
 const PRELOAD_CONCURRENCY: number = 4;
-/** 全量预载每批之间让出主线程的间隔（ms）。0 = 尽快但不堆叠同步 openSync。 */
+/** 全量预载每批之间让出主线程的间隔（ms）。0 = 尽快但不堆叠在途异步 IO。 */
 const PRELOAD_ALL_YIELD_MS: number = 0;
 // ---- 第八轮（2026-11-12）：原始档案数据（未解码 bytes）的内存缓存 ----
 /** 用户要求「档案数据完全载入内存同时解码」：载入链把每个图片文件的完整 bytes 读进
@@ -375,6 +377,16 @@ const RAW_CACHE_MAX_BYTES: number = 768 * 1024 * 1024;
 const RAW_SINGLE_MAX_BYTES: number = 64 * 1024 * 1024;
 /** 原始档案数据缓存的张数上限（与 PRELOAD_ALL_CAP 同量级）。 */
 const RAW_CACHE_MAX_COUNT: number = 20000;
+// ---- 第二十七轮（2026-11-16）：NAS 路径 THREAD_BLOCK_6S 的异步 IO 超时 ----
+/** 单次原始档案读取的超时基线（ms）：覆盖 open / close 的跨进程固定开销。 */
+const RAW_IO_BASE_MS: number = 400;
+/** 每 MB 追加的超时（ms）：NAS 上的大文件给更宽容的窗口，避免误杀。 */
+const RAW_IO_PER_MB_MS: number = 120;
+/** 硬上限（ms）：死 NAS 路径上 fs.read 的 Promise 可能永不 settle，
+ *  没有上限就会让 inflight / allActive 永久挂住，整条预载链假死。
+ *  ⚠️ 只有把同步 IO 改成真异步之后，应用才**有可能**自己设这个上限 ——
+ *     同步 IO 的超时由平台决定、应用无法缩短（见 FailFast.ts 的边界声明）。 */
+const RAW_IO_CAP_MS: number = 8000;
 /** 主视图解码：长边 = 画布长边 × 该系数，并夹在 [VIEW_EDGE_MIN, VIEW_EDGE_MAX] 内。
  *  系数取 1.5 而不是 2（Win64 版实测）：×2 时一张大图能解到 1.5 秒，
  *  而屏幕实际只需要约 1.0 倍像素 —— 多出来的既不显示又拖慢切图。 */
@@ -988,10 +1000,13 @@ async function readExifTransform(src: image.ImageSource, uri: string): Promise<E
 // 都不必再跨网络读一遍原文件。
 //
 // 三条硬约束（沿用历史 appfreeze 教训）：
-//  · 受控并发：调用方 pumpAll 一批最多 PRELOAD_CONCURRENCY 路，绝不堆叠同步 openSync；
+//  · 受控并发：调用方 pumpAll 一批最多 PRELOAD_CONCURRENCY 路，绝不堆叠同步 IO；
 //  · 在途合并：同一 uri 并发请求共用一个 Promise，绝不重复读同一文件；
 //  · 防 OOM：LRU + rawFitOf 张数/字节预算；读不到 / 超预算时 decodePx 自动降级回 fd，
 //    功能绝不因缓存未命中而受损。
+// 第二十七轮（2026-11-16 NAS THREAD_BLOCK_6S）：read() 改为**真异步** ——
+//   stat/open/read/close 全用 Promise 版并 await，主线程在每个 await 处让出，
+//   NAS 网络往返不再占住 UI 线程；ensure() 再套一层「到点即放弃」超时闸门。
 // 换数据源时 clear() 自增 gen：旧批次读回来的 bytes 只用于本次解码，不再污染新图库。
 // --------------------------------------------------------------------
 class RawStore {
@@ -999,7 +1014,7 @@ class RawStore {
   private order: string[] = [];                 // LRU：队头最旧
   private bytes: number = 0;
   private inflight: Map<string, Promise<ArrayBuffer | undefined>> = new Map();
-  private denied: Set<string> = new Set();     // 不适合内存缓存的 uri：别反复 statSync/readSync
+  private denied: Set<string> = new Set();     // 不适合内存缓存的 uri：别反复 fs.stat/fs.read
   private gen: number = 0;
 
   /** 同步查内存；命中刷新 LRU 位置。probeOne() 用它零 IO 探元数据。 */
@@ -1017,7 +1032,12 @@ class RawStore {
   }
 
   /** 确保该 uri 的完整 bytes 已在内存（或已在途）。返回 undefined 表示「本次不缓存」，
-   *  调用方 decodePx 会降级回 fd 解码 —— 功能绝不因缓存未命中而受损。 */
+   *  调用方 decodePx 会降级回 fd 解码 —— 功能绝不因缓存未命中而受损。
+   *
+   *  第二十七轮：read() 已改成**真异步**（stat / open / read / close 全是 Promise 版
+   *  await，主线程在每个 await 处让出），再套一层「到点即放弃」闸门：死 NAS 路径上
+   *  fs.read 的 Promise 可能永不 settle，没有上限就会让 inflight / allActive 永久
+   *  挂住，整条预载链假死。 */
   ensure(uri: string): Promise<ArrayBuffer | undefined> {
     const hit: ArrayBuffer | undefined = this.get(uri);
     if (hit !== undefined) {
@@ -1031,42 +1051,100 @@ class RawStore {
       return running;
     }
     const gen: number = this.gen;
-    const job: Promise<ArrayBuffer | undefined> =
-      Promise.resolve<ArrayBuffer | undefined>(this.read(uri, gen))
-        .then((buf: ArrayBuffer | undefined): ArrayBuffer | undefined => {
-          this.inflight.delete(uri);
-          return buf;
-        })
-        .catch((): ArrayBuffer | undefined => {
-          this.inflight.delete(uri);
-          return undefined;
-        });
+    const job: Promise<ArrayBuffer | undefined> = this.readGuarded(uri, gen)
+      .then((buf: ArrayBuffer | undefined): ArrayBuffer | undefined => {
+        this.inflight.delete(uri);
+        return buf;
+      })
+      .catch((): ArrayBuffer | undefined => {
+        this.inflight.delete(uri);
+        return undefined;
+      });
     this.inflight.set(uri, job);
     return job;
   }
 
-  /** 真正的一次性读取。函数体内全是同步调用、无 await —— 预算计算与插入是原子的，
-   *  不会被同批其它读取插队。 */
-  private read(uri: string, gen: number): ArrayBuffer | undefined {
+  /** 第二十七轮：真异步读取 + 超时放弃闸门。
+   *  · 上限用 rawIoTimeoutMs 以单文件上限作保守体积上界（stat 之前拿不到真实 size），
+   *    capMs 是决定性硬上限；结果恒为有限整数，绝不把 NaN / Infinity 传给 setTimeout。
+   *  · settled 单闸：定时器与 IO 回调只可能有一个生效，绝不二次 resolve。
+   *  · 到点即放弃：rawDenyAfterFailure 判定后记 denied，本次解码降级 fd、功能不受损；
+   *    换源（gen 变了）绝不拉黑，避免新图库里同一个 uri 被永久误判。
+   *  · 底层 fs 的 Promise 应用无法真正取消；超时后它若在后台返回，read() 会因
+   *    denied 已置位而跳过缓存插入 —— 但主线程从始至终空闲，不会再触发 appfreeze。 */
+  private readGuarded(uri: string, gen: number): Promise<ArrayBuffer | undefined> {
+    const limitMs: number = rawIoTimeoutMs(RAW_SINGLE_MAX_BYTES,
+      RAW_IO_BASE_MS, RAW_IO_PER_MB_MS, RAW_IO_CAP_MS);
+    let settled: boolean = false;
+    let timer: number = -1;
+    return new Promise<ArrayBuffer | undefined>(
+      (resolve: (v: ArrayBuffer | undefined | PromiseLike<ArrayBuffer | undefined>) => void): void => {
+        if (limitMs > 0) {
+          timer = setTimeout((): void => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            if (rawDenyAfterFailure(gen !== this.gen, false, true)) {
+              this.denied.add(uri);
+            }
+            hilog.warn(DOMAIN, TAG,
+              'rawCache read TIMEOUT uri=%{public}s limit=%{public}d', uri, limitMs);
+            resolve(undefined);
+          }, limitMs);
+        }
+        this.read(uri, gen).then((buf: ArrayBuffer | undefined): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (timer >= 0) {
+            clearTimeout(timer);
+          }
+          resolve(buf);
+        }).catch((): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (timer >= 0) {
+            clearTimeout(timer);
+          }
+          resolve(undefined);
+        });
+      });
+  }
+
+  /** 真正的一次性读取（第二十七轮：全部改成 Promise 版异步 IO）。
+   *  · fs.stat / fs.open / fs.read / fs.close 每个都 await，主线程在每个 await 处让出，
+   *    NAS 网络往返不再占住 UI 线程 —— 这是 THREAD_BLOCK_6S 的根治。
+   *  · 所有 await 集中在 IO 阶段；buf 到手后的预算计算与 LRU 插入是**同一段同步代码**
+   *    （中间无 await），与改前一样原子，不会被同批其它读取插队。
+   *  · 唯一仍在主线程的同步操作是 new ArrayBuffer(size) 清零：纯内存、无 IPC / 无网络，
+   *    且被 RAW_SINGLE_MAX_BYTES=64MB 夹死，不可能挂 6 秒。
+   *  · 读满校验 / 单文件上限 / 换源判定 / 预算淘汰 / LRU 账目全部保持原语义。 */
+  private async read(uri: string, gen: number): Promise<ArrayBuffer | undefined> {
     let file: fs.File | undefined = undefined;
     try {
-      const size: number = fs.statSync(uri).size;
+      const st: fs.Stat = await fs.stat(uri);
+      const size: number = st.size;
       if (!rawSingleAllowed(size, RAW_SINGLE_MAX_BYTES)) {
         this.denied.add(uri);
         return undefined;
       }
-      file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      file = await fs.open(uri, fs.OpenMode.READ_ONLY);
       const buf: ArrayBuffer = new ArrayBuffer(size);
       // 两参重载：刚 open 的文件指针在 0，一次读满整个 buffer。刻意不传 options，
       // 避开各 SDK 版本 ReadOptions.offset 语义差异；没读满就绝不交给 ImageSource。
-      const got: number = fs.readSync(file.fd, buf);
+      const got: number = await fs.read(file.fd, buf);
       if (!rawReadComplete(got, size)) {
         // 网络 / 大文件一次读不满：别每次解码都重读一遍，直接降级 fd 路径更稳。
         this.denied.add(uri);
         return undefined;
       }
-      if (gen !== this.gen) {
-        return buf;         // 换源了：本次解码仍可用，但不入新图库的缓存
+      // 换源了、或这张已被超时闸门放弃：本次解码仍可用，但不入新图库的缓存。
+      if (gen !== this.gen || this.denied.has(uri)) {
+        return buf;
       }
       const fit: RawFit = rawFitOf(this.sizesOf(), size,
         RAW_CACHE_MAX_BYTES, RAW_CACHE_MAX_COUNT);
@@ -1089,11 +1167,14 @@ class RawStore {
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'rawCache read FAIL uri=%{public}s err=%{public}s',
         uri, JSON.stringify(e));
+      if (rawDenyAfterFailure(gen !== this.gen, true, false)) {
+        this.denied.add(uri);
+      }
       return undefined;
     } finally {
       if (file !== undefined) {
         try {
-          fs.closeSync(file);
+          await fs.close(file);
         } catch (e) {
           hilog.warn(DOMAIN, TAG, 'rawCache close skipped');
         }
@@ -1139,8 +1220,10 @@ const rawStore: RawStore = new RawStore();
  *       解码后读 PixelMap.getColorSpace() 记录系统识别到的空间，用于信息浮层。
  *  2026-11-12 第八轮 ④：优先用 RawStore 里已载入内存的**完整原始档案数据**建
  *  ImageSource（ArrayBuffer 重载），不再为每张图 openSync + 让 codec 逐段读文件。
- *  ensure 返回 undefined（超预算 / 单文件过大 / 读不满 / 无权限）时降级回 fd 路径，
- *  功能绝不受缓存影响。EXIF / HDR / ICC 三件事在两种 ImageSource 上完全一致。 */
+ *  ensure 返回 undefined（超预算 / 单文件过大 / 读不满 / 超时 / 无权限）时降级回 fd 路径，
+ *  功能绝不受缓存影响。EXIF / HDR / ICC 三件事在两种 ImageSource 上完全一致。
+ *  2026-11-16 第二十七轮 ⑤：fd 兜底也从 fs.openSync 改为 await fs.open，
+ *  NAS 死路径上这次跨进程 open 同样不再占住 UI 主线程。 */
 async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
@@ -1149,7 +1232,9 @@ async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undef
     if (raw !== undefined) {
       src = image.createImageSource(raw);
     } else {
-      file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      // 第二十七轮：fd 兜底路径也改 await fs.open（同 RawStore.read 的真异步口径）。
+      // 缓存未命中 / 超时放弃时，这次跨进程 open 同样不能占住 UI 主线程。
+      file = await fs.open(uri, fs.OpenMode.READ_ONLY);
       src = image.createImageSource(file.fd);
     }
     const info: image.ImageInfo = await src.getImageInfo();
@@ -1219,7 +1304,7 @@ async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undef
     }
     if (file !== undefined) {
       try {
-        fs.closeSync(file);
+        await fs.close(file);
       } catch (e) {
         hilog.warn(DOMAIN, TAG, 'close file skipped');
       }
@@ -1356,7 +1441,8 @@ struct ArchiveRow {
   @Prop selected: boolean = false;
   @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
   /** 只读名单态：快照 uri 的授权已失效，悬停时**绝不**发起 384px 缩略图解码
-   *  （ThumbLoader 走 decodePx → fs.openSync，同样是同步跨进程调用）。 */
+   *  （ThumbLoader 走 decodePx → await fs.open；虽已异步，死 uri 仍会白等一次
+   *  跨进程往返并挤占 IO 队列，故继续在入口短路）。 */
   @Prop thumbDisabled: boolean = false;
   // ⚠️ 回调也不能加 private：ArkTS 会报
   //    "Property 'onTap' is private and can not be initialized through the component constructor"。
@@ -2945,8 +3031,10 @@ struct Index {
   private warmLast(uri: string): void {
     setTimeout(() => {
       // 第十轮 ff1：启动恢复期绝不碰文件。这里原本在 300ms 就 decodePx →
-      // rawStore.ensure（statSync / openSync / readSync），死 NAS 路径一次能挂 20 秒，
-      // 把 900ms 恢复定时器和 3 秒看门狗一起饿死。恢复链判定完再决定是否出图。
+      // rawStore.ensure（当时是 statSync / openSync / readSync），死 NAS 路径一次
+      // 能挂 20 秒，把 900ms 恢复定时器和 3 秒看门狗一起饿死。第二十七轮读链路
+      // 已真异步、不再饿死定时器，但「恢复期零 IO」这条防线继续保留。
+      // 恢复链判定完再决定是否出图。
       if (this.giveUpDone || this.restoreCancelled ||
           restoreIoHeld(this.restoreEntered, this.userActed, this.hasRestoreMemory)) {
         hilog.info(DOMAIN, TAG, 'warm held: restore decides first, zero file IO (ff1)');
@@ -4660,7 +4748,8 @@ struct Index {
   private decodeTo(uri: string, edge: number,
     allowReuse: boolean = true): Promise<PreviewEntry | undefined> {
     // ⚠️ 只读名单态的总闸门：所有主视图 / 预载 / 右页 / 预热解码都从这里过。
-    //    恢复出来的是一批授权已失效的死 uri，任何一次 decodePx 都是同步跨进程 openSync；
+    //    恢复出来的是一批授权已失效的死 uri，任何一次 decodePx 都要跨进程 open
+    //    （第二十七轮起为 await fs.open，已不阻塞主线程，但仍会白等一轮网络超时）；
     //    在这里集中短路，比在每个调用点各挡一次更可靠，也杜绝漏网。
     if (!bulkIoAllowed(this.restoreMode)) {
       return Promise.resolve<PreviewEntry | undefined>(undefined);
@@ -5371,7 +5460,8 @@ struct Index {
   }
 
   /** 一批最多 PRELOAD_CONCURRENCY 张同时解码；整批落地后 setTimeout 让出主线程再灌下一批。
-   *  受控并发是关键：decodePx 的 fs.openSync 是同步跨进程调用，一次并发几百个会卡死主线程。 */
+   *  受控并发仍关键：第二十七轮后读链路已真异步（不会再 THREAD_BLOCK_6S），
+   *  但一次并发几百个在途 IO / ArrayBuffer 仍会打满内存与 IO 队列，故保留分批。 */
   private pumpAll(seq: number): void {
     if (seq !== this.allSeq) {
       this.allBusy = false;

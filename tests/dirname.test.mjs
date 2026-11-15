@@ -33,6 +33,8 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十七轮「NAS 路径 THREAD_BLOCK_6S：RawStore.read 真异步化 + 到点即放弃超时闸门 /
+ *    fd 兜底异步化 / R27 构建标记」、
  * 第二十六轮「上下键改翻页：↑=← 上一张 / ↓=→ 下一张 / 移除上下键缩放 / 其它交互零回归」、
  * 第二十五轮「诊断层收成默认关闭 + 保留 Ctrl+D / 单击角标可开关入口 / R25 构建标记」、
  * 第二十四轮「R23 截图驱动：修 escDownHandled 永不复位 / ESC 单轮去重废除永久对象引用 /
@@ -78,7 +80,8 @@ import { metaLineOf, parseMetaLine, encodeMeta, decodeMeta, metaForUri,
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../entry/src/main/ets/common/DecodeCache.ts';
 import { rawFitOf, rawSingleAllowed, rawReadComplete,
-  rawCacheTargetOf, rawPrefetchWanted } from '../entry/src/main/ets/common/RawCache.ts';
+  rawCacheTargetOf, rawPrefetchWanted, rawIoTimeoutMs,
+  rawDenyAfterFailure } from '../entry/src/main/ets/common/RawCache.ts';
 import { ENTER_WAIT, ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
   enterTimeoutSafe, enterWatchdogWanted, enterSettledOk,
   enterTimeoutAction, enterTimeoutHint } from '../entry/src/main/ets/common/RestoreTimeout.ts';
@@ -1006,8 +1009,15 @@ check('AUTO_RESUME_ON_START 护栏仍 false（启动绝不重扫 / 弹权限框�
 check('showLastOnStart 仍不含选择器 / 权限 / 全量重扫',
   /loadAllGallery|queryAllPhotos|ensureGalleryPermission|DocumentViewPicker|PhotoViewPicker/
     .test(RESUME_FN), false);
+// 第二十七轮：new Promise 现在全源码有 1 处，且只属于预载链的 readGuarded 超时闸门
+// （真异步 + 到点 resolve，不是同步等待）。启动恢复路径仍必须零 new Promise / race，
+// 故把这条护栏从「全源码」收紧为「showLastOnStart 启动关键路径」，并另加一条总数判据。
 check('启动关键路径仍无 new Promise / Promise.race（不引入同步等待）',
-  /new Promise|Promise\.race/.test(INDEX), false);
+  /new Promise|Promise\.race/.test(RESUME_FN), false);
+check('R27 唯一 new Promise = RawStore.readGuarded 超时闸门（不在启动恢复路径 / 非同步等待）',
+  (INDEX.match(/new Promise/g) || []).length === 1 &&
+  /Promise\.race/.test(INDEX) === false &&
+  /private readGuarded\(uri: string, gen: number\): Promise<ArrayBuffer \| undefined> \{[\s\S]{0,900}new Promise<ArrayBuffer \| undefined>\(/.test(INDEX), true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 // ===========================================================================
@@ -1249,9 +1259,9 @@ check('右下角：正式版只显示缩放百分比；诊断层展开时显示�
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R26 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比恒在右下角；R27 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R26';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R27';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -2025,10 +2035,10 @@ check('原始档案数据预算与 PixelMap 缓存分开计（防 OOM）',
 check('decodePx 优先从内存 ArrayBuffer 建 ImageSource，失败降级 fd',
   /const raw: ArrayBuffer \| undefined = await rawStore\.ensure\(uri\);/.test(INDEX) &&
   /src = image\.createImageSource\(raw\);/.test(INDEX) &&
-  /file = fs\.openSync\(uri, fs\.OpenMode\.READ_ONLY\);/.test(INDEX) &&
+  /file = await fs\.open\(uri, fs\.OpenMode\.READ_ONLY\);/.test(INDEX) &&
   /src = image\.createImageSource\(file\.fd\);/.test(INDEX), true);
 check('RawStore.read 一次读满并校验完整性 + LRU 准入',
-  /const got: number = fs\.readSync\(file\.fd, buf\);/.test(INDEX) &&
+  /const got: number = await fs\.read\(file\.fd, buf\);/.test(INDEX) &&
   /if \(!rawReadComplete\(got, size\)\)/.test(INDEX) &&
   /const fit: RawFit = rawFitOf\(this\.sizesOf\(\), size,/.test(INDEX) &&
   /for \(let i = 0; i < fit\.evict; i\+\+\)/.test(INDEX), true);
@@ -2200,12 +2210,12 @@ check('showLastOnStart 仍不含选择器 / 权限 / 全量重扫',
 check('往上层仍不弹系统选择器',
   /chooseFolder\(|DocumentViewPicker|dv\.select/.test(UP_FN) === false, true);
 check('chooseFolderAt 整个方法仍不存在', /chooseFolderAt/.test(INDEX) === false, true);
-check('ro1 闸门 / 版本 / 按钮 / 启动重扫护栏 / 无同步等待都未动',
+check('ro1 闸门 / 版本 / 按钮 / 启动重扫护栏 / 启动路径无同步等待都未动',
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
   /\.enabled\(/.test(CODE_LINES) === false &&
   /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX) &&
-  /new Promise|Promise\.race/.test(INDEX) === false, true);
+  /new Promise|Promise\.race/.test(RESUME_FN) === false, true);
 check('层级重建仍恰好 2 处、全量链与滚轮零解码未动',
   (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 2 &&
   /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
@@ -2359,11 +2369,11 @@ check('ro1 闸门数量不减',
 check('往上层仍不弹系统选择器',
   /chooseFolder\(|DocumentViewPicker|dv\.select/.test(UP_FN) === false, true);
 check('chooseFolderAt 整个方法仍不存在', /chooseFolderAt/.test(INDEX) === false, true);
-check('版本 / 按钮永不禁用 / 启动重扫护栏 / 无同步等待都未动',
+check('版本 / 按钮永不禁用 / 启动重扫护栏 / 启动路径无同步等待都未动',
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
   /\.enabled\(/.test(CODE_LINES) === false &&
   /const AUTO_RESUME_ON_START: boolean = false;/.test(INDEX) &&
-  /new Promise|Promise\.race/.test(INDEX) === false, true);
+  /new Promise|Promise\.race/.test(RESUME_FN) === false, true);
 check('层级重建仍恰好 2 处、全量链与滚轮零解码未动',
   (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 2 &&
   /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
@@ -3726,8 +3736,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 诊断层展开时可见 R26 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
+check('③ 诊断层展开时可见 R27 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3753,7 +3763,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R26，否则说明装的是旧包。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R27，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3814,8 +3824,9 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R26 构建标记已升级（R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
+check('④ R27 构建标记已升级（R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
@@ -3838,7 +3849,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：展开诊断层后须出现 R26；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R27；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3906,8 +3917,9 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R26 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
+check('⑤ R27 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
@@ -3976,8 +3988,9 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R26 构建标记且 R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
+check('④ R27 构建标记且 R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false, true);
@@ -4022,9 +4035,10 @@ check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
   (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
 
-console.log('--- 第二十五轮 ③：R26 构建标记 + 既有链路零回归 ---');
-check('③ R26 构建标记，R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
+console.log('--- 第二十五轮 ③：R27 构建标记 + 既有链路零回归 ---');
+check('③ R27 构建标记，R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false, true);
 check('③ ESC 分派 / 焦点 / 窗口 / inputConsumer / Ctrl+Q 全部原样保留（只改 UI 显示）',
@@ -4097,10 +4111,10 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
   INDEX_CODE26.split('.autoResize(false)').length - 1 === 3 &&
   INDEX_CODE26.split('.dynamicRangeMode(').length - 1 === 3, true);
 
-console.log('--- 第二十六轮 ④：R26 构建标记 + 既有链路零回归 ---');
-check('④ ESC_BUILD_TAG=R26，R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") &&
-  ['R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+console.log('--- 第二十六轮 ④：R27 构建标记 + 既有链路零回归 ---');
+check('④ ESC_BUILD_TAG=R27，R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") &&
+  ['R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4115,6 +4129,112 @@ check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未�
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十六轮章节。');
 console.log('  ⚠️ 截图判定：按 ↑ / ↓ 只换张、右下角缩放百分比不变；百分比若变说明仍是旧包。');
 console.log('  ⚠️ 本轮只改 onKey() 里 2 个 case 分支，不碰任何其它看图交互。');
+
+// ==================== 第二十七轮：NAS 路径 THREAD_BLOCK_6S —— 真异步读取 + 到点即放弃 ====================
+// 用户提供的 appfreeze 日志：Current Running = fs.listFile（completeTime 空），
+//   JS 栈顶 read(Index.ets:1062) = fs.readSync → ensure(1035) 的 Promise.resolve(...) →
+//   preloadOne → pumpAll → startAllPreload → schedulePreload → applyItems → openFolder，
+//   native 栈 read+44 / uv_fs_read / libfs.z.so；THREAD_BLOCK_6S、Rss≈918MB、read_bytes≈660MB。
+// 根因：ensure() 是**伪异步** —— read() 在 Promise.resolve(...) 的参数里就同步跑完了
+//   4 个 fs.*Sync + new ArrayBuffer(size)；pumpAll 一批 4 张连续同步调用，NAS 往返叠加占满 UI 线程。
+// 修复：read() 改 async + Promise 版 stat/open/read/close，主线程在每个 await 让出；
+//   ensure() 套一层 rawIoTimeoutMs 驱动的超时闸门，到点按 rawDenyAfterFailure 放弃并记 denied；
+//   decodePx 的 fd 兜底也从 fs.openSync 改 await fs.open。
+console.log('\n--- 第二十七轮 ①：rawIoTimeoutMs 超时判据（有限整数 / 体积加权 / 硬上限）---');
+check('① 基线 + 体积加权：1MB 文件 = base + per',
+  rawIoTimeoutMs(1024 * 1024, 400, 120, 8000), 520);
+check('① 64MB 大文件被 capMs 夹住，绝不无限等',
+  rawIoTimeoutMs(64 * 1024 * 1024, 400, 120, 8000), 8000);
+check('① capMs<=0 表示不封顶，结果仍是有限整数',
+  rawIoTimeoutMs(2 * 1024 * 1024, 400, 120, 0), 640);
+check('① 非有限数 / 负值一律归零，不把 NaN / Infinity 传给 setTimeout',
+  rawIoTimeoutMs(NaN, -1, Infinity, -5) === 0 &&
+  Number.isFinite(rawIoTimeoutMs(NaN, -1, Infinity, -5)) &&
+  rawIoTimeoutMs(1024 * 1024, NaN, NaN, 100) === 0, true);
+check('① 返回值恒为整数',
+  Number.isInteger(rawIoTimeoutMs(1234567, 400, 120, 8000)) &&
+  Number.isInteger(rawIoTimeoutMs(-1, -1, -1, -1)), true);
+
+console.log('--- 第二十七轮 ②：rawDenyAfterFailure 到点即放弃判据 ---');
+check('② IO 失败 / 超时都立即拉黑（第十轮「遇到问题立即放弃」）',
+  rawDenyAfterFailure(false, true, false) === true &&
+  rawDenyAfterFailure(false, false, true) === true &&
+  rawDenyAfterFailure(false, true, true) === true, true);
+check('② 换数据源绝不拉黑：同一个 uri 在新图库里仍可正常进缓存',
+  rawDenyAfterFailure(true, true, true) === false &&
+  rawDenyAfterFailure(true, true, false) === false &&
+  rawDenyAfterFailure(true, false, true) === false, true);
+check('② 无失败无超时不拉黑', rawDenyAfterFailure(false, false, false), false);
+
+console.log('--- 第二十七轮 ③：RawStore.read 真异步（4 个 fs.* 全 await，零 *Sync）---');
+const READ27_START = INDEX.indexOf('  private async read(uri: string, gen: number)');
+const RAW27_READ = stripComments(INDEX.slice(READ27_START,
+  INDEX.indexOf('  /** 队头→队尾各条字节数', READ27_START)));
+check('③ read() 是 async 且返回 Promise<ArrayBuffer | undefined>',
+  /private async read\(uri: string, gen: number\): Promise<ArrayBuffer \| undefined> \{/.test(INDEX) &&
+  READ27_START > 0, true);
+check('③ stat / open / read / close 全部是 Promise 版 await',
+  /const st: fs\.Stat = await fs\.stat\(uri\);/.test(RAW27_READ) &&
+  /file = await fs\.open\(uri, fs\.OpenMode\.READ_ONLY\);/.test(RAW27_READ) &&
+  /const got: number = await fs\.read\(file\.fd, buf\);/.test(RAW27_READ) &&
+  /await fs\.close\(file\);/.test(RAW27_READ), true);
+check('③ read() 函数体内零 fs.*Sync（伪异步根因已根除，注释已剥离）',
+  /fs\.(statSync|openSync|readSync|closeSync)\(/.test(RAW27_READ), false);
+check('③ 预算计算与 LRU 插入仍是同一段同步代码（await 只在 IO 阶段）',
+  /const fit: RawFit = rawFitOf\(this\.sizesOf\(\), size,/.test(RAW27_READ) &&
+  /this\.data\.set\(uri, buf\);/.test(RAW27_READ) &&
+  /this\.bytes \+= size;/.test(RAW27_READ) &&
+  /if \(gen !== this\.gen \|\| this\.denied\.has\(uri\)\)/.test(RAW27_READ), true);
+
+console.log('--- 第二十七轮 ④：ensure() 超时闸门 + 伪异步已废除 ---');
+const RAW27_ENSURE = stripComments(INDEX.slice(
+  INDEX.indexOf('  ensure(uri: string): Promise<ArrayBuffer | undefined>'),
+  INDEX.indexOf('  /** 第二十七轮：真异步读取 + 超时放弃闸门')));
+check('④ 旧的 Promise.resolve(this.read(...)) 伪异步写法已彻底移除',
+  /Promise\.resolve<ArrayBuffer \| undefined>\(this\.read\(uri, gen\)\)/.test(INDEX), false);
+check('④ ensure() 改走 readGuarded，在途合并 / denied 短路 / inflight 清理都保留',
+  /const job: Promise<ArrayBuffer \| undefined> = this\.readGuarded\(uri, gen\)/.test(RAW27_ENSURE) &&
+  /this\.inflight\.delete\(uri\);/.test(RAW27_ENSURE) &&
+  /this\.inflight\.set\(uri, job\);/.test(RAW27_ENSURE) &&
+  /if \(this\.denied\.has\(uri\)\)/.test(RAW27_ENSURE) &&
+  /const running: Promise<ArrayBuffer \| undefined> \| undefined = this\.inflight\.get\(uri\);/.test(RAW27_ENSURE), true);
+check('④ readGuarded 用 rawIoTimeoutMs 算上限 + setTimeout + settled 单闸',
+  /const limitMs: number = rawIoTimeoutMs\(RAW_SINGLE_MAX_BYTES,/.test(INDEX) &&
+  /let settled: boolean = false;/.test(INDEX) &&
+  /timer = setTimeout\(\(\): void => \{/.test(INDEX) &&
+  /clearTimeout\(timer\);/.test(INDEX) &&
+  /new Promise<ArrayBuffer \| undefined>\(/.test(INDEX), true);
+check('④ 超时 / IO 失败按 rawDenyAfterFailure 判据记 denied（换源不误杀）',
+  (INDEX.match(/rawDenyAfterFailure\(gen !== this\.gen,/g) || []).length === 2 &&
+  /const RAW_IO_BASE_MS: number = 400;/.test(INDEX) &&
+  /const RAW_IO_PER_MB_MS: number = 120;/.test(INDEX) &&
+  /const RAW_IO_CAP_MS: number = 8000;/.test(INDEX) &&
+  /rawIoTimeoutMs, rawDenyAfterFailure/.test(INDEX), true);
+check('④ RawCache.ts 两个纯函数已导出且模块仍是零 SDK 依赖',
+  /export function rawIoTimeoutMs\(/.test(RAW_SRC) &&
+  /export function rawDenyAfterFailure\(/.test(RAW_SRC) &&
+  /@ohos\./.test(RAW_SRC) === false, true);
+
+console.log('--- 第二十七轮 ⑤：decodePx fd 兜底也异步 + 既有链路零回归 ---');
+check('⑤ fd 兜底 open / close 改 await（缓存未命中也不再同步跨进程）',
+  /file = await fs\.open\(uri, fs\.OpenMode\.READ_ONLY\);/.test(INDEX) &&
+  /await fs\.close\(file\);/.test(INDEX) &&
+  /fs\.openSync\(uri, fs\.OpenMode\.READ_ONLY\)/.test(INDEX) === false, true);
+check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 全部未坏',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  /case KeyCode\.KEYCODE_DPAD_UP:\s*this\.go\(-1\);/.test(INDEX_CODE26) &&
+  /case KeyCode\.KEYCODE_DPAD_DOWN:\s*this\.go\(1\);/.test(INDEX_CODE26) &&
+  INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
+check('⑤ R27 构建标记，R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") &&
+  ['R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+    INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
+console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
+console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
+console.log('  ⚠️ 真机步骤：装 R27 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
