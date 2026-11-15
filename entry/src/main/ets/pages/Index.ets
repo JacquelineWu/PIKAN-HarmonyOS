@@ -120,7 +120,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R23';
+const ESC_BUILD_TAG: string = 'R24';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1831,9 +1831,16 @@ struct Index {
   // ---- 第二十一轮：窗口真实状态同步 + 焦点锚点 + 常显诊断 ----
   /** 系统窗口当前是否真的处于全屏形态（只用于常显角标诊断，不参与业务分派）。 */
   @State winFullBySystem: boolean = false;
-  /** 同一个 KeyEvent 在「焦点锚点 Button → 根 Column」双通道间精确去重。
-   *  用**事件对象引用**而非时间窗：零冷却，绝不误吞用户连按的第二次 ESC。 */
+  /** 第二十四轮：按键去重分两套，且**不依赖 `KeyEvent.timestamp`**
+   *  （SDK 明确标注该字段 `unavailable to tablet, 2in1`，实机可能恒 0）。
+   *  R23 的「永久对象引用去重」有致命缺陷：2in1 上 ArkUI 复用同一个 KeyEvent
+   *  实例（只改字段），用户主动按下的第二次 ESC 因 `=== event` 被误判成「同一
+   *  事件在另一通道重复派发」而吞掉 —— R23 截图 `keys=168` 却只有 `ESC#1` 即此症状。
+   *  ① 非 ESC：沿用永久对象引用去重，翻页 / 缩放等既有行为完全不变；
+   *  ② ESC：只在**当前事件分发链**内去重，setTimeout(0) 后立即失效，
+   *     同一次物理按键的多通道派发仍合并，跨事件循环的第二次 ESC 必然放行。 */
   private lastKeyEvent: KeyEvent | undefined = undefined;
+  private escDedupEvent: KeyEvent | undefined = undefined;
   private winStatusListenerOn: boolean = false;
   /** 系统是否**确实报告过**全屏形态（FULL_SCREEN / MAXIMIZE）。
    *  2in1 上部分窗口 API 不可用，getWindowStatus() 可能恒为 FLOATING；
@@ -1858,6 +1865,11 @@ struct Index {
   /** 分发通道 onKeyEventDispatch 被调用次数（不受 onKey 去重影响）：
    *  dsp>0 但 keys=0 = 去重有问题；dsp=0 = ArkUI 组件树完全没收到按键。 */
   @State dispatchSeen: number = 0;
+  /** 第二十四轮：三个按键通道各自到达计数，常显在黄色诊断行。
+   *  cap=onKeyPreIme / con=onKeyEvent / dsp=onKeyEventDispatch。
+   *  第二次 ESC 若没进 onKey，这三个数能区分「压根没派发」与「落在某层被拦下」。 */
+  @State capSeen: number = 0;
+  @State conSeen: number = 0;
   private hkSeen: number = 0;
   private quitFallbackTimer: number = -1;
 
@@ -6792,23 +6804,39 @@ struct Index {
   }
 
   private onKey(event: KeyEvent): void {
-    // 第二十一轮：同一个 KeyEvent 对象可能在「焦点锚点 Button」与「根 Column」
-    // 两个通道各派发一次。用对象引用精确去重，不使用任何时间窗 / 计数冷却，
-    // 因此用户紧接着主动按下的第二次 ESC 一定会被正常处理。
-    if (this.lastKeyEvent === event) {
-      return;
+    // 第二十四轮：ESC 与非 ESC 分开去重（详见字段注释）。核心是 ESC 的去重
+    // 只活一次事件循环，绝不跨越到用户主动按下的第二次 ESC。
+    const isEscEarly: boolean = event.keyCode === KeyCode.KEYCODE_ESCAPE;
+    if (isEscEarly) {
+      if (this.escDedupEvent === event) {
+        return;
+      }
+      this.escDedupEvent = event;
+      setTimeout(() => {
+        this.escDedupEvent = undefined;
+      }, 0);
+    } else {
+      if (this.lastKeyEvent === event) {
+        return;
+      }
+      this.lastKeyEvent = event;
     }
-    this.lastKeyEvent = event;
-    // 第二十二轮：任意键到达计数（不只 ESC）。角标常显 keys=N，
-    // 一张截图就能区分「键盘完全没到 APP」与「只有 ESC 被系统吃掉」。
+    // 第二十二轮：任意键到达计数（不只 ESC）。角标常显 keys=N。
     this.keySeen++;
     const code: number = event.keyCode;
     const rawDown: boolean = (event.type === KeyType.Down);
-    // 第二十轮：少数 2in1 / PC 键盘的 ESC 只把 KeyType.Up 派给应用（Down 被系统
-    // 窗口管理器在沉浸态消费掉）。若本轮没处理过 Down，就把这次 Up 当成一次有效 ESC；
-    // Down 已处理过则忽略 Up，避免一次物理按键被处理两遍（绝不能因此退出两次）。
-    const down: boolean = rawDown ||
-      (code === KeyCode.KEYCODE_ESCAPE && !this.escDownHandled);
+    const isEsc: boolean = code === KeyCode.KEYCODE_ESCAPE;
+    // 第二十四轮：**修复 escDownHandled 永不复位**。旧实现只在 ESC 的 Down 分支
+    // 把标志设 true，而配套 Up 在 `if (!down) return;` 就提前返回、从不清标志 →
+    // 第一次 ESC 之后，所有「系统只派发 Up」的 ESC（2in1 常见）全部被吞，
+    // 这正是用户主动按下的第二次 ESC 无响应的直接原因。
+    // 现在：Up 到达时若存在待配对的 Down → 清标志并忽略（同一次物理按键）；
+    // 若没有待配对 Down → 当作一次独立 ESC 继续走分派。
+    if (isEsc && !rawDown && this.escDownHandled) {
+      this.escDownHandled = false;
+      return;
+    }
+    const down: boolean = rawDown || isEsc;
     // 单独跟踪 Ctrl / Shift 键值：供 Ctrl+滚轮缩放、Ctrl+B 收栏、Shift+R/H/V 使用
     if (code === KeyCode.KEYCODE_CTRL_LEFT || code === KeyCode.KEYCODE_CTRL_RIGHT) {
       this.ctrlDown = down;
@@ -6826,6 +6854,13 @@ struct Index {
       this.listCollapsed = !this.listCollapsed;
       this.markWindowRect();
       this.status = this.listCollapsed ? '已收起左栏（Ctrl+B 展开）' : '已展开左栏';
+      return;
+    }
+    // 第二十四轮：**键盘确定解 Ctrl+Q**。R23 截图证明 ESC 在 2in1 上是系统特殊键
+    // （hk=N = 应用级全局订阅被拒），但其它普通键全部能稳定到达（keys=168）。
+    // Ctrl+Q 不依赖 ESC / 焦点重建 / 系统沉浸形态，是「退不出 APP」的可靠出口。
+    if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {
+      this.quitApp();
       return;
     }
     switch (code) {
@@ -6881,8 +6916,11 @@ struct Index {
         // 第二十轮：真机可观测诊断 —— 状态栏 + hilog ESCDBG 双通道。
         // 按两次 ESC 后若 APP 没退出，回传状态栏这行即可定位「事件 / 分派 / 退出」断点。
         this.escSeen++;
+        // 第二十四轮：type 显示**真实 KeyType**（U = 系统只派发 Up 的 2in1 路径）。
+        // 通道到达数不写进 escDiag 快照，改由黄色诊断行实时拼接（见 UI 段），
+        // 这样第二次 ESC 到达任意通道时计数都会立刻变化，截图可判。
         this.escDiag = 'ESC#' + this.escSeen + ' full=' + (this.fullscreen ? 'T' : 'F') +
-          ' type=' + (down ? 'D' : 'U');
+          ' type=' + (rawDown ? 'D' : 'U');
         hilog.info(DOMAIN, TAG, 'ESCDBG %{public}s', this.escDiag);
         // 第十九轮：**ESC 严格只按当前窗口状态两态区分**，唯一真值来源 escActionByState。
         //  · 全屏 → EXIT_FULL：首次 ESC 只退出全屏并恢复进入前几何，绝不退出 APP；
@@ -6894,6 +6932,8 @@ struct Index {
         const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);
         this.escDiag = this.escDiag + ' act=' + escAct +
           (escAct === ESC_ACT_EXIT_FULL ? ' (EXIT_FULL)' : ' (QUIT_APP)');
+        // 第二十四轮：Down 置 true 等配套 Up；只派发 Up 的独立 ESC 置 false。
+        // 配套 Up 已在 onKey 入口的配对分支清标志，不会再永久卡住。
         this.escDownHandled = rawDown;
         if (escAct === ESC_ACT_EXIT_FULL) {
           this.toggleFull();
@@ -6914,6 +6954,7 @@ struct Index {
    *  主动消费，并复用原 onKey 的完整分派（唯一真值来源仍是 escActionByState）。
    *  其他键一律返回 false，照常分发给 onKeyEvent，不影响翻页 / 缩放 / 旋转等快捷键。 */
   private onKeyCapture(event: KeyEvent): boolean {
+    this.capSeen++;
     if (event.keyCode === KeyCode.KEYCODE_ESCAPE && event.type === KeyType.Down) {
       this.escHandledByPreIme = true;
       this.onKey(event);
@@ -6931,6 +6972,7 @@ struct Index {
    *  若同一次 ESC 已由 onKeyPreIme 走过 onKey，这里只消费、不重复执行动作，
    *  避免「一次按键被处理两遍」导致首次 ESC 就直接退出 APP。 */
   private onKeyConsumed(event: KeyEvent): boolean {
+    this.conSeen++;
     if (event.keyCode === KeyCode.KEYCODE_ESCAPE && this.escHandledByPreIme) {
       this.escHandledByPreIme = false;
       return true;
@@ -7789,9 +7831,10 @@ struct Index {
             // 第二十二轮：keys=0 时也常显红色提示（此时 escDiag 必为空），
             // 把焦点请求结果直接摊在截图里，不用再猜「按键到底有没有到 APP」。
             if (this.escDiag.length > 0 || this.keySeen === 0) {
-              Text(this.escDiag.length > 0
+              Text((this.escDiag.length > 0
                 ? this.escDiag + ' · ' + this.focusDiag
-                : 'keys=0 · ' + this.focusDiag + ' · 未收到任何按键')
+                : 'keys=0 · ' + this.focusDiag + ' · 未收到任何按键') +
+                ' · cap=' + this.capSeen + ' con=' + this.conSeen + ' dsp=' + this.dispatchSeen)
                 .fontSize(10)
                 .fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')
                 .maxLines(3)

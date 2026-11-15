@@ -7,7 +7,7 @@
 - **左侧**：文件浏览器（档案名 / 字节 / 日期三栏，含 `..` 与子目录），**不常驻缩略图**，鼠标悬停整行才浮出小图；可滚动、点击切换
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
-  （11-11 起，见「预览右下角角标精简」章节）。**11-15 ESC 排查期起**角标另带 `R23` 构建标记、
+  （11-11 起，见「预览右下角角标精简」章节）。**11-15 ESC 排查期起**角标另带 `R24` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与可点「退出 APP」入口（见第二十三轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -40,7 +40,7 @@
 | 键盘翻页 / 往上层 | `←` `→` 上一张/下一张；`退格` 按目录层级往上层（与按钮同一入口） |
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏自动隐藏 | **真全屏下不再显示任何工具顶栏**（`SHOW_FULLSCREEN_CHROME = false`）；需要恢复旧的「贴顶浮出 / 停手 2s 收起」把开关改 `true` |
-| 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。**第二十三轮（R22 截图 `keys=0 · fc=Y f=N r12`）**：判定 ESC 被系统全局消费且焦点树未建立，恢复 `USE_SYSTEM_IMMERSIVE=true`，改走 `inputConsumer.keyPressed` 单键通道（SDK 明确拦截系统默认响应）+ `hotkeyChange` 兜底，补窗口级 `setWindowFocusable` 与「退出全屏瞬间重启焦点重试」，角标加 `dsp/hk/wf`；另提供**右下角可点「退出 APP」**作为不依赖键盘 / 焦点 / 窗口形态的确定解。见第二十二、二十三轮章节 |
+| 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。**第二十三轮（R22 截图 `keys=0 · fc=Y f=N r12`）**：判定 ESC 被系统全局消费且焦点树未建立，恢复 `USE_SYSTEM_IMMERSIVE=true`，改走 `inputConsumer.keyPressed` 单键通道（SDK 明确拦截系统默认响应）+ `hotkeyChange` 兜底，补窗口级 `setWindowFocusable` 与「退出全屏瞬间重启焦点重试」，角标加 `dsp/hk/wf`；另提供**右下角可点「退出 APP」**作为不依赖键盘 / 焦点 / 窗口形态的确定解。**第二十四轮（R23 截图 `keys=168 · ESC#1 … (EXIT_FULL)`）**：按键到达与首次 ESC 已完全正常，定位到 `escDownHandled` 永不复位 + 永久对象引用去重吞掉第二次 ESC，改为 Up 配对清除 + ESC 单轮去重，并新增 `Ctrl+Q` 键盘确定解、通道级 `cap/con/dsp` 可观测。见第二十二～二十四轮章节 |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
@@ -532,6 +532,107 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第二十四轮：第二次 ESC 被吞 —— `escDownHandled` 永不复位 / 单轮去重 / Ctrl+Q（2026-11-16，R24）
+
+用户发来第四张实机截图（R23 包）。这一张是**转折**：前面几轮卡在「按键根本到不了 APP」，
+R23 已经把这条路打通了，剩下的是一个**纯粹的 APP 内部代码缺陷**。
+
+> ⚠️ 本会话仍**无法自行在真机按 ESC**（`hdc` 无目标 / `bm install` 失败 /
+> `hilog` 权限拒绝 / 无按键注入工具）。真机按两次 ESC 仍待用户验证。
+
+### 截图证据（右下角与状态栏放大）
+
+| 位置 | 读到 | 结论 |
+|---|---|---|
+| 右下角角标 | `14 % · R23 · full=F · win=T · keys=168 · dsp=0 · hk=N · wf=T` | 新包确认；**`keys=168`**（R22 是 `0`）；**`wf=T`**（窗口有焦点） |
+| 黄色诊断行 | `ESC#1 full=T type=D act=1 (EXIT_FULL) · fc=Y f=Y r12` | **`f=Y`**（R22 是 `N`）；收到了**第 1 次 ESC**，正确判 `EXIT_FULL` |
+| 左下角状态栏 | `第 8 · 9/35 张 \| ESC#1 full=T type=D act=1 (EXIT_FULL)` | 同样只有 `ESC#1` |
+| 界面 | 左栏 / 顶栏 / 状态栏全部恢复，`full=F` | **首次 ESC 退出全屏、恢复几何已完全正常** |
+| `hk=N` | 系统级 `keyPressed` / `hotkeyChange` 双通道均被拒 | ESC 属平台级占用；但组件通道已通，**不再关键** |
+| `dsp=0` | `onKeyEventDispatch` 未派发 | 按键走的是 `onKeyPreIme` / `onKeyEvent` 两通道 |
+
+**结论**：R23 的 `Button('·')` 锚点修复 + `setWindowFocusable(true)` 生效了 ——
+焦点建立、按键到达、首次 ESC 正确。唯一剩下的断点是：**诊断串停在 `ESC#1`，
+第二次 ESC 没有进入 `onKey()`**。
+
+### 根因（两个明确的 APP 内部 bug）
+
+| # | 缺陷 | 为什么吞掉第二次 ESC |
+|---|---|---|
+| 1 | **`escDownHandled` 永不复位**（主因） | 该标志只在 ESC 的 `Down` 分支被设 `true`；配套的 `Up` 在 `if (!down) return;` 就提前返回，**从没执行到清除标志的语句**。2in1 上系统常把 ESC 的 Down 消费掉、只派发 `Up`，于是第一次 ESC 之后所有「只派发 Up」的 ESC（含用户主动按下的第二次）都被 `down=false` 挡在 `onKey` 之外。截图 `type=D` 说明第一次是 Down，之后就卡住了 |
+| 2 | **永久对象引用去重**（次因） | `lastKeyEvent === event` 永久保存上一个事件对象；2in1 上 ArkUI 会**复用同一个 `KeyEvent` 实例**（只改字段），用户主动按下的第二次 ESC 被误判成「同一事件在另一通道重复派发」而 `return` |
+
+另外核对 SDK 时否决了一个方案：`KeyEvent.timestamp` 虽可用于精确去重，但 SDK 明确标注
+**`unavailable to tablet, 2in1`**（编译告警 `This API is unavailable to tablet, 2in1`），
+实机可能恒为 0，不能作为判据。
+
+### 改动范围（3 文件）
+
+| 文件 | 改动 |
+|---|---|
+| `Index.ets` | ① `ESC_BUILD_TAG` → `R24`；② **修 `escDownHandled`**：ESC 的 `Up` 到达时若存在待配对 `Down`，就清标志并忽略（同一次物理按键）；若没有待配对 `Down`，当作一次**独立 ESC** 继续分派，`down = rawDown \|\| isEsc`；③ **双轨去重**：ESC 用 `escDedupEvent` 只在当前事件循环内去重（`setTimeout(0)` 立即清空），非 ESC 沿用永久 `lastKeyEvent` 对象引用去重（翻页 / 缩放行为不变），**完全不依赖 `timestamp`**；④ `escDiag` 的 `type` 改显示**真实 KeyType**（`U` = 系统只派发 Up 的 2in1 路径）；⑤ 新增 `capSeen` / `conSeen`，与 `dispatchSeen` 一起实时拼在黄色诊断行（`cap=N con=N dsp=N`），一图可判第二次 ESC 落在哪一层；⑥ **新增 `Ctrl+Q` 退出**：其它普通键在截图里全部能稳定到达（`keys=168`），这是不依赖 ESC 的键盘确定解 |
+| `tests/dirname.test.mjs` | 更新 10 条旧护栏（`R23→R24` / Up 兼容判据 / 去重断言 / 诊断 Text 切片）+ 新增 11 条第二十四轮断言。**1225 → 1236 ALL PASS** |
+| `README.md` | 功能表订正 + 本节 |
+
+R23 的 `inputConsumer` 双通道、`ensureWindowFocusable()`、窗口真值同步、`Button('·')` 锚点、
+「退出 APP」按钮、第十九轮严格两态**全部原样保留**；`quitApp` / 几何恢复 / 放大镜 / 画质未动；
+版本仍 `1.0.7` / `versionCode 7`。
+
+### ⭐ 确定解（两个都不依赖 ESC）
+
+- **`Ctrl+Q`**：普通键通道在实机已证实可用（`keys=168`），组合键不会误触。
+- **右下角「退出 APP」**：鼠标点击，不依赖键盘 / 焦点 / 窗口形态，全屏与普通模式都可见。
+
+两者都走 `quitApp()`（同步落盘 → `terminateSelf()` → 400ms 后 `destroyWindow()` 兜底）。
+即使 2in1 窗口管理器最终仍不派发第二次 ESC，APP 也有可靠的退出路径。
+
+### 验证结果（三类证据分开说）
+
+| 类型 | 结果 | 能证明什么 |
+|---|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 1 min 3 s 70 ms**，签名 HAP **870,139 bytes**，`modules.abc` 含 `R24`；`KeyEvent.timestamp` 的 2in1 告警已消失 | 新去重 / Up 配对 / `Ctrl+Q` 均为合法 SDK 26 用法；仅剩既有 2in1 系统栏与 `READ_IMAGEVIDEO` 权限告警 |
+| 静态契约 | **ALL PASS 1236 passed, 0 failed**；`node --check` / `git diff --check` / 括号净平衡 / 版本守卫全绿 | 接线存在、既有护栏未坏；**不证明按键到达、不证明 APP 退出** |
+| **真机按两次 ESC** | **本会话无法执行**，待用户验证 | 唯一能证明故障消除的验证 |
+
+未跑 `build.sh`、未把 HAP 放桌面、未升版本、未 push。
+
+### 真机验证步骤
+
+1. 卸载旧包，装 `R24` 签名包 → 确认右下角角标有 `R24`。
+2. 双击进全屏 → 第一次 ESC（三栏回来、`full=F`）→ **第二次 ESC**，看是否退出 APP。
+3. 读黄色诊断行，预期出现 **`ESC#2 full=F type=U … (QUIT_APP) → quitApp → terminateSelf() → destroyWindow`**。
+4. 若仍只有 `ESC#1`，看诊断行末尾的 `cap=N con=N dsp=N`：
+   - 计数**有增长**但无 `ESC#2` → 事件到了某通道、被层内逻辑拦下；
+   - 计数**不变** → 系统窗口管理器根本没把第二次 ESC 派发给应用（平台限制）。
+5. 无论哪种，**按 `Ctrl+Q` 或点「退出 APP」** 都应能退出，请先确认这条确定解。
+6. 把右下角整片（含 `ESC#` 诊断行与 `cap/con/dsp`）截图发我。
+
+### 诊断对照表（R24 截图速查）
+
+| 诊断 | 断点定位 | 下一步 |
+|---|---|---|
+| `ESC#2 type=U (QUIT_APP) → quitApp → terminateSelf` 且 APP 关闭 | ✅ 修复完成 | 无需回传 |
+| `ESC#2 type=D (QUIT_APP)` 且 APP 关闭 | ✅ 修复完成（Down 路径） | 无需回传 |
+| 仍只有 `ESC#1`，`cap/con` 增长 | 事件到达但被去重 / 配对逻辑拦下 | 回传截图，查 `type=` 与计数 |
+| 仍只有 `ESC#1`，`cap/con/dsp` 全不变 | 系统未派发第二次 ESC（平台占用） | 用 `Ctrl+Q` / 「退出 APP」；或改非 ESC 交互 |
+| `ESC#2 … (QUIT_APP)` 但 APP 未关闭 | 退出 API 在该窗口形态无效 | 回传截图，查 `quitApp` 后续标记 |
+| `keys=0` | 焦点又丢了（R22 老问题） | 回传截图，看 `fc=/f=/wf=` |
+
+### 覆盖的验证场景
+
+| # | 场景 | 预期 |
+|---|---|---|
+| 1 | 用户复现路径：双击进全屏 → 两次 ESC | 首次返回并恢复几何，第二次退出 APP |
+| 2 | 2in1 只派发 `KeyType.Up` 的 ESC | 无待配对 Down 时当独立 ESC 处理，`type=U` 可见 |
+| 3 | 同一次 ESC 的 Down + Up 配对 | Up 到达清 `escDownHandled` 并忽略，不双触发 |
+| 4 | 连续两次 ESC（ArkUI 复用同一 `KeyEvent` 对象） | ESC 单轮去重已跨循环失效，第二次正常处理 |
+| 5 | 连续按方向键 / 空格等非 ESC 键 | 永久对象引用去重不变，翻页不跳格 |
+| 6 | 多通道（PreIme / onKeyEvent / Dispatch）派发同一事件 | 同轮内合并，`cap/con/dsp` 各自递增可观测 |
+| 7 | `KeyEvent.timestamp` 在 2in1 上不可用 | 代码不读取该字段，编译无相关告警 |
+| 8 | 按 `Ctrl+Q` | 立即退出 APP，与 ESC / 焦点 / 窗口形态无关 |
+| 9 | 点右下角「退出 APP」 | 立即退出 APP，全屏 / 普通模式都可点 |
+| 10 | 第十九～二十三轮全部接线 / 画质放大镜 / 版本 | 静态契约全绿，零回归 |
 
 ## 第二十三轮：系统级按键通道 / 窗口级焦点 / 鼠标确定解（2026-11-15，R23）
 

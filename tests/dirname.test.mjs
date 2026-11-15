@@ -33,6 +33,8 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第二十四轮「R23 截图驱动：修 escDownHandled 永不复位 / ESC 单轮去重废除永久对象引用 /
+ *    通道级 cap=con=dsp= 可观测 / Ctrl+Q 键盘确定解 / type=U 真实 KeyType」、
  * 第二十三轮「系统级按键通道：inputConsumer.keyPressed 单键优先 + hotkeyChange 兜底 /
  *    恢复系统沉浸 / 窗口级 setWindowFocusable + wf 诊断 / 退出全屏瞬间重启焦点重试 /
  *    Button('·') 锚点修可聚焦 / 鼠标『退出 APP』确定解 / dsp=hk= 常显诊断」、
@@ -1234,18 +1236,18 @@ check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
 check('诊断行的渲染被开关包住，diagLine 赋值点一个没删',
   /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(BADGE) &&
   (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
-check('右下角恒显示区：缩放百分比 + 诊断 + R23「退出 APP」共 3 个 Text，缓存 N 张仍移除',
+check('右下角恒显示区：缩放百分比 + 诊断 + R24「退出 APP」共 3 个 Text，缓存 N 张仍移除',
   (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 3 &&
   /Text\('退出 APP'\)/.test(BADGE_CODE) &&
   /if \(this\.escDiag\.length > 0 \|\| this\.keySeen === 0\)/.test(BADGE_CODE) &&
-  /Text\(this\.escDiag\.length > 0/.test(BADGE_CODE) &&
+  /Text\(\(this\.escDiag\.length > 0/.test(BADGE_CODE) &&
   /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比仍在右下角且带 R23 + keys=N 常显，100% = 原图像素 1:1 口径未改',
+check('缩放百分比仍在右下角且带 R24 + keys=N 常显，100% = 原图像素 1:1 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R23';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R24';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3617,9 +3619,11 @@ check('① 进出全屏后延时重抢焦点（.defaultFocus 只在首次构建�
   SET_FULL16_CODE.includes('this.scheduleKeyRefocus();') &&
   INDEX.includes('this.clearKeyRefocusTimer();') &&
   INDEX.includes('const ESC_REFOCUS_DELAY_MS: number = 120;'), true);
-check('① 兼容只派发 KeyType.Up 的 2in1 键盘：未收到 Down 时把 Up 当一次有效 ESC，且绝不双触发',
+check('① 兼容只派发 KeyType.Up 的 2in1 键盘：R24 修复 escDownHandled 永不复位',
   ONKEY18_CODE.includes('const rawDown: boolean = (event.type === KeyType.Down);') &&
-  ONKEY18_CODE.includes('(code === KeyCode.KEYCODE_ESCAPE && !this.escDownHandled)') &&
+  ONKEY18_CODE.includes('if (isEsc && !rawDown && this.escDownHandled) {') &&
+  ONKEY18_CODE.includes('this.escDownHandled = false;') &&
+  ONKEY18_CODE.includes('const down: boolean = rawDown || isEsc;') &&
   ONKEY18_CODE.includes('this.escDownHandled = rawDown;'), true);
 
 console.log('--- 第二十轮 ②：退出不再被异步 I/O 卡住 + 真机可观测诊断 ---');
@@ -3712,12 +3716,14 @@ check('③ R23 修可聚焦锚点：Button(\'·\') 带内容 / 4vp / 代码行�
 check('③ 重聚焦优先抢 Button 锚点，且 aboutToAppear 也主动抢（不再等 setFull 被调用）',
   INDEX.includes('focusControl.requestFocus(KEY_FOCUS_ID);') &&
   /aboutToAppear\(\): void \{[\s\S]{0,1000}this\.scheduleKeyRefocus\(\);/.test(INDEX), true);
-check('③ KeyEvent 对象引用去重：零时间窗，不吞用户连按的第二次 ESC',
+check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC 沿用对象引用（不吞第二次 ESC）',
+  INDEX.includes('private escDedupEvent: KeyEvent | undefined = undefined;') &&
+  INDEX.includes('if (this.escDedupEvent === event) {') &&
+  INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
-  INDEX.includes('this.lastKeyEvent = event;') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 常显 R23 构建标记 + 全屏/普通都可见的诊断行（第二十二轮 keys=0 时也常显红字）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") &&
+check('③ 常显 R24 构建标记 + 全屏/普通都可见的诊断行（第二十二轮 keys=0 时也常显红字）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3743,7 +3749,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：右下角角标必须出现 R23，否则说明装的是旧包，需重新安装签名 HAP。');
+console.log('  ⚠️ 截图判定：右下角角标必须出现 R24，否则说明装的是旧包，需重新安装签名 HAP。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3794,9 +3800,9 @@ check('③ 只要 keySeen===0 就持续重抢焦点（最多 FOCUS_RETRY_MAX 次
   /const FOCUS_RETRY_MAX: number = 12;/.test(INDEX), true);
 
 console.log('--- 第二十二轮 ④：按键到达可观测（一刀切区分「键盘没到」与「ESC 被吃掉」） ---');
-check('④ onKey 入口对任意键递增 keySeen（不只 ESC），且对象引用去重仍在',
+check('④ onKey 入口对任意键递增 keySeen（不只 ESC），R24 双轨去重仍在',
+  INDEX.includes('if (this.escDedupEvent === event) {') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
-  INDEX.includes('this.lastKeyEvent = event;') &&
   INDEX.includes('this.keySeen++;') &&
   INDEX.includes('@State keySeen: number = 0;'), true);
 check('④ 角标常显 keys=N；keys=0 时无条件显示红字「未收到任何按键」+ 焦点结果',
@@ -3804,8 +3810,9 @@ check('④ 角标常显 keys=N；keys=0 时无条件显示红字「未收到任�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R23 构建标记已升级（R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") &&
+check('④ R24 构建标记已升级（R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R21';") === false, true);
 
@@ -3826,7 +3833,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：角标须出现 R23；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：角标须出现 R24；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3894,8 +3901,9 @@ check('④ 鼠标「退出 APP」入口：不依赖键盘 / 焦点 / 窗口形�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R23 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") &&
+check('⑤ R24 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R21';") === false, true);
 check('⑤ 第十九轮两态 / 第二十一轮窗口真值同步 / 第二十二轮 keys 诊断 / 版本全部未坏',
@@ -3915,6 +3923,70 @@ check('⑤ 画质 / 放大镜 / 右键 toggle / 自愈判据等既有接线零�
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
 console.log('  ⚠️ 截图判定：hk=kp/hk=有系统通道，hk=N=ESC 被系统占用（平台限制）。');
 console.log('  ⚠️ 确定解：右下角「退出 APP」可点击，不依赖任何键盘事件 / 焦点 / 窗口形态。');
+
+// ==================== 第二十四轮：R23 截图驱动 —— 第二次 ESC 被吞 ====================
+// R23 截图：keys=168 · ESC#1 full=T type=D act=1 (EXIT_FULL) · fc=Y f=Y r12，
+// 角标 full=F · win=T · dsp=0 · hk=N · wf=T。按键终于到达 APP、首次 ESC 正确，
+// 但诊断串只有 ESC#1 —— 第二次 ESC 没进 onKey()。
+console.log('\n--- 第二十四轮 ①：修 escDownHandled 永不复位（第二次 ESC 被吞的直接原因）---');
+check('① Up 到达即清 escDownHandled；旧实现 Up 在 if(!down) 提前 return、标志永不复位',
+  ONKEY18_CODE.includes('if (isEsc && !rawDown && this.escDownHandled) {') &&
+  ONKEY18_CODE.includes('this.escDownHandled = false;') &&
+  ONKEY18_CODE.includes('const down: boolean = rawDown || isEsc;') &&
+  ONKEY18_CODE.includes('(code === KeyCode.KEYCODE_ESCAPE && !this.escDownHandled)') === false, true);
+check('① 只派发 Up 的独立 ESC 仍能被当作一次有效 ESC（2in1 兼容保留）',
+  ONKEY18_CODE.includes('this.escDownHandled = rawDown;') &&
+  ONKEY18_CODE.includes('const rawDown: boolean = (event.type === KeyType.Down);'), true);
+
+console.log('--- 第二十四轮 ②：ESC 单轮去重（废除永久对象引用，不再吞第二次）---');
+check('② 新增 escDedupEvent，且只在当前事件循环内有效（setTimeout 0 清空）',
+  INDEX.includes('private escDedupEvent: KeyEvent | undefined = undefined;') &&
+  INDEX.includes('if (this.escDedupEvent === event) {') &&
+  INDEX.includes('this.escDedupEvent = event;') &&
+  INDEX.includes('this.escDedupEvent = undefined;') &&
+  /setTimeout\(\(\) => \{\s*this\.escDedupEvent = undefined;\s*\}, 0\);/.test(INDEX), true);
+check('② 非 ESC 沿用永久对象引用去重，翻页 / 缩放行为完全不变',
+  INDEX.includes('const isEscEarly: boolean = event.keyCode === KeyCode.KEYCODE_ESCAPE;') &&
+  INDEX.includes('private lastKeyEvent: KeyEvent | undefined = undefined;') &&
+  INDEX.includes('if (this.lastKeyEvent === event) {') &&
+  INDEX.includes('this.lastKeyEvent = event;'), true);
+check('② 不依赖 2in1 上不可用的 KeyEvent.timestamp（SDK 标注 unavailable to tablet, 2in1）',
+  INDEX.includes('event.timestamp') === false &&
+  INDEX.includes('lastKeyStamp') === false, true);
+
+console.log('--- 第二十四轮 ③：通道级可观测 + 真实 KeyType ---');
+check('③ capSeen / conSeen 在 onKeyCapture / onKeyConsumed 入口递增',
+  INDEX.includes('@State capSeen: number = 0;') &&
+  INDEX.includes('@State conSeen: number = 0;') &&
+  /private onKeyCapture\(event: KeyEvent\): boolean \{\s*this\.capSeen\+\+;/.test(INDEX) &&
+  /private onKeyConsumed\(event: KeyEvent\): boolean \{\s*this\.conSeen\+\+;/.test(INDEX), true);
+check('③ 黄色诊断行实时拼 cap/con/dsp（第二次 ESC 落在哪层一图可判）',
+  INDEX.includes("' · cap=' + this.capSeen + ' con=' + this.conSeen + ' dsp=' + this.dispatchSeen"), true);
+check('③ escDiag 的 type 显示真实 KeyType（U = 系统只派发 Up 的 2in1 路径）',
+  INDEX.includes("' type=' + (rawDown ? 'D' : 'U')") &&
+  INDEX.includes("' type=' + (down ? 'D' : 'U')") === false, true);
+
+console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + 回归护栏 ---');
+check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
+  INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
+  /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
+check('④ R24 构建标记且 R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R24';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R23';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R22';") === false, true);
+check('④ 第十九轮两态 / 二十一~二十三轮接线 / 画质放大镜 / 版本零回归',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  shouldArmSystemEcho(true, true, false) === false &&
+  windowStatusIsFullscreen(1) === true &&
+  INDEX.includes("win.on('windowStatusChange'") &&
+  INDEX.includes('w.destroyWindow().catch(() => {});') &&
+  INDEX.includes("Text('退出 APP')") &&
+  INDEX.includes('const USE_SYSTEM_IMMERSIVE: boolean = true;') &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
+console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十四轮章节。');
+console.log('  ⚠️ 截图判定：ESC#2 type=U (QUIT_APP) = 修复完成；仍只有 ESC#1 = 第二次按键未派发。');
+console.log('  ⚠️ 确定解：Ctrl+Q 或右下角「退出 APP」，均不依赖 ESC 特殊键。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
