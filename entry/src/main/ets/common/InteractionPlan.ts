@@ -505,43 +505,43 @@ export function loupeResampleGainOf(targetEdge: number, srcLong: number,
 // ==================================================================
 
 /**
- * ESC 动作的**唯一真值来源（第十八轮）**：严格按当前窗口状态区分，不做时间冷却猜测。
+ * ESC 动作的**唯一真值来源（第十九轮定稿）**：严格只按当前窗口状态两态分派。
  *
- * 用户在实机反馈第十六轮「没有实现」，根因之一就是 `escActionOf` 用 400ms 时间窗
- * 判「系统补发 ESC」：用户「退出全屏后紧接着按的第二次 ESC」几乎必然落在窗内，
- * 被当成补发键吞掉 → 「返回普通模式后再次按 ESC 应退出 APP」永远不成立。
- * 时间窗根本无法区分「系统补发」与「用户主动按键」，必须换成按来源置位的一次性标志。
+ * 复现 / 根因（用户第十九轮实机反馈「第二次 ESC 无任何响应」）：真全屏下首次 ESC
+ * 由系统窗口管理器消费、自行退出沉浸，APP 收不到该按键，只能靠画布缩小触发
+ * onAreaChange 的「自愈」把 fullscreen 同步回普通态。第十八轮据此经 shouldArmSystemEcho
+ * 置位 pendingSystemEcho，并让本函数在 (false, true) 时返回 ESC_ACT_NONE「吞一次补发 ESC」。
+ * 但**系统消费首次 ESC 后并不把它补发给 APP**：那个标志没有任何补发事件来消费，
+ * 于是用户主动按下的「第二次 ESC」到达时仍挂着该标志 → 被判 NONE 吞掉 → 无任何响应。
+ * 第十六轮 400ms 时间冷却、第十八轮一次性补发标志，本质都是对「系统补发 ESC」
+ * 的错误猜测：既无法区分补发与主动按键，又会挂住一个永不消费的标志。
  *
- *  · 全屏 → EXIT_FULL：首次 ESC 恒退全屏并恢复进入前几何，绝不退出 APP（诉求核心）；
- *  · 普通 + pendingSystemEcho → NONE：仅「系统被动退出沉浸」后吞一次可能的补发 ESC，
- *    该标志由 shouldArmSystemEcho 只在系统路径置位、被任意一次 ESC 消费后即清零，
- *    绝不因 APP 主动退出全屏而置位，故不影响用户紧接着的第二次 ESC；
- *  · 其余普通 → QUIT_APP：返回普通模式后再次 ESC 退出 APP。
+ * 定稿：ESC 只看 fullscreen 当前状态，绝不依赖任何瞬时标志 / 时间窗：
+ *  · 全屏 → EXIT_FULL：首次 ESC（若到达 APP）只退全屏并恢复几何，绝不退出 APP；
+ *  · 普通 → QUIT_APP：返回普通模式后再次 ESC 立刻退出 APP（无论此前是否发生过系统自愈）。
+ * 第二参数保留仅为兼容既有调用点与回归断言，**刻意不参与判定**（下划线前缀即标记）；
+ * 系统补发在实机不存在，NONE 吞键分支有害，故彻底废除。
  *
  * 第十六轮旧 `escActionOf(fullscreen, sinceExitMs, guardMs)` 保留供回归断言，
- * 但 Index.ets 自第十八轮起改用本函数为唯一真值来源。
+ * 第十八轮 `shouldArmSystemEcho` 保留导出但恒返回 false（永不置位）。
  */
-export function escActionByState(fullscreen: boolean, pendingSystemEcho: boolean): number {
-  if (fullscreen) {
-    return ESC_ACT_EXIT_FULL;
-  }
-  if (pendingSystemEcho) {
-    return ESC_ACT_NONE;
-  }
-  return ESC_ACT_QUIT_APP;
+export function escActionByState(fullscreen: boolean,
+  _pendingSystemEcho: boolean): number {
+  return fullscreen ? ESC_ACT_EXIT_FULL : ESC_ACT_QUIT_APP;
 }
 
 /**
- * 是否置「待吞补发 ESC」标志：仅「系统被动退出全屏」的下降沿才置位。
- *  · bySystemHeal=true 且 全屏→普通：系统把 ESC 消费掉自行退出沉浸，APP 靠
- *    windowStatus / 画布缩小被动同步，此时可能紧随一次补发 ESC 落到「普通态」；
- *    置位后由 escActionByState 吞一次，避免它被当成「再次 ESC」误退出 APP。
- *  · APP 主动退出（onKey 收到 ESC / F11 / 双击 / 退出按钮）恒不置位 ——
- *    用户返回普通模式后紧接着按的第二次 ESC 必须立即退出 APP。
+ * 是否置「待吞补发 ESC」标志 —— **第十九轮起恒 false，该机制彻底废除**。
+ *  · 第十八轮在「系统被动退出沉浸」的下降沿置位，想吞掉一次紧随的补发 ESC；
+ *    但实机系统消费首次 ESC 后并不补发，标志不会被任何事件消费，反而把用户
+ *    主动的第二次 ESC 误吞 → 「第二次 ESC 无响应」（本轮修复的直接病根）。
+ *  · 现在 ESC 由 escActionByState 严格按窗口状态两态分派，无需任何补发标志；
+ *    setFull(false, true) 仍保留来源参数供诊断，但本函数恒不置位，
+ *    pendingSystemEcho 恒为 false，杜绝一切吞键可能。
  */
-export function shouldArmSystemEcho(bySystemHeal: boolean,
-  prevFull: boolean, nextFull: boolean): boolean {
-  return bySystemHeal && prevFull && !nextFull;
+export function shouldArmSystemEcho(_bySystemHeal: boolean,
+  _prevFull: boolean, _nextFull: boolean): boolean {
+  return false;
 }
 
 /**

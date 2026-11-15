@@ -206,11 +206,11 @@ const LOUPE_RESAMPLE_STABLE_MIN_DELTA: number = 64;
 /** 第十七轮：重解码「真实像素增益」阈值 —— 目标边相对主视图解码边的提升不足该值时
  *  跳过重解码（小图 / 原图分辨率不足时补不出像素），省一次解码与一张大图内存。 */
 const LOUPE_RESAMPLE_MIN_GAIN: number = 96;
-// 第十六轮的 FULL_EXIT_ESC_GUARD_MS（400ms 时间冷却，第十八轮移除）：
-// 时间窗无法区分「系统补发 ESC」与「用户主动的第二次 ESC」，连贯两次按键几乎必然
-// 落在 400ms 内 → 「返回普通模式后再次按 ESC 退出 APP」被误吞而失效，正是用户反馈
-// 「没有实现」的主因。第十八轮改用按来源置位的一次性标志 pendingSystemEcho +
-// escActionByState 严格两态分派，不再有任何时间冷却。
+// 第十六轮 400ms 时间冷却、第十八轮 pendingSystemEcho（一次性补发标志）均已废除：
+// 两者本质都是对「系统补发 ESC」的错误猜测。实机真全屏首次 ESC 由系统消费后并不补发给
+// APP，补发标志不会被任何事件消费，反而把用户主动的第二次 ESC 误吞 →「第二次 ESC 无响应」。
+// 第十九轮定稿：escActionByState 严格只按 fullscreen 两态分派，不依赖任何时间窗 / 瞬时标志，
+// shouldArmSystemEcho 恒不置位，pendingSystemEcho 恒 false。
 /** 左栏宽度：展开 / 收起。
  *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 往上层 / 选择文件夹）等宽并排且不重叠；
  *  LIST_MAX_W 是上限，避免个别超长档案名把右侧预览区压没。
@@ -6378,11 +6378,12 @@ struct Index {
       // 第十六轮：画布尺寸变了，原目标解码边失效 → 释放高清图源，下次移入按新画布重解。
       this.clearLoupeHiRes();
     }
-    // 第十八轮：下降沿记时刻（日志 / 诊断），并**按退出来源**决定「待吞补发 ESC」标志。
-    //  · 主动退出（ESC / 双击 / F11 / 退出按钮，bySystemHeal=false）→ 清标志，
-    //    用户紧接着的第二次 ESC 由 escActionByState 直接判 QUIT_APP，绝不被误吞；
-    //  · 系统被动退出沉浸（自愈分支 bySystemHeal=true）→ 置位，吞掉一次可能的补发 ESC。
-    //  彻底取代第十六轮「400ms 时间冷却」—— 它无法区分补发键与主动按键。
+    // 第十九轮：下降沿记时刻（仅日志 / 诊断）。**不再按退出来源置任何补发标志**：
+    // shouldArmSystemEcho 恒 false，pendingSystemEcho 恒为 false。第十六轮 400ms 时间冷却、
+    // 第十八轮「系统自愈后置位吞一次补发 ESC」实机都会把用户主动的第二次 ESC 误吞。
+    // 现在 escActionByState 严格只按 fullscreen 两态分派：普通态再次 ESC 恒 QUIT_APP，
+    // 无论这次退出是主动（ESC/双击/F11/按钮）还是系统消费 ESC 后的自愈（bySystemHeal=true）。
+    // bySystemHeal 参数保留供诊断，不参与 ESC 分派。
     if (prevFull && !on) {
       this.lastFullExitAt = Date.now();
       this.pendingSystemEcho = shouldArmSystemEcho(bySystemHeal, prevFull, on);
@@ -6713,12 +6714,13 @@ struct Index {
         this.toggleFull();
         break;
       case KeyCode.KEYCODE_ESCAPE: {
-        // 第十八轮：**ESC 严格按当前窗口状态区分**，唯一真值来源 escActionByState。
+        // 第十九轮：**ESC 严格只按当前窗口状态两态区分**，唯一真值来源 escActionByState。
         //  · 全屏 → EXIT_FULL：首次 ESC 只退出全屏并恢复进入前几何，绝不退出 APP；
-        //  · 普通 + pendingSystemEcho → NONE：仅「系统被动退出沉浸」后吞一次补发 ESC；
-        //  · 其余普通 → QUIT_APP：返回普通模式后再次按 ESC 才退出 APP。
-        //  彻底去掉第十六轮 400ms 时间冷却 —— 它无法区分「系统补发」与「用户主动
-        //  第二次 ESC」，连贯两次按键几乎必然 < 400ms 导致「再次 ESC 退 APP」失效。
+        //  · 普通 → QUIT_APP：返回普通模式后再次按 ESC 立即退出 APP。
+        //  不再有任何「吞补发 ESC」分支：第十六轮 400ms 时间冷却、第十八轮
+        //  pendingSystemEcho 一次性标志都基于「系统会补发 ESC」的错误假设，实机系统消费
+        //  首次 ESC 后并不补发，标志永不消费 → 把用户主动的第二次 ESC 误吞成 NONE。
+        //  现 pendingSystemEcho 恒 false 且不参与分派，第二次 ESC 必然落到 QUIT_APP。
         const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);
         if (escAct === ESC_ACT_EXIT_FULL) {
           this.toggleFull();
@@ -7397,9 +7399,10 @@ struct Index {
             if (changed && healReady && (shrinkBig || shrinkSmall)) {
               this.canvasW = w;
               this.canvasH = h;
-              // 第十八轮：系统把 ESC 消费掉、自行退出沉浸 → APP 被动同步回普通模式。
-              // bySystemHeal=true 让 setFull 置位 pendingSystemEcho，吞掉随后可能紧随的
-              // 一次补发 ESC，避免它落到「普通态」被当成「再次 ESC」误退出 APP。
+              // 第十九轮：系统把 ESC 消费掉、自行退出沉浸 → APP 被动同步回普通模式。
+              // bySystemHeal=true 仅作诊断来源；shouldArmSystemEcho 恒不置位，
+              // pendingSystemEcho 恒 false。系统消费后并不补发 ESC，故无需吞任何按键：
+              // 用户随后主动按下的第二次 ESC 由 escActionByState 直接判 QUIT_APP 退出 APP。
               this.setFull(false, true);
               return;
             }

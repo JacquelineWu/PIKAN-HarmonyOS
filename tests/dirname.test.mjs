@@ -30,7 +30,9 @@
  * 第十七轮「放大镜边缘抗锯齿：SDK 插值档语义修正 / 真实设备密度 / 原图上限夹界 /
  * 真实像素增益跳过 / PixelMap 边缘 AA」、
  * 第十八轮「窗口模式重做：ESC 严格两态分派 / 去掉 400ms 冷却误吞 / 系统被动退出
- * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」。
+ * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
+ * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
+ * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -3160,10 +3162,10 @@ check('② ESC 严格按当前窗口状态分派（escActionByState 为唯一真
   ONKEY16_CODE.includes('msSinceFullExitOf(') === false &&
   ONKEY16_CODE.includes('FULL_EXIT_ESC_GUARD_MS') === false &&
   ONKEY16_CODE.includes('if (this.fullscreen) {') === false, true);
-check('② 补发 ESC 只吞一次（else 分支清 pendingSystemEcho），第二次 ESC 立即退出 APP',
+check('② 第十九轮：else 清标志代码保留但严格两态下不可达，第二次 ESC 恒 QUIT_APP',
   ONKEY16_CODE.includes('this.pendingSystemEcho = false;') &&
   ONKEY16_CODE.includes('this.lastFullExitAt = 0;') === false, true);
-check('② 系统被动退出沉浸走 setFull(false, true) + 按来源置位补发标志（补发 ESC 不落到 quitApp）',
+check('② 系统被动退出沉浸走 setFull(false, true)，恒不置位（来源参数仅诊断，不落到 quitApp）',
   /this\.setFull\(false, true\);\s*return;/.test(INDEX) &&
   SET_FULL16_CODE.includes('this.pendingSystemEcho = shouldArmSystemEcho(bySystemHeal, prevFull, on);') &&
   INDEX.includes('private setFull(on: boolean, bySystemHeal: boolean = false): void {'), true);
@@ -3361,14 +3363,16 @@ check('① escActionByState：全屏恒 EXIT_FULL（首次 ESC 绝不退出 APP�
   escActionByState(true, true) === ESC_ACT_EXIT_FULL, true);
 check('① escActionByState：普通无补发标志 → QUIT_APP（返回普通模式再次 ESC 退出 APP）',
   escActionByState(false, false) === ESC_ACT_QUIT_APP, true);
-check('① escActionByState：普通且 pendingSystemEcho → NONE（仅系统被动退出后吞一次补发）',
-  escActionByState(false, true) === ESC_ACT_NONE, true);
-check('① shouldArmSystemEcho：仅「系统被动退出全屏 下降沿」置位，主动退出/上升沿/非全屏恒 false',
-  shouldArmSystemEcho(true, true, false) === true &&
+check('① escActionByState：普通态恒 QUIT_APP（第十九轮严格两态，pendingSystemEcho 不再吞键）',
+  escActionByState(false, true) === ESC_ACT_QUIT_APP &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP, true);
+check('① shouldArmSystemEcho：第十九轮恒 false（含系统自愈下降沿也不置位，废除补发吞键）',
+  shouldArmSystemEcho(true, true, false) === false &&
   shouldArmSystemEcho(false, true, false) === false &&
   shouldArmSystemEcho(true, true, true) === false &&
   shouldArmSystemEcho(true, false, false) === false &&
-  shouldArmSystemEcho(true, false, true) === false, true);
+  shouldArmSystemEcho(true, false, true) === false &&
+  shouldArmSystemEcho(false, false, false) === false, true);
 check('① shouldCaptureRectAll：非全屏→全屏上升沿 + rect 可用才抓，最大化态也抓（不再 floating-only）',
   shouldCaptureRectAll(false, true, true) === true &&
   shouldCaptureRectAll(false, true, false) === false &&
@@ -3414,12 +3418,13 @@ check('场景3 主动退出全屏后第二次 ESC：pendingEcho=false → 立即
   shouldArmSystemEcho(false, true, false) === false &&     // 主动退出不置补发标志
   escActionByState(false, false) === ESC_ACT_QUIT_APP &&
   INDEX.includes('const FULL_EXIT_ESC_GUARD_MS') === false, true);
-// 场景 4：真全屏 ESC 被系统消费 → 自愈同步 + 一次补发吞键，避免首次 ESC 直接退出 APP
-check('场景4 系统消费 ESC：小幅画布缩小触发自愈 → 置补发标志 → 补发 ESC 被吞 → 之后主动 ESC 才退 APP',
-  shouldSelfHealOnResize(true, true, 1920, 1080, 1900, 1080, 8) === true && // 仅缩 20px 也能捕获
-  shouldArmSystemEcho(true, true, false) === true &&
-  escActionByState(false, true) === ESC_ACT_NONE &&      // 补发 ESC 被吞
-  escActionByState(false, false) === ESC_ACT_QUIT_APP, true); // 用户随后主动 ESC 退 APP
+// 场景 4（第十九轮重做）：真全屏 ESC 被系统消费 → 自愈同步 → 恒不置位 →
+//   用户主动第二次 ESC 立即退 APP（第十八轮把这次 ESC 误吞成 NONE，正是本轮修复的 bug）
+check('场景4 系统消费 ESC 后第二次 ESC：自愈恒不置位 → 立即 QUIT_APP（本轮 bug 回归）',
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1900, 1080, 8) === true && // 仅缩 20px 也能捕获自愈
+  shouldArmSystemEcho(true, true, false) === false &&    // 自愈也不置补发标志
+  escActionByState(false, shouldArmSystemEcho(true, true, false)) === ESC_ACT_QUIT_APP && // 第二次 ESC 立即退 APP
+  escActionByState(false, true) === ESC_ACT_QUIT_APP, true); // 即使残留 true 也绝不吞键
 // 场景 5：双击 / F11 / 退出按钮等主动路径，不产生补发标志
 check('场景5 主动退出路径（双击/F11/按钮）不置补发标志，紧接着的二次 ESC 不被吞',
   shouldArmSystemEcho(false, true, false) === false &&
@@ -3438,11 +3443,11 @@ check('③ 四个第十八轮纯函数接线：两态分派 / 按来源置位 / 
   CAPTURE18_CODE.includes('shouldCaptureRectAll(prevFull, nextFull, true)') &&
   RESTORE18_CODE.includes('shouldApplyRectRestore(wasFloating, true)') &&
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,'), true);
-check('③ setFull 签名带 bySystemHeal 默认参数，下降沿按来源置位（不再是「所有路径无脑记时刻」）',
+check('③ setFull 签名带 bySystemHeal 默认参数，下降沿恒不置位（来源参数仅诊断）',
   INDEX.includes('private setFull(on: boolean, bySystemHeal: boolean = false): void {') &&
   SET_FULL18_CODE.includes('this.pendingSystemEcho = shouldArmSystemEcho(bySystemHeal, prevFull, on);') &&
   /if \(prevFull && !on\) \{[^}]*this\.lastFullExitAt = Date\.now\(\);[^}]*shouldArmSystemEcho/.test(SET_FULL18_CODE), true);
-check('③ 自愈分支唯一置位入口 setFull(false, true)，且保留比例 + 绝对像素双判据',
+check('③ 自愈分支 setFull(false, true)（第十九轮恒不置位），且保留比例 + 绝对像素双判据',
   /this\.setFull\(false, true\);\s*return;/.test(INDEX) &&
   /const shrinkBig: boolean = shouldExitFullOnResize\(/.test(INDEX) &&
   /const shrinkSmall: boolean = shouldSelfHealOnResize\(/.test(INDEX) &&
@@ -3467,6 +3472,96 @@ check('③ 第十七/十三/十四/十五轮回归护栏：画质三处 / 版本
   INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
   INDEX.includes('@State topBarPeek: boolean = false;') &&
   INDEX.includes('loupeClampedOffset(') &&
+  INDEX.includes('ability.terminateSelf()'), true);
+
+// ==================== 第十九轮：第二次 ESC 无响应修复 —— 严格两态定稿 / 彻底废除补发吞键 ====================
+console.log('--- 第十九轮 ①：复现路径（系统消费首次 ESC → 自愈 → 用户主动第二次 ESC） ---');
+// 用户复现：进入 APP 双击进全屏 → 第一次 ESC 可返回 → 第二次 ESC 无任何响应。
+// 根因：真全屏首次 ESC 被系统窗口管理器消费，APP 靠画布缩小自愈同步 fullscreen=false，
+//   第十八轮在自愈分支置位 pendingSystemEcho=true 想「吞一次补发 ESC」，但系统消费后
+//   并不补发 → 标志永不消费 → 用户主动的第二次 ESC 被判 NONE 吞掉 → 无任何响应。
+check('① 复现前提：自愈判据对系统栏/dock 回来的小幅缩小仍命中（约 20px 即同步回普通态）',
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1900, 1080, 8) === true &&
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1912, 1072, 8) === true, true);
+check('① 修复核心：自愈下降沿恒不置位 → 第二次 ESC 必 QUIT_APP（第十八轮此处被误吞）',
+  shouldArmSystemEcho(true, true, false) === false &&
+  escActionByState(false, shouldArmSystemEcho(true, true, false)) === ESC_ACT_QUIT_APP, true);
+
+console.log('--- 第十九轮 ②：escActionByState 严格两态全矩阵（无第三态 / 时间窗 / 标志依赖） ---');
+check('② 严格两态四象限：全屏两标志值都 EXIT_FULL、普通两标志值都 QUIT_APP',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(true, true) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  escActionByState(false, true) === ESC_ACT_QUIT_APP, true);
+check('② 恒不返回 NONE：四种组合都不是 ESC_ACT_NONE（补发吞键分支彻底废除）',
+  escActionByState(true, false) !== ESC_ACT_NONE &&
+  escActionByState(true, true) !== ESC_ACT_NONE &&
+  escActionByState(false, false) !== ESC_ACT_NONE &&
+  escActionByState(false, true) !== ESC_ACT_NONE, true);
+check('② shouldArmSystemEcho 全八种入参组合恒 false（永不置位，pendingSystemEcho 恒 false）',
+  [false, true].every(a => [false, true].every(b => [false, true].every(c =>
+    shouldArmSystemEcho(a, b, c) === false))), true);
+check('② 接线不变即生效：Index 仍传 pendingSystemEcho，但函数刻意忽略它（Index 代码行零改动）',
+  escActionByState(false, shouldArmSystemEcho(true, true, false)) === ESC_ACT_QUIT_APP &&
+  INDEX.includes('const escAct: number = escActionByState(this.fullscreen, this.pendingSystemEcho);'), true);
+
+console.log('--- 第十九轮 ③：端到端场景矩阵（首次 ESC 仍返回 / 再次 ESC 正常退出 / 不影响其他交互） ---');
+check('场景A 双击进全屏：几何上升沿照常抓取与自由窗口精确还原（未受本轮影响）',
+  shouldCaptureRectAll(false, true, true) === true &&
+  shouldApplyRectRestore(true, true) === true, true);
+check('场景B 首次 ESC（APP 收到）：全屏恒 EXIT_FULL，只退全屏并恢复几何，绝不退出 APP',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  shouldRestoreWindowRect(true, false, true, true) === true, true);
+check('场景C 首次 ESC（系统消费）：自愈同步普通态且不置位（两条首次 ESC 路径都收敛）',
+  shouldSelfHealOnResize(true, true, 1920, 1080, 1900, 1080, 8) === true &&
+  shouldArmSystemEcho(true, true, false) === false, true);
+check('场景D 再次 ESC（核心）：普通态恒 QUIT_APP，立即退出 APP，不再「无任何响应」',
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  escActionByState(false, true) === ESC_ACT_QUIT_APP, true);
+check('场景E 连贯快按两次 ESC（间隔 <100ms）：第一次 EXIT_FULL、第二次 QUIT_APP，无需按第三次',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS') === false, true);
+check('场景F 双击/F11/退出按钮主动退全屏：不置位，随后第一次 ESC 立即退 APP',
+  shouldArmSystemEcho(false, true, false) === false &&
+  escActionByState(false, shouldArmSystemEcho(false, true, false)) === ESC_ACT_QUIT_APP, true);
+check('场景G 多次全屏往返：每轮严格两态，几何快照幂等，无累积标志',
+  escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
+  escActionByState(false, false) === ESC_ACT_QUIT_APP &&
+  shouldArmSystemEcho(true, true, false) === false &&
+  shouldArmSystemEcho(false, true, false) === false, true);
+
+console.log('--- 第十九轮 ④：源码静态契约（Index 代码行零改动 / 纯函数定稿 / 注释订正 / 回归护栏） ---');
+check('④ 唯一真值来源仍为 escActionByState，Index ESC 分派 / toggleFull / quitApp 接线一字未动',
+  ONKEY18_CODE.includes('escActionByState(this.fullscreen, this.pendingSystemEcho);') &&
+  ONKEY16_CODE.includes('if (escAct === ESC_ACT_EXIT_FULL) {') &&
+  ONKEY16_CODE.includes('else if (escAct === ESC_ACT_QUIT_APP) {') &&
+  INDEX.includes('this.quitApp();') && INDEX.includes('this.toggleFull();'), true);
+check('④ 纯函数定稿：escActionByState 恒按 fullscreen 两态返回、shouldArmSystemEcho 恒 false',
+  /export function escActionByState\([\s\S]*?return fullscreen \? ESC_ACT_EXIT_FULL : ESC_ACT_QUIT_APP;\s*\}/.test(IP_CODE) &&
+  /export function shouldArmSystemEcho\([\s\S]*?return false;\s*\}/.test(IP_CODE), true);
+check('④ 严格两态：无 pendingSystemEcho 判据分支，NONE 仅剩第十六轮旧 escActionOf 一处保留',
+  /if \(_?pendingSystemEcho\)/.test(IP_CODE) === false &&
+  IP_CODE.split('return ESC_ACT_NONE;').length - 1 === 1, true);
+check('④ 注释订正：Index/Plan 均标注第十九轮定稿、系统消费首次 ESC 后不补发',
+  INDEX.includes('第十九轮定稿') &&
+  INDEX.includes('由系统消费后并不补发给') &&
+  IP_SRC.includes('第十九轮定稿') &&
+  IP_SRC.includes('系统消费首次 ESC 后并不把它补发给 APP'), true);
+check('④ 第十八轮护栏全部保持：全窗口态几何 / 绝对像素自愈 / 时间冷却移除',
+  INDEX.includes('shouldCaptureRectAll(prevFull, nextFull, true)') &&
+  INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
+  INDEX.includes('const FULL_SELF_HEAL_MIN_SHRINK_PX: number = 8;') &&
+  INDEX.includes('const FULL_EXIT_ESC_GUARD_MS') === false &&
+  INDEX.includes('escActionOf(') === false &&
+  INDEX.includes('msSinceFullExitOf(') === false, true);
+check('④ 回归护栏：版本 / 画质三处 / AA 五源 / 放大镜 / 顶栏 / 右键 toggle 全部未破坏',
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  LOUPE13_CODE.split('.antialiased(LOUPE_AA_ENABLED)').length - 1 === 5 &&
+  INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
+  INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
   INDEX.includes('ability.terminateSelf()'), true);
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
