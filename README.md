@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R30` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R31` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,93 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十一轮：R30 回归 —— 退出重开不恢复图片 / 「往上层」无响应（2026-11-18，R31）
+
+**用户报障（原文）**：「退出 APP 后再次进入时，应自动恢复并打开退出前原有的图片档案；
+执行返回上层操作时，应正常响应并返回上一层界面。」
+
+**复现路径**：装 `R30` 包 → 在 NAS 子目录看图 → 退出 APP → 重新打开 →
+① 上次的图片档案不再自动出现；② 点「往上层」像没反应（只给一句「当前是图片列表，没有上层目录」）。
+
+### 问题定位：R30 把含 XML 非法控制字符的文本直接写进 preferences
+
+R30 为跨会话恢复「往上层」层级，新增了 `lastBrowseBase` / `lastUpCache` 两个持久化 key。
+其中 `lastUpCache` 是 `encodeUpCacheText()` 产出的**行式文本**，用 `U+0001`(SOH) /
+`U+0002`(STX) 作分隔符。HarmonyOS `preferences` 以 XML 持久化 KV，
+**C0 控制字符是 XML 1.0 非法字符** —— 这类 value 会让 `putSync` / `flushSync` 抛异常，
+甚至写坏整个 KV 文件。四处接线把一次「增强数据写入失败」放大成整条恢复链失效：
+
+1. **写入侧未隔离**：R30 把两个增强 key 的 `put` 排在 `flushSnap()` / `flush()` /
+   `flushSync()` **之前**，且与核心「位置 / 相片 / 授权根 / 列表快照」共用同一个 `try`。
+   坏 value 一抛，核心状态全部没落盘 → 退出重开不恢复图片。
+2. **读取侧未隔离**：两个增强 key 的 `get` 与 `readLastPos()` 主 `try` 共用。
+   一旦 `get` 抛异常，整个 `readLastPos` 跳到 `catch` —— `scheduleShowLast()` 根本不排程，
+   `lastPos` / 死路径判据 / 预热全部不执行。
+3. **导航锚点被清空**：恢复链不跑 → `restoreBrowseContext()` 不执行；而 `setItems()`
+   无条件清空 `browseBase` / `browseDir` / `pickRootUri` → `browseUp()` 读到空 `current`
+   → `upNavStateOf()` 给 `UP_NAV_NONE` → 只回一句提示就 `return`，用户感知就是「按了没反应」。
+4. **稳定失效**：坏数据还可能让恢复链 `giveUpNow()` 写下 `POS_KEY_DEAD`，
+   下次启动 `deadMemoryMatches()` 命中即「立即放弃」，形成每次都失败的死循环。
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | 新增第三十一轮「preferences 安全编解码」区块：`PREFS_SAFE_TAG = 'P1:'`；`prefsSafeEncode(raw)` 把 `%` → `%25`、C0 控制字符与 DEL → `%HH`，中文 / 可打印字符原样保留，输出恒带 `P1:` 前缀；`prefsSafeDecode(safe)` 只对带前缀的文本反转义，残缺 `%XX` 容错，**无前缀文本一律原样透传**（兼容 R30 裸文本 / 空串 / 含 `%XX` 的 NAS 路径）；`prefsIsLegacyBadCache(text)` 识别含裸 SOH / STX 的旧坏快照；私有 `prefsHexNib()`。四个函数纯字符串、零 IO、零抛出 |
+| `entry/src/main/ets/pages/Index.ets` | ① import 三个新函数；② `ESC_BUILD_TAG` → `R31`；③ 新增 `readBrowseExtras(p)`：**契约「绝不抛异常」**，内层 `try` 读两个增强 key，`catch` 一律降级空串；读到 R30 遗留坏数据时丢弃快照并 `saveDeadTag('')` 清死路径记忆，正常数据经 `prefsSafeDecode()` 还原；④ `flushPos()` / `flushPosSync()` 改为**核心状态先单独 `flush()` / `flushSync()` 落盘**，两个增强 key 挪到独立 `try` 单独写 + 单独 flush，失败只 `hilog.warn()`，绝不回卷核心数据、绝不触发外层 `catch` 的异步兜底；⑤ `encodeUpCacheForSave()` 返回 `prefsSafeEncode(raw)`，从根上消除 XML 非法字符；⑥ `restoreUpCache()` 的解码 / 层过滤 / 回填整体包进 `try/catch`，失败只清空缓存，绝不冒泡到 `restoreFromSnapshot()` 的 `catch` 误判整批恢复失败；⑦ catch 三字段按各自类型复位（`upDirCache` / `lastUpNames` 为数组） |
+| `tests/dirname.test.mjs` | 构建标记断言 `R30` → `R31` 并在所有旧包排除列表补 `R30`；截图判定 / 真机步骤文案同步；import 三个新函数；新增第三十一轮 **30 条**断言（安全编解码纯函数 15 / 静态接线 11 / 零回归 3 / 类型复位护栏 1），并补一条「catch 三字段按类型复位」护栏防止 ArkTS 类型错误重演 |
+| `README.md` | 抬头 `R30` → `R31`；新增本章 |
+
+**关键设计**：
+- **核心状态优先**：`POS_KEY_IDX` / `POS_KEY_URI` / `POS_KEY_OK` / `POS_KEY_DIR` / 图片快照
+  的 `flush` 先完成，增强 key 后面单独写。即使增强 key 全失败，也只是丢掉「深层层级 +
+  多层快照」两项增强能力，退回 R29 语义，**图片恢复绝不丢**。
+- **恢复链隔离**：`readLastPos()` 主 `try` 只 `await this.readBrowseExtras(p)`；该方法内部
+  吞掉一切异常。`scheduleShowLast()` / `lastPos` / `deadMemoryMatches()` / 预热不再受增强 key 影响。
+- **坏数据自愈**：R30 遗留的裸控制字符快照被识别后丢弃，同时清掉可能被 `giveUpNow()`
+  写下的 `POS_KEY_DEAD`，打破「每次启动都立即放弃」的稳定失效。
+- **兼容性零回归**：`prefsSafeDecode()` 只在 `P1:` 前缀存在时反转义；R30 裸文本、空串、
+  含 `%XX` 的 NAS 路径、脏数据一律原样透传（R29 及之前语义完全不变）。
+- **恢复期仍零 IO**：`restoreBrowseContext()` / `restoreUpCache()` 全是纯字符串运算，
+  防冻结闸门一行未动；真正列父目录仍只发生在用户点击之后。
+- 「往上层」既有语义、`browseUp()` 严格层级链 / 父级真值校验 / 候选同层过滤、
+  版本 `1.0.7` / `versionCode 7`、诊断开关全部未动。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 14 s 952 ms**（33 tasks：17 executed / 16 up-to-date），**0 ERROR / 17 WARN**（8 条 `preferences`「Function may throw exceptions」+ 1 条 `READ_IMAGEVIDEO` + 8 条 2in1 系统栏 API，与 R30 基线完全一致，全在本轮**未改动**区域）；签名 HAP **941,561 bytes**（R30 为 934,582 bytes） |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 HAP 内 `ets/modules.abc`（均 534,888 bytes）检出 `R31=1`（构建标记常量，位于字符串常量表，紧邻 `1.0.7` 与各轮 tag）、`R29=0`；`R30` 仅剩 **1 处 hilog 文案**「drop legacy R30 up-cache, clear dead memory」，**不是构建标记**，源码已无 `ESC_BUILD_TAG = 'R30'` 定义；新函数 `prefsSafeEncode` / `prefsSafeDecode` / `prefsIsLegacyBadCache`、`readBrowseExtras`、`P1:` 前缀、`lastBrowseBase` / `lastUpCache`、两条 `save browse extras … failed` 日志全部进入产物 |
+| **静态契约 + 纯函数** | **ALL PASS 1475 passed, 0 failed**（1445 → 1475，新增 30 条）；`git diff --check` 通过；`DirName.ts` / `Index.ets` 括号净平衡 0；`node` 实际执行全量断言即语法验证 |
+| **真机重启验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝。**编译校验 ≠ 真机验证** |
+
+**首轮编译错误与修复（如实记录）**：第一次 `assembleHap` 在 `Index.ets:2564` 报
+`10505001 ArkTS Compiler Error: Type 'string' is not assignable to type 'string[]'` ——
+新增 `restoreUpCache()` 的 `catch` 把 `lastUpNames`（`Array<string>`）误复位成 `''`。
+改为 `[]` 后二次编译通过，并在静态契约里补了「catch 三字段按各自类型复位」断言防止重演。
+
+### 覆盖的验证场景（请在装有 `R31` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R31`（仍是 `R30` / `R29` 说明装的是旧包） |
+| 2 | 子目录看图 → 退出 APP → 重新打开 | **自动恢复并打开退出前原有的图片档案**（本轮回归点 ①），标题栏层级正确 |
+| 3 | 点「往上层」 | **正常响应并返回上一层界面**（本轮回归点 ②），不再只给「当前是图片列表」提示 |
+| 4 | 连续多层进入 / 返回、到卷根 | 严格逐级 L4→L3→L2→L1→L0，不越级、不绕圈，到卷根明确提示 |
+| 5 | 冷启动（首次安装 / 清数据）→ 「选择文件夹」→ 逐层进入 / 返回 | 与 R30 完全一致，零回归 |
+| 6 | 只读名单态（老快照无授权）重开 → 点「往上层」 | 有层级则继续走层级链，无层级给明确指引，绝不弹系统选择器 |
+| 7 | 换一个 picker 授权根 → 退出重开 | 旧授权根的持久化深层 / 快照层被裁决丢弃，不串层 |
+| 8 | 从 `R30` 包直接覆盖安装 `R31` 后首次启动 | 自愈逻辑丢弃旧坏快照并清死路径标记，**不再每次启动都直接弹「选择文件夹」** |
+
+> **R30 → R31 升级说明**：若 R30 期间核心位置 key 因写入异常未 flush 而已经丢失，
+> 升级后的**第一次**启动可能没有「上次图片」可恢复（数据已在上一版本丢失，无法凭空重建）。
+> 此时只需重新打开一次目录 / 图片；R31 退出时会正确落盘，之后每次冷启动都能稳定恢复。
+> 自愈逻辑保证不会再出现「每次启动都立即放弃」的死循环。
+
+> 授权边界（与 R29 / R30 同一条）：若持久化层级恰好在授权根、而其父级从未被授权也从未列过，
+> APP 内清单仍只能给出已知子目录，不会凭空编造目录名 —— 用「选择文件夹」打开父层一次即可补全。
 
 ## 第三十轮：重启后「往上层」层级与内容双错 —— 实际浏览层级持久化 + 多层快照跨会话（2026-11-18，R30）
 

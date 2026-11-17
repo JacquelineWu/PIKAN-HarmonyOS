@@ -62,7 +62,8 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   isStrictParentOf, sameEntryNames,
   isUpListPseudoName, mergeUpListNames, rootFormParentOf,
   isSameOrUnderLevelOf, restoreBrowseLevelOf, rawBrowseFormOf,
-  UpCacheLevel, encodeUpCacheText, decodeUpCacheText } from '../common/DirName';
+  UpCacheLevel, encodeUpCacheText, decodeUpCacheText,
+  prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -124,7 +125,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R30';
+const ESC_BUILD_TAG: string = 'R31';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -2285,19 +2286,19 @@ struct Index {
       const rawOk = await p.get(POS_KEY_OK, '');
       const rawDir = await p.get(POS_KEY_DIR, '');
       const rawDead = await p.get(POS_KEY_DEAD, '');
-      // 第三十轮：实际浏览层级 + 多层清单快照。都是小 key（快照已封顶 12KB），
-      // 与上面几个一起在首帧之后异步读，绝不碰大快照、绝不重扫。
-      const rawBrowse = await p.get(POS_KEY_BROWSE, '');
-      const rawUpCache = await p.get(POS_KEY_UPCACHE, '');
       const idx: number = typeof rawIdx === 'number' ? rawIdx : -1;
       const uri: string = typeof rawUri === 'string' ? rawUri : '';
       const ok: string = typeof rawOk === 'string' ? rawOk : '';
       // 必须在 scheduleShowLast() / 可能的提前 return 之前读到：恢复前要先激活它。
       this.savedDirUri = typeof rawDir === 'string' ? rawDir : '';
-      this.savedBrowseBase = typeof rawBrowse === 'string' ? rawBrowse : '';
-      this.savedUpCacheRaw = typeof rawUpCache === 'string' ? rawUpCache : '';
       this.okUri = ok;
       this.deadMemory = typeof rawDead === 'string' ? rawDead : '';
+      // 第三十一轮：两个「增强」key 挪到完全独立的方法里读，绝不共用这个 try。
+      // R30 把它们和核心位置 key 放在同一个 try，含控制字符的坏 value 一旦
+      // 让 get 抛异常，整个 readLastPos 跳到 catch —— scheduleShowLast() 根本
+      // 不排程（重开既不恢复图片，也不重建 browseBase，点往上层像没反应）。
+      // 该方法契约「绝不抛异常」，失败一律降级空串（等价 R29 语义）。
+      await this.readBrowseExtras(p);
       // 有「上次会话」记忆才给恢复链挂 3 秒看门狗；首次启动没有任何记忆，绝不弹选择器。
       this.hasRestoreMemory = idx >= 0 || uri.length > 0 || ok.length > 0 ||
         this.savedDirUri.length > 0;
@@ -2364,6 +2365,42 @@ struct Index {
       }
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'readLastPos failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 第三十一轮：读取 R30 引入的两个「增强」持久化 key，与核心恢复链完全隔离。
+   *
+   *  ⚠️ 契约：**本方法绝不抛异常**。readLastPos 在主 try 里 await 它，任何失败
+   *     都必须就地降级为空串（等价 R29 语义），否则又会像 R30 那样把整条启动
+   *     恢复链（scheduleShowLast / lastPos / 死路径判据）拖进 catch。
+   *  · 内层 try 包住两次 get + prefsSafeDecode + 坏数据自愈；
+   *  · R31 写入的快照是 P1: 转义文本，prefsSafeDecode 还原成 decodeUpCacheText
+   *    认得的原始行式文本；R30 遗留裸文本 / 空串 / 脏数据原样或降级；
+   *  · 检测到 R30 遗留的含控制字符坏数据时，丢弃这份快照并清掉可能被
+   *    giveUpNow 写下的死路径标记 —— 打破「每次启动都直接放弃」的稳定失效。
+   *  零文件 IO：只读 preferences 的小 key，绝不 listFile / stat / 弹选择器。 */
+  private async readBrowseExtras(p: preferences.Preferences): Promise<void> {
+    this.savedBrowseBase = '';
+    this.savedUpCacheRaw = '';
+    try {
+      const rawBrowse = await p.get(POS_KEY_BROWSE, '');
+      const rawUpCache = await p.get(POS_KEY_UPCACHE, '');
+      this.savedBrowseBase = typeof rawBrowse === 'string' ? rawBrowse : '';
+      this.savedUpCacheRaw = typeof rawUpCache === 'string' ? rawUpCache : '';
+      if (typeof rawUpCache === 'string' && prefsIsLegacyBadCache(rawUpCache)) {
+        // R30 直接把含 U+0001/U+0002 的行式文本写进 preferences：这份数据
+        // 既不能安全解码，也可能已经污染了上一次的恢复尝试。丢弃它，并
+        // 自愈清掉死路径记忆，让本次恢复链重新获得一次完整机会。
+        this.savedUpCacheRaw = '';
+        this.saveDeadTag('');
+        hilog.warn(DOMAIN, TAG, 'drop legacy R30 up-cache, clear dead memory');
+        return;
+      }
+      this.savedUpCacheRaw = prefsSafeDecode(this.savedUpCacheRaw);
+    } catch (e) {
+      this.savedBrowseBase = '';
+      this.savedUpCacheRaw = '';
+      hilog.warn(DOMAIN, TAG, 'read browse extras failed (ignored): %{public}s', JSON.stringify(e));
     }
   }
 
@@ -2499,23 +2536,33 @@ struct Index {
     if (this.savedUpCacheRaw.length === 0) {
       return 0;
     }
-    const levels: Array<UpCacheLevel> = decodeUpCacheText(this.savedUpCacheRaw,
-      UP_CACHE_SAVE_LEVELS, UP_CACHE_SAVE_NAMES);
-    for (let i = 0; i < levels.length; i++) {
-      const lv: UpCacheLevel = levels[i];
-      const inTree: boolean = isSameOrUnderLevelOf(this.savedDirUri, lv.path) ||
-        isSameOrUnderLevelOf(lv.path, base);
-      if (!inTree) {
-        continue;
+    // 第三十一轮：解码的是外部持久化数据（可能残留 R30 的坏文本），整体兜底，
+    // 绝不冒泡到 restoreFromSnapshot 的 catch 让整批恢复被误判为「读不出」，
+    // 进而 giveUpNow 写死路径标记 —— 那会让往上层和图片恢复稳定失效。
+    try {
+      const levels: Array<UpCacheLevel> = decodeUpCacheText(this.savedUpCacheRaw,
+        UP_CACHE_SAVE_LEVELS, UP_CACHE_SAVE_NAMES);
+      for (let i = 0; i < levels.length; i++) {
+        const lv: UpCacheLevel = levels[i];
+        const inTree: boolean = isSameOrUnderLevelOf(this.savedDirUri, lv.path) ||
+          isSameOrUnderLevelOf(lv.path, base);
+        if (!inTree) {
+          continue;
+        }
+        // uris 不持久化（重启后授权形态可能失效）：留空，upListUriOf 按 target 拼兜底。
+        this.upDirCache.push({ path: lv.path, names: lv.names, uris: [], kinds: lv.kinds });
       }
-      // uris 不持久化（重启后授权形态可能失效）：留空，upListUriOf 按 target 拼兜底。
-      this.upDirCache.push({ path: lv.path, names: lv.names, uris: [], kinds: lv.kinds });
-    }
-    if (this.upDirCache.length > 0) {
-      // 旧单槽指向最深层快照，历史链路（诊断 / cached 判定）保持有值。
-      const last: UpDirSnapshot = this.upDirCache[this.upDirCache.length - 1];
-      this.lastUpPath = last.path;
-      this.lastUpNames = last.names;
+      if (this.upDirCache.length > 0) {
+        // 旧单槽指向最深层快照，历史链路（诊断 / cached 判定）保持有值。
+        const last: UpDirSnapshot = this.upDirCache[this.upDirCache.length - 1];
+        this.lastUpPath = last.path;
+        this.lastUpNames = last.names;
+      }
+    } catch (e) {
+      this.upDirCache = [];
+      this.lastUpPath = '';
+      this.lastUpNames = [];
+      hilog.warn(DOMAIN, TAG, 'restore up cache failed (ignored): %{public}s', JSON.stringify(e));
     }
     this.savedUpCacheRaw = '';
     return this.upDirCache.length;
@@ -3246,19 +3293,29 @@ struct Index {
       await store.put(POS_KEY_SRC, p.src);
       await store.put(POS_KEY_OK, this.okUri); // 下次启动预热的那一张
       await store.put(POS_KEY_DIR, this.savedDirUri); // 下次启动 activate 的目录授权根
-      // 第三十轮：实际浏览层级（小 key，恒写；空串清掉脏值）+ 多层清单快照
-      // （只在有更新时写，避免每次切图防抖都重写一份封顶 12KB 的文本）。
-      await store.put(POS_KEY_BROWSE, this.browseBase);
-      if (this.upCacheDirty) {
-        await store.put(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
-        this.upCacheDirty = false;
-      }
       // 换了图片源才需要重写快照（切图时列表没变，不必每次都写这几千个 uri）
       if (this.snapDirty) {
         this.snapDirty = false;
         await this.flushSnap(store);
       }
+      // 第三十一轮：核心「位置 / 相片 / 授权根 / 列表快照」先独立 flush 落盘，
+      // 绝不和两个增强 key 共用一次 flush。R30 把增强 key 的 put 排在
+      // flushSnap / flush 之前且共用同一个 try：含 XML 非法控制字符的 value
+      // 一旦让 put/flush 抛异常，核心状态全部没落盘 —— 退出重开就不恢复图片。
       await store.flush(); // 不 flush 只写到内存，进程被杀会丢
+      // 增强 key 单独写 + 单独 flush，独立 try：失败只降级这两项（等价 R29），
+      // 绝不回卷已落盘的核心数据，也不会跳到外层 catch 触发异步兜底。
+      // encodeUpCacheForSave 已把控制字符编码掉，这一步正常情况下不会再抛。
+      try {
+        await store.put(POS_KEY_BROWSE, this.browseBase);
+        if (this.upCacheDirty) {
+          await store.put(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
+          this.upCacheDirty = false;
+        }
+        await store.flush();
+      } catch (extras) {
+        hilog.warn(DOMAIN, TAG, 'save browse extras failed (ignored): %{public}s', JSON.stringify(extras));
+      }
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'save last pos failed: %{public}s', JSON.stringify(e));
     }
@@ -3295,14 +3352,24 @@ struct Index {
       store.putSync(POS_KEY_SRC, p.src);
       store.putSync(POS_KEY_OK, this.okUri);
       store.putSync(POS_KEY_DIR, this.savedDirUri); // 切后台也补一次，进程被杀不丢授权根
-      // 第三十轮：退出 / 切后台同步补写（毫秒级必达）。快照只在脏时写。
-      store.putSync(POS_KEY_BROWSE, this.browseBase);
-      if (this.upCacheDirty) {
-        store.putSync(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
-        this.upCacheDirty = false;
-      }
+      // 第三十一轮：核心状态先同步 flush 落盘（进程被杀也必达），再单独写增强 key。
+      // R30 把两个增强 key 的 putSync 排在 flushSync 之前且共用同一个 try：
+      // 含控制字符的坏 value 抛异常时 flushSync 根本没执行，核心位置全丢，
+      // catch 里的 flushPos() 异步兜底又来不及 —— 这正是「退出重开不恢复图片」。
       store.flushSync();
       this.posPending = undefined;
+      // 增强 key 单独写 + 单独 flushSync，独立 try：失败只降级这两项，
+      // 绝不回卷已落盘的核心数据、绝不触发外层 catch 的异步兜底。
+      try {
+        store.putSync(POS_KEY_BROWSE, this.browseBase);
+        if (this.upCacheDirty) {
+          store.putSync(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
+          this.upCacheDirty = false;
+        }
+        store.flushSync();
+      } catch (extras) {
+        hilog.warn(DOMAIN, TAG, 'save browse extras sync failed (ignored): %{public}s', JSON.stringify(extras));
+      }
       hilog.info(DOMAIN, TAG, 'flushPosSync: idx=%{public}d uri=%{public}s',
         p.idx, p.uri.length > 0 ? 'yes' : 'no');
     } catch (e) {
@@ -6428,7 +6495,9 @@ struct Index {
     this.upCacheDirty = true;
   }
 
-  /** 第三十轮：把 upDirCache 序列化成行式文本（容量封顶，见 UP_CACHE_SAVE_*）。
+  /** 第三十一轮：行式快照文本含 SOH / STX 分隔符（XML 非法控制字符），
+   *  直接写 preferences 会让 putSync / flushSync 抛异常并写坏 KV 文件。
+   *  编码成纯可打印文本再落盘，从根上消除本回归；decode 侧在 readBrowseExtras。
    *  只存 path / names / kinds；uris 重启后授权形态可能失效，不持久化。 */
   private encodeUpCacheForSave(): string {
     const levels: Array<UpCacheLevel> = [];
@@ -6436,8 +6505,9 @@ struct Index {
       const s: UpDirSnapshot = this.upDirCache[i];
       levels.push({ path: s.path, names: s.names, kinds: s.kinds });
     }
-    return encodeUpCacheText(levels, UP_CACHE_SAVE_LEVELS, UP_CACHE_SAVE_NAMES,
+    const raw: string = encodeUpCacheText(levels, UP_CACHE_SAVE_LEVELS, UP_CACHE_SAVE_NAMES,
       UP_CACHE_SAVE_CHARS);
+    return prefsSafeEncode(raw);
   }
 
   /** 第二十九轮：聚合目标父层的**全部**真实子目录名。

@@ -1071,3 +1071,94 @@ export function decodeUpCacheText(text: string,
   }
   return out;
 }
+
+// --------------------------------------------------------------------
+// 第三十一轮：preferences 安全编解码（2026-11-18，R31）
+//
+// 回归根因：R30 的 encodeUpCacheText 用 U+0001(SOH) / U+0002(STX) 作行内
+// 分隔符，并把整段文本**直接**写进 preferences。HarmonyOS preferences 以
+// XML 持久化，C0 控制字符是 XML 1.0 非法字符 —— putSync / flushSync 会抛
+// 异常或写坏整个 KV 文件。R30 又把这个写入排在核心位置 key 的 flush 之前、
+// 把读取与恢复排程共用同一个 try，于是：退出时核心「位置 / 相片 / 授权根」
+// 没落盘、启动时 scheduleShowLast() 不排程 —— 重开既不恢复图片，
+// browseBase 也重建不了，点「往上层」像没反应。
+//
+// 修复（治本）：持久化边界把 C0 控制字符 + '%' 百分号编码成纯可打印文本，
+// 读回后反转义还原成 decodeUpCacheText 认得的原始行式文本。带版本前缀 P1:
+// 做鉴别 —— 只有本轮写入的文本才反转义，R30 遗留的裸文本 / 含 %XX 编码的
+// NAS 路径一律原样透传（decodeUpCacheText 本就按 SOH/STX 分割），零回归。
+// 两个函数纯字符串、零 IO、零抛出，可被 Node 直接回归。
+// --------------------------------------------------------------------
+
+/** 编码前缀：带它的文本是本轮写入的转义文本，才需要反转义。
+ *  路径不会以 `P1:` 开头（encodeUpCacheText 首行必是 / 或 scheme），不会误判。 */
+const PREFS_SAFE_TAG: string = 'P1:';
+const PREFS_HEX: string = '0123456789ABCDEF';
+
+/** 把含控制字符的行式文本编码成 preferences(XML) 安全的可打印单行文本。
+ *  · `%` → `%25`（先转义，避免与 %XX 歧义，保证可逆）；
+ *  · C0 控制字符（`\n` / SOH / STX …，code < 0x20）与 DEL(0x7F) → `%` + 两位大写 hex；
+ *  · 中文 / 常规可打印字符原样保留（UTF-8 在 XML 中合法，避免体积膨胀）；
+ *  · 输出恒带 `P1:` 前缀供 prefsSafeDecode 鉴别；空串返回空串。 */
+export function prefsSafeEncode(raw: string): string {
+  if (raw.length === 0) {
+    return '';
+  }
+  let out: string = PREFS_SAFE_TAG;
+  for (let i = 0; i < raw.length; i++) {
+    const c: number = raw.charCodeAt(i);
+    if (c === 0x25) {
+      out += '%25';
+    } else if (c < 0x20 || c === 0x7F) {
+      out += '%' + PREFS_HEX.charAt((c >> 4) & 0x0F) + PREFS_HEX.charAt(c & 0x0F);
+    } else {
+      out += raw.charAt(i);
+    }
+  }
+  return out;
+}
+
+/** 还原 prefsSafeEncode 的文本；非本轮写入的文本（无 P1: 前缀：R30 裸文本 /
+ *  空串 / 含 %XX 编码路径 / 脏数据）原样返回，兼容性零回归、绝不抛异常。 */
+export function prefsSafeDecode(safe: string): string {
+  if (safe.length <= PREFS_SAFE_TAG.length || safe.indexOf(PREFS_SAFE_TAG) !== 0) {
+    return safe;
+  }
+  const body: string = safe.substring(PREFS_SAFE_TAG.length);
+  let out: string = '';
+  for (let i = 0; i < body.length; i++) {
+    if (body.charAt(i) === '%' && i + 2 < body.length) {
+      const h: number = prefsHexNib(body.charAt(i + 1));
+      const l: number = prefsHexNib(body.charAt(i + 2));
+      if (h >= 0 && l >= 0) {
+        out += String.fromCharCode(h * 16 + l);
+        i += 2;
+        continue;
+      }
+    }
+    out += body.charAt(i);
+  }
+  return out;
+}
+
+/** 是否为 R30 遗留的「坏」清单快照文本（含裸 SOH/STX 控制字符）。
+ *  R31 写入的是 P1: 转义文本，不含裸控制字符；R30 直接写原始行式文本，
+ *  必含 U+0001/U+0002。用于启动时一次性识别并自愈（清死路径标记 + 忽略坏数据）。 */
+export function prefsIsLegacyBadCache(text: string): boolean {
+  return text.indexOf('\u0001') >= 0 || text.indexOf('\u0002') >= 0;
+}
+
+/** 十六进制字符 → 数值；非十六进制返回 -1（用于残缺 %XX 容错）。 */
+function prefsHexNib(ch: string): number {
+  const c: number = ch.charCodeAt(0);
+  if (c >= 0x30 && c <= 0x39) {
+    return c - 0x30;
+  }
+  if (c >= 0x41 && c <= 0x46) {
+    return c - 0x41 + 10;
+  }
+  if (c >= 0x61 && c <= 0x66) {
+    return c - 0x61 + 10;
+  }
+  return -1;
+}
