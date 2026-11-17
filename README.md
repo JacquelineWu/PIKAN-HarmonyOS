@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R29` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R30` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,71 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十轮：重启后「往上层」层级与内容双错 —— 实际浏览层级持久化 + 多层快照跨会话（2026-11-18，R30）
+
+**复现路径**：退出 APP 前在 picker 授权根的**子目录**里看图（如
+`…/[青丘图鉴] Nine tail Photography/2026/编号202618 模特 奶茶`）→ 退出 → 重新打开 →
+进入目录浏览并点「往上层」。预期落在直接父级 `2026`（该层全部 `编号XXXX` 子目录可见），
+实际却显示错误层级与内容。
+
+### 问题定位：`browseBase` 从不持久化，恢复一律重置到授权根
+
+纯函数探针（`node --experimental-strip-types`）验证：`upContextBaseOf` / `upLevelOf` /
+`isStrictParentOf` / `upParentCandidates` 对授权根与子目录的各种 URI 形态（docs 挂载 /
+主机 scheme / 纯路径 / 百分号编码）全部给出**正确**的层级与候选 —— 问题不在层级判定，
+而在重启后的**运行时状态重建**：
+
+1. **层级跳级**：`browseBase`（用户实际所在的浏览层级）是纯内存态，退出即丢。
+   `restoreBrowseContext()` 只用 `savedDirUri`（picker 授权根）重建。用户退出前在
+   `编号202618 模特 奶茶`，重开后 `browseBase` 却被重置到授权根 `2026` —— 点「往上层」
+   直接跳到 `2026` 的父级 `[青丘图鉴] Nine tail Photography`，**越过了**用户实际所在目录的
+   直接父级。
+2. **内容缺失**：那个父级没有逐 URI 授权，`fs.listFile` 全部失败 → 降级 APP 内清单；
+   而 R29 的 `upDirCache` / `lastUpNames` 也是纯内存态，重启后全空 → 聚合结果只剩
+   「恒列当前目录」一项。层级与内容同时错误，正是用户看到的现象。
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | ① 新增 `isSameOrUnderLevelOf()`：用规范层级键判「同层或在其之下」（任意深度），抹平 scheme / 挂载前缀 / 编码形态；② 新增 `restoreBrowseLevelOf()`：恢复层级裁决 —— 持久化深层与授权根同层或在其之下才采纳，越级 / 旁支 / 垃圾值 / 空值一律回退授权根（R29 及之前语义零回归）；③ 新增 `rawBrowseFormOf()`：用 picker 原始授权 URI 的**同 scheme / 同编码习惯**拼出更深层目录的 URI（授权根含 `%` 时逐段编码），`browseUp` 的候选 ① 剥一层即得授权形态父 URI；④ 新增 `UpCacheLevel` 接口与 `encodeUpCacheText()` / `decodeUpCacheText()`：多层清单快照的行式编解码（`SOH`/`STX` 分隔，文件名不可能出现），层 / 条目 / 总长三重封顶，解码侧剔除伪行、坏 kind 按 -1、同层保留最后一份 |
+| `entry/src/main/ets/pages/Index.ets` | ① 新增持久化 key `POS_KEY_BROWSE`（`lastBrowseBase`，实际浏览层级）与 `POS_KEY_UPCACHE`（`lastUpCache`，多层快照行式文本），容量常量 12 层 × 64 条 × 12000 字符；② `readLastPos()` 一并读回（小 key，与既有 5 个位置记忆 key 同批异步读）；③ `restoreBrowseContext()` 改用 `restoreBrowseLevelOf` 裁决层级、`rawBrowseFormOf` 拼 `browseDir`（`pickRootUri` 恒为授权根原始形态），并调 `restoreUpCache()` 解码快照；④ 新增 `restoreUpCache()`：只保留「授权根子树 ∪ 恢复层级祖先」的层（换过授权根的旧层丢弃），`uris` 不持久化（授权形态重启后可能失效，`upListUriOf` 有 target 拼名兜底），旧单槽同步指向最深层；⑤ `flushPos()` / `flushPosSync()` 与 `POS_KEY_DIR` 一起落盘两个新 key（快照仅 `upCacheDirty` 时写，切后台 / ESC 退出毫秒级必达）；⑥ `cacheUpDirSnapshot()` 置脏标记；⑦ `ESC_BUILD_TAG` → `R30` |
+| `tests/dirname.test.mjs` | 构建标记 `R29` → `R30` 并补 `R29` 旧包排除；更新 1 条因实现变化失效的锚点护栏（拆成 3 条更精确的 R30 接线断言）；新增第三十轮 **46 条**断言（层级裁决 9 / 从属与形态 7 / 编解码与容错 9 / Index 静态接线 11 / 常规导航零回归 6，含复现路径端到端纯函数推演） |
+| `README.md` | 抬头 `R29` → `R30`；新增本章 |
+
+**关键设计**：
+- 恢复链仍是**零 IO**：`restoreBrowseContext` / `restoreUpCache` 全是纯字符串运算，不
+  `listFile` / `statSync` / 弹选择器，防冻结闸门一行未动；真正列父目录仍只发生在用户点击之后。
+- 「往上层」的既有语义零改动：严格层级链、父级真值校验、候选同层过滤、逐级上移到卷根停、
+  `pickRootUri` 成功上移后清空 —— 全部保持 R29 形态。
+- 持久化快照 uris 刻意不存：重启后授权按 URI 字符串发放，旧子项 URI 可能失效；
+  `upListUriOf()` 的 `target + '/' + 名字` 兜底与 R29 行为一致。
+- 诊断串新增 `deep`（恢复到比授权根深的层）与 `uc=N`（还原的快照层数），`Ctrl+D` 可直接判读。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 17 s 33 ms**（真实 `CompileArkTS` 10 s 272 ms），签名 HAP **934,582 bytes**；`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 `R30=1 / R29=0 / R28=0 / R27=0`，且新 key `lastBrowseBase` / `lastUpCache` 已进入产物；**0 ERROR**，17 条告警与 R29 基线完全一致（8 条 `preferences`、1 条 `READ_IMAGEVIDEO`、8 条 2in1 系统栏 API），全部落在本轮**未改动**区域 |
+| **静态契约 + 纯函数** | **ALL PASS 1445 passed, 0 failed**（1399 → 1445，新增 46 条）；含复现路径端到端推演（`restoreBrowseLevelOf` 采纳深层 / 拒绝越级、`rawBrowseFormOf` 编码 / 未编码两种授权形态、快照往返一致、伪行与坏 kind 容错、容量封顶）；`node --check` 通过 |
+| **真机重启验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝。**编译校验 ≠ 真机验证** |
+
+### 覆盖的验证场景（请在装有 `R30` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R30`（仍是 `R29` / `R28` 说明装的是旧包） |
+| 2 | 打开 `…/2026/编号202618 模特 奶茶` 子目录看图 → 退出 APP → 重新打开 | 直接出图（与之前一致），标题栏显示 `编号202618 模特 奶茶` 而不是 `2026` |
+| 3 | 点「往上层」 | 落在**直接父级 `2026`**（不再跳到 `[青丘图鉴] Nine tail Photography`），且是真实目录列表：该层全部 `编号XXXX` 子目录都在（授权根本身有授权，能被 `fs.listFile` 列出） |
+| 4 | 在 `2026` 再点「往上层」 | 走 R29 既有链路：授权形态父 URI 候选 / APP 内清单聚合，行为与不重启时一致 |
+| 5 | 退出前先在 `[青丘图鉴] Nine tail Photography` 浏览过一次，再进子目录，退出重开，连点两次「往上层」 | 第二次进入父层 APP 内清单时，**上次见过的兄弟目录仍在**（快照跨会话恢复），不再只剩当前目录一项 |
+| 6 | 冷启动（首次安装 / 清数据）→ 「选择文件夹」选目录 → 逐层进入 / 返回 | 与 R29 完全一致：逐级上移、不越级、不绕圈、到卷根停 |
+| 7 | 只读名单态（老快照无授权）重开 → 点「往上层」 | 与 R29 一致：有层级则继续走层级链，无层级给明确指引，绝不弹系统选择器 |
+| 8 | 换一个 picker 授权根（「选择文件夹」选别的目录）→ 退出重开 | 旧授权根的持久化深层 / 快照层被裁决丢弃，不串层 |
+
+> 授权边界（与 R29 同一条）：若持久化层级恰好在授权根、而其父级从未被授权也从未列过，
+> APP 内清单仍只能给出已知子目录，不会凭空编造目录名 —— 用「选择文件夹」打开父层一次即可补全。
 
 ## 第二十九轮：上层清单只列 `2026` 且混入伪目录 —— 多层真实清单快照 / 全子目录聚合 / 授权同形态父 URI（2026-11-16，R29）
 

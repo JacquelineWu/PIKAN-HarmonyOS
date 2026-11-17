@@ -62,7 +62,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, parentDirCandidates, pickerStartOf, textWidthVp, listWidthForNames, sameEntryNames, hierPathOf, volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, sameDirPath, isUpTargetOf, upParentCandidates, UP_NAV_NONE, UP_NAV_TOP, UP_NAV_GO, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf, upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
   isNetworkHost, nasHostOf, canonicalLevelKeyOf, encodePathForm,
-  isStrictParentOf, isUpListPseudoName, mergeUpListNames, rootFormParentOf } from '../entry/src/main/ets/common/DirName.ts';
+  isStrictParentOf, isUpListPseudoName, mergeUpListNames, rootFormParentOf,
+  isSameOrUnderLevelOf, restoreBrowseLevelOf, rawBrowseFormOf,
+  encodeUpCacheText, decodeUpCacheText } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -1095,12 +1097,16 @@ check('Index 引入 upContextBaseOf / upContextRawOf / restoreUpEnabled / restor
   /restoreUpEnabled, restoreUpHint/.test(INDEX), true);
 check('restoreBrowseContext 由 restoreUpEnabled 决策',
   /if \(!restoreUpEnabled\(this\.restoreMode, this\.savedDirUri\)\)/.test(UPC_CODE), true);
-check('三个层级锚点 + titlePath + canGoUp 全部回填',
+check('三个层级锚点 + titlePath + canGoUp 全部回填（第三十轮：深层 browseBase + 授权同形态 browseDir）',
   /this\.browseBase = base;/.test(UPC_CODE) &&
-  /this\.browseDir = raw\.length > 0 \? raw : base;/.test(UPC_CODE) &&
-  /this\.pickRootUri = this\.browseDir;/.test(UPC_CODE) &&
+  /this\.browseDir = rawDeep\.length > 0 \? rawDeep : base;/.test(UPC_CODE) &&
+  /this\.pickRootUri = raw\.length > 0 \? raw : base;/.test(UPC_CODE) &&
   /this\.titlePath = base;/.test(UPC_CODE) &&
   /this\.canGoUp = canGoUpFrom\(base\);/.test(UPC_CODE), true);
+check('第三十轮：恢复层级由 restoreBrowseLevelOf 裁决（持久化深层优先，脏值回退授权根）',
+  /restoreBrowseLevelOf\(this\.savedBrowseBase, this\.savedDirUri\)/.test(UPC_CODE), true);
+check('第三十轮：browseDir 用 rawBrowseFormOf 拼授权同形态深层 URI',
+  /rawBrowseFormOf\(raw, base\)/.test(UPC_CODE), true);
 check('层级真值与原始 URI 分别由两个纯函数还原',
   /upContextBaseOf\(this\.savedDirUri\)/.test(UPC_CODE) &&
   /upContextRawOf\(this\.savedDirUri\)/.test(UPC_CODE), true);
@@ -1266,9 +1272,9 @@ check('右下角：正式版只显示缩放百分比；诊断层展开时显示�
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R29 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比恒在右下角；R30 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R29';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R30';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3747,8 +3753,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 诊断层展开时可见 R29 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
+check('③ 诊断层展开时可见 R30 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3774,7 +3780,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R29，否则说明装的是旧包。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R30，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3835,8 +3841,8 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R29 构建标记已升级（R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
+check('④ R30 构建标记已升级（R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
@@ -3862,7 +3868,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：展开诊断层后须出现 R29；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R30；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3930,8 +3936,8 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R29 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
+check('⑤ R30 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
@@ -4003,8 +4009,8 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R29 构建标记且 R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
+check('④ R30 构建标记且 R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
@@ -4052,9 +4058,9 @@ check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
   (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
 
-console.log('--- 第二十五轮 ③：R29 构建标记 + 既有链路零回归 ---');
-check('③ R29 构建标记，R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
+console.log('--- 第二十五轮 ③：R30 构建标记 + 既有链路零回归 ---');
+check('③ R30 构建标记，R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R28';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R26';") === false &&
@@ -4130,10 +4136,10 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
   INDEX_CODE26.split('.autoResize(false)').length - 1 === 3 &&
   INDEX_CODE26.split('.dynamicRangeMode(').length - 1 === 3, true);
 
-console.log('--- 第二十六轮 ④：R29 构建标记 + 既有链路零回归 ---');
-check('④ ESC_BUILD_TAG=R29，R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
-  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+console.log('--- 第二十六轮 ④：R30 构建标记 + 既有链路零回归 ---');
+check('④ ESC_BUILD_TAG=R30，R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") &&
+  ['R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4247,13 +4253,13 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
-check('⑤ R29 构建标记，R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R29';") &&
-  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('⑤ R30 构建标记，R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") &&
+  ['R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
 console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
-console.log('  ⚠️ 真机步骤：装 R29 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
+console.log('  ⚠️ 真机步骤：装 R30 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
 
 // ==================== 第二十八轮：NAS 往上层显示错误文件夹清单（2026-11-16，R28） ====================
 // 用户复现路径：/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026
@@ -4371,9 +4377,9 @@ check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.browseBase = target;/.test(UPLIST_CODE) &&
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
-check('R29 构建标记 R29 且旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R29';/.test(INDEX) &&
-  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R30 构建标记 R29 且旧标记全清除',
+  /const ESC_BUILD_TAG: string = 'R30';/.test(INDEX) &&
+  ['R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十八轮 ⑥：其它导航 / 历史修复零回归 ---');
@@ -4399,7 +4405,7 @@ check('R29 零回归：ro1 总闸门 / 启动路径零 new Promise 未动',
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   /new Promise|Promise\.race/.test(RESUME_FN) === false, true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R29 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
+console.log('  ⚠️ 真机步骤：装 R30 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
 
 // ==================== 第二十九轮：上层清单只列 2026、且混入伪目录行（2026-11-16，R29） ====================
 // 真机截图 screenshot_20261116_045747（R29 之前的 R28 包）：
@@ -4568,9 +4574,9 @@ check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧�
   /isStrictParentOf\(target, current\)/.test(UP_FN) &&
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
   /this\.pickRootUri = '';/.test(UP_FN), true);
-check('R29 构建标记 R29 且 R28 及更早旧包全部可从截图排除',
-  /const ESC_BUILD_TAG: string = 'R29';/.test(INDEX) &&
-  ['R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R30 构建标记且 R29 及更早旧包全部可从截图排除',
+  /const ESC_BUILD_TAG: string = 'R30';/.test(INDEX) &&
+  ['R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十九轮 ⑥：目录结构 / 命名 / 导航行为零回归 ---');
@@ -4595,7 +4601,184 @@ check('R29 零回归：非 NAS 卷根 / 文档 URI / 版本守卫 / R27 真异�
   /private readGuarded\(/.test(INDEX) &&
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R29 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
+console.log('  ⚠️ 真机步骤：装 R30 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
+
+// ==================== 第三十轮：重启后「往上层」层级与内容恢复（2026-11-18，R30） ====================
+// 实机复现：退出前在授权根的子目录（…/2026/编号202618 模特 奶茶）里看图，
+// 重开点「往上层」→ 层级与内容双错（跳到授权根的父级 + 只列一项）。
+// 根因：browseBase 不持久化，恢复一律重置到授权根；upDirCache 纯内存态。
+console.log('--- 第三十轮 ①：复现路径常量与根因形态 ---');
+const R30_HOST = '192.168.100.61';
+const R30_PICK = 'file://docs/storage/userExternal/' + R30_HOST +
+  '/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026';
+const R30_PICK_BASE = '/storage/userExternal/' + R30_HOST +
+  '/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026';
+const R30_DEEP = R30_PICK_BASE + '/编号202618 模特 奶茶';
+check('R30 复现：授权根与持久化深层都能解析出层级',
+  upContextBaseOf(R30_PICK).length > 0 && upContextBaseOf(R30_DEEP).length > 0, true);
+check('R30 复现：深层恰好比授权根深一级（isStrictParentOf 成立）',
+  isStrictParentOf(R30_PICK_BASE, R30_DEEP), true);
+check('R30 根因形态：旧版把 browseBase 重置到授权根后，往上层的目标越级',
+  // 旧版 current=授权根 → target=授权根父级；用户实际目录的直接父级是授权根本身
+  upLevelOf(R30_DEEP) === R30_PICK_BASE &&
+  upLevelOf(R30_PICK_BASE) !== R30_PICK_BASE, true);
+
+console.log('--- 第三十轮 ②：restoreBrowseLevelOf 层级裁决 ---');
+check('R30 裁决：持久化深层（授权根之子）被采纳',
+  restoreBrowseLevelOf(R30_DEEP, R30_PICK), R30_DEEP);
+check('R30 裁决：与授权根同层的持久化值被采纳',
+  restoreBrowseLevelOf(R30_PICK_BASE, R30_PICK), R30_PICK_BASE);
+check('R30 裁决：更深层（孙级）也被采纳',
+  restoreBrowseLevelOf(R30_DEEP + '/更深一层', R30_PICK), R30_DEEP + '/更深一层');
+check('R30 裁决：授权根之外的持久化值被拒绝（回退授权根）',
+  restoreBrowseLevelOf('/' + R30_HOST + '/别的目录/2026', R30_PICK), R30_PICK_BASE);
+check('R30 裁决：授权根之上的持久化值被拒绝（in-app 清单层不冒充浏览层）',
+  restoreBrowseLevelOf(upLevelOf(R30_PICK_BASE), R30_PICK), R30_PICK_BASE);
+check('R30 裁决：空持久化回退授权根（老数据 / 首次安装零回归）',
+  restoreBrowseLevelOf('', R30_PICK), R30_PICK_BASE);
+check('R30 裁决：垃圾持久化回退授权根',
+  restoreBrowseLevelOf('not a path', R30_PICK), R30_PICK_BASE);
+check('R30 裁决：授权根解析不出层级时维持旧语义（返回空，调用方早退）',
+  restoreBrowseLevelOf(R30_DEEP, ''), '');
+check('R30 裁决：scheme 授权形态的深层持久化同样采纳（形态差异被抹平）',
+  restoreBrowseLevelOf('file://' + R30_HOST + '/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026/编号202618 模特 奶茶',
+    'file://' + R30_HOST + '/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026'),
+  '/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026/编号202618 模特 奶茶');
+
+console.log('--- 第三十轮 ③：isSameOrUnderLevelOf / rawBrowseFormOf ---');
+check('R30 从属：自身 / 子级 true，父级 / 旁支 false',
+  isSameOrUnderLevelOf(R30_PICK, R30_PICK) &&
+  isSameOrUnderLevelOf(R30_PICK, R30_DEEP) &&
+  !isSameOrUnderLevelOf(R30_DEEP, R30_PICK) &&
+  !isSameOrUnderLevelOf(R30_PICK, '/' + R30_HOST + '/别的/2026'), true);
+check('R30 从属：scheme 与挂载形态互通',
+  isSameOrUnderLevelOf(R30_PICK, R30_DEEP + '/x/y'), true);
+check('R30 形态：同层时原样返回授权根原始 URI',
+  rawBrowseFormOf(R30_PICK, R30_PICK_BASE), R30_PICK);
+check('R30 形态：深层拼出同 scheme / 同编码习惯 URI（未编码授权根）',
+  rawBrowseFormOf(R30_PICK, R30_DEEP),
+  R30_PICK + '/编号202618 模特 奶茶');
+check('R30 形态：百分号编码授权根拼出编码深层 URI',
+  rawBrowseFormOf(
+    'file://docs/storage/userExternal/' + R30_HOST + '/' +
+    encodeURIComponent('图片档案') + '/Collection/4%20%E4%B8%AD/' +
+    encodeURIComponent('[青丘图鉴] Nine tail Photography') + '/2026',
+    R30_DEEP).includes(encodeURIComponent('编号202618 模特 奶茶')), true);
+check('R30 形态：授权根之外的层拼不出（空串，绝不凭空造路径）',
+  rawBrowseFormOf(R30_PICK, '/' + R30_HOST + '/别的/2026'), '');
+check('R30 形态：空入参返回空串',
+  rawBrowseFormOf('', R30_DEEP) === '' && rawBrowseFormOf(R30_PICK, '') === '', true);
+
+console.log('--- 第三十轮 ④：多层清单快照编解码（upcache） ---');
+const R30_LEVELS = [
+  { path: '/storage/userExternal/' + R30_HOST + '/图片档案', names: ['Collection', '照片'], kinds: [2, 2] },
+  { path: '/storage/userExternal/' + R30_HOST + '/图片档案/Collection', names: ['4 中', '3 中'], kinds: [2, 2] },
+  { path: R30_PICK_BASE, names: ['编号202618 模特 奶茶', '编号202617 模特 咖啡', 'Vol.2'], kinds: [2, 2, 2] },
+];
+const R30_ENC = encodeUpCacheText(R30_LEVELS, 12, 64, 12000);
+const R30_DEC = decodeUpCacheText(R30_ENC, 12, 64);
+check('R30 编解码：往返层数一致', R30_DEC.length, 3);
+check('R30 编解码：每层条目名与种类逐一致',
+  R30_DEC[2].names.join('|') === '编号202618 模特 奶茶|编号202617 模特 咖啡|Vol.2' &&
+  R30_DEC[2].kinds.join(',') === '2,2,2' &&
+  R30_DEC[0].names.join('|') === 'Collection|照片', true);
+check('R30 编解码：层键用规范形态（scheme / 挂载前缀抹平）',
+  canonicalLevelKeyOf(R30_DEC[2].path) ===
+    '/' + R30_HOST + '/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026', true);
+const SEP30 = String.fromCharCode(1);
+const KSEP30 = String.fromCharCode(2);
+const R30_DIRTY = [
+  R30_PICK_BASE + SEP30 + '编号202618 模特 奶茶' + KSEP30 + '2' + SEP30 +
+    '— 上层清单（APP 内）· 点目录名进入 · ul1 —' + KSEP30 + '2' + SEP30 + '..' + KSEP30 + '2',
+  '',
+  R30_PICK_BASE + SEP30 + '编号202617 模特 咖啡' + KSEP30 + 'bad',
+].join('\n');
+const R30_DIRTY_DEC = decodeUpCacheText(R30_DIRTY, 12, 64);
+check('R30 解码容错：伪说明行与 .. 被剔除',
+  R30_DIRTY_DEC.length === 1 &&
+  R30_DIRTY_DEC[0].names.join('|') === '编号202617 模特 咖啡', true);
+check('R30 解码容错：坏 kind 按 -1（未知）处理',
+  R30_DIRTY_DEC[0].kinds[0], -1);
+check('R30 解码容错：同层重复保留最后一份',
+  R30_DIRTY_DEC.length === 1, true);
+check('R30 容量：层数封顶（20 层只留尾部 12）',
+  decodeUpCacheText(encodeUpCacheText(
+    Array.from({ length: 20 }, (_, i) => ({ path: '/vol/a' + i, names: ['n'], kinds: [2] })),
+    12, 64, 12000), 12, 64).length, 12);
+check('R30 容量：总长封顶（超长文本截断不抛异常）',
+  encodeUpCacheText(R30_LEVELS.concat(Array.from({ length: 200 },
+    (_, i) => ({ path: '/vol/长目录' + i, names: ['子目录名字很长很长很长' + i], kinds: [2] }))),
+    12, 64, 300).length <= 600, true);
+check('R30 容量：每层条目封顶',
+  decodeUpCacheText(encodeUpCacheText(
+    [{ path: '/vol/x', names: Array.from({ length: 100 }, (_, i) => 'n' + i), kinds: [] }],
+    12, 64, 12000), 12, 64)[0].names.length, 64);
+check('R30 空输入：空文本 / 空层数组返回空',
+  encodeUpCacheText([], 12, 64, 12000) === '' &&
+  decodeUpCacheText('', 12, 64).length === 0, true);
+
+console.log('--- 第三十轮 ⑤：Index.ets 静态接线 ---');
+check('R30 接线：新增两个持久化 key 与三个容量常量',
+  /const POS_KEY_BROWSE: string = 'lastBrowseBase';/.test(INDEX) &&
+  /const POS_KEY_UPCACHE: string = 'lastUpCache';/.test(INDEX) &&
+  /const UP_CACHE_SAVE_LEVELS: number = 12;/.test(INDEX) &&
+  /const UP_CACHE_SAVE_NAMES: number = 64;/.test(INDEX) &&
+  /const UP_CACHE_SAVE_CHARS: number = 12000;/.test(INDEX), true);
+check('R30 接线：readLastPos 读回两个新 key 并 typeof 收窄',
+  /await p\.get\(POS_KEY_BROWSE, ''\)/.test(INDEX) &&
+  /await p\.get\(POS_KEY_UPCACHE, ''\)/.test(INDEX) &&
+  /this\.savedBrowseBase = typeof rawBrowse === 'string' \? rawBrowse : '';/.test(INDEX) &&
+  /this\.savedUpCacheRaw = typeof rawUpCache === 'string' \? rawUpCache : '';/.test(INDEX), true);
+check('R30 接线：flushPos 异步落盘两个新 key（快照仅脏时写）',
+  /await store\.put\(POS_KEY_BROWSE, this\.browseBase\);/.test(INDEX) &&
+  /if \(this\.upCacheDirty\) \{\s*\n\s*await store\.put\(POS_KEY_UPCACHE, this\.encodeUpCacheForSave\(\)\);/.test(INDEX), true);
+check('R30 接线：flushPosSync 同步补写（切后台 / ESC 退出毫秒级必达）',
+  /store\.putSync\(POS_KEY_BROWSE, this\.browseBase\);/.test(INDEX) &&
+  /if \(this\.upCacheDirty\) \{\s*\n\s*store\.putSync\(POS_KEY_UPCACHE, this\.encodeUpCacheForSave\(\)\);/.test(INDEX), true);
+check('R30 接线：cacheUpDirSnapshot 置脏标记',
+  /this\.upCacheDirty = true;/.test(INDEX), true);
+check('R30 接线：encodeUpCacheForSave 只存 path / names / kinds（不存 uris）',
+  /private encodeUpCacheForSave\(\): string \{[\s\S]{0,400}encodeUpCacheText\(levels, UP_CACHE_SAVE_LEVELS, UP_CACHE_SAVE_NAMES,/.test(INDEX) &&
+  /levels\.push\(\{ path: s\.path, names: s\.names, kinds: s\.kinds \}\);/.test(INDEX), true);
+check('R30 接线：restoreUpCache 解码回填 upDirCache（uris 留空）',
+  /private restoreUpCache\(base: string\): number \{/.test(INDEX) &&
+  /decodeUpCacheText\(this\.savedUpCacheRaw,/.test(INDEX) &&
+  /this\.upDirCache\.push\(\{ path: lv\.path, names: lv\.names, uris: \[\], kinds: lv\.kinds \}\);/.test(INDEX), true);
+check('R30 接线：restoreUpCache 层过滤（授权根子树 ∪ 恢复层级祖先）',
+  /isSameOrUnderLevelOf\(this\.savedDirUri, lv\.path\) \|\|/.test(INDEX) &&
+  /isSameOrUnderLevelOf\(lv\.path, base\);/.test(INDEX), true);
+check('R30 接线：restoreUpCache 同步旧单槽（历史链路仍有值）',
+  /this\.lastUpPath = last\.path;/.test(INDEX) &&
+  /this\.lastUpNames = last\.names;/.test(INDEX), true);
+check('R30 接线：restoreBrowseContext 诊断串带 deep / uc 字段',
+  /\(deep \? ' \| deep' : ''\) \+/.test(INDEX) &&
+  /' \| uc=' \+ upLevels \+/.test(INDEX), true);
+check('R30 接线：恢复期仍然零 IO（restoreBrowseContext / restoreUpCache 不新增任何文件访问）',
+  /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|startDirPoll|DocumentViewPicker|PhotoViewPicker/.test(UPC_CODE), false);
+
+console.log('--- 第三十轮 ⑥：常规导航零回归 ---');
+check('R30 零回归：冷启动 picker 选目录链路未动（persistFolderUri / openFolder）',
+  /this\.persistFolderUri\(uris\[0\]\);/.test(INDEX) &&
+  /this\.openFolder\(uris\[0\], false\);/.test(INDEX), true);
+check('R30 零回归：browseUp 严格层级链 / 父级真值校验 / 候选同层过滤未动',
+  /isStrictParentOf\(target, current\)/.test(UP_FN) &&
+  /upParentCandidates\(current, rawUri, '', upRoots\)/.test(UP_FN), true);
+check('R30 零回归：逐层进入（onRowTap → openFolder）与自动重扫链路未动',
+  (INDEX.match(/this\.openFolder\(/g) || []).length >= 5, true);
+check('R30 零回归：upDirCache 上限 / 单槽兼容 / 伪行过滤未动',
+  /const UP_DIR_CACHE_MAX: number = \d+;/.test(INDEX) &&
+  /mergeUpListNames\(\[old\.names, names\]\)/.test(INDEX) &&
+  /isUpListPseudoName\(rn\.name\)/.test(INDEX), true);
+check('R30 零回归：快照 / 单张两条恢复路径仍在 setItems 后回填（各 1 次）',
+  (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 2, true);
+check('R30 零回归：R27 真异步 / R26 翻页 / R25 诊断开关 / 版本守卫全未动',
+  /private readGuarded\(/.test(INDEX) &&
+  /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX) &&
+  /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R30';/.test(INDEX), true);
+console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机重启验证。');
+console.log('  ⚠️ 真机步骤：装 R30 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

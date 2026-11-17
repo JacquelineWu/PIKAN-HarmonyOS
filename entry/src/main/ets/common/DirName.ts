@@ -862,3 +862,212 @@ export function rootFormParentOf(rootUri: string, target: string): string {
   }
   return s;
 }
+
+// --------------------------------------------------------------------
+// 第三十轮：重启后「往上层」的层级与内容恢复（2026-11-18，R30）
+//
+// 实机复现：退出 APP 前在 picker 授权根的**子目录**里看图（例如
+// `…/2026/编号202618 模特 奶茶`），重新打开后点「返回上层」—— 显示的
+// 层级与内容都不对。根因：browseBase（用户实际所在的浏览层级）从不持久化，
+// restoreBrowseContext 只用 savedDirUri（picker 授权根）重建层级。于是：
+//   ① 层级跳级：返回上层从授权根（2026）起算，直接跳到它的父级
+//      （Nine tail Photography），越过了用户实际所在目录的直接父级（2026）；
+//   ② 内容缺失：那个父级没有逐 URI 授权，openFolder 全部失败降级成
+//      APP 内清单；而重启后 upDirCache / lastUpNames 全空（纯内存态），
+//      聚合结果只剩「恒列当前目录」一项。
+// 修复：把「实际浏览层级」与「多层清单快照」一并持久化，恢复时校验后回填。
+// 下面四个纯函数分别负责：层级从属校验、恢复层级裁决、授权同形态深层 URI、
+// 快照文本编解码。全部零 IO，可被 node --experimental-strip-types 直接回归。
+// --------------------------------------------------------------------
+
+/** path 的层级是否等于 anchor、或在 anchor 之下（任意深度）。
+ *  用规范层级键比较，NAS 的 scheme / 挂载前缀 / 百分号编码形态差异已被抹平。 */
+export function isSameOrUnderLevelOf(anchor: string, path: string): boolean {
+  const a: string = canonicalLevelKeyOf(anchor);
+  const p: string = canonicalLevelKeyOf(path);
+  if (a.length === 0 || p.length === 0) {
+    return false;
+  }
+  return p === a || p.indexOf(a + '/') === 0;
+}
+
+/** 重启恢复时的浏览层级裁决：优先采用持久化的「实际浏览层级」，
+ *  但仅当它与 picker 授权根同层、或位于授权根之下时才可信（防止老数据 /
+ *  换过授权根之后的脏层级混进来）；否则回退 picker 根（R29 及之前的语义）。
+ *  picker 根解析不出层级时同样回退 —— 与旧版 restoreBrowseContext 的
+ *  早退条件保持一致，绝不因为 persisted 看起来可用就放宽闸门。 */
+export function restoreBrowseLevelOf(persisted: string, pickerUri: string): string {
+  const pick: string = upContextBaseOf(pickerUri);
+  if (persisted.length === 0) {
+    return pick;
+  }
+  const pb: string = upContextBaseOf(persisted);
+  if (pb.length === 0 || pick.length === 0) {
+    return pick;
+  }
+  return isSameOrUnderLevelOf(pick, pb) ? pb : pick;
+}
+
+/** 用 picker 原始授权 URI 的**同形态**拼出更深层目录的 URI。
+ *
+ *  逐 URI 授权按 URI 字符串发放：browseDir 只有保持与授权相同的
+ *  scheme / 编码习惯，upParentCandidates ① 剥一层得到的父 URI 才最可能
+ *  被 fs.listFile 认可（这正是 R29 extraRoots 同形态思路的深层版）。
+ *  · base 与 picker 根同层 → 原样返回 pickerRaw；
+ *  · base 在 picker 根之下 → 逐段追加（pickerRaw 含 % 时逐段编码，保持编码习惯）；
+ *  · base 不在 picker 根之下 / 解析不出层级 → 空串，绝不凭空造路径。 */
+export function rawBrowseFormOf(pickerRaw: string, base: string): string {
+  const raw: string = stripTrailingSlash(pickerRaw);
+  if (raw.length === 0 || base.length === 0) {
+    return '';
+  }
+  const rawHier: string = stripTrailingSlash(hierPathOf(raw));
+  const b: string = stripTrailingSlash(hierPathOf(base));
+  if (rawHier.length === 0 || b.length === 0) {
+    return '';
+  }
+  if (b === rawHier) {
+    return raw;
+  }
+  if (b.indexOf(rawHier + '/') !== 0) {
+    return '';
+  }
+  const suffix: string = b.substring(rawHier.length + 1);
+  const parts: string[] = suffix.split('/');
+  const encoded: boolean = raw.indexOf('%') >= 0;
+  let out: string = raw;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].length === 0) {
+      continue;
+    }
+    let seg: string = parts[i];
+    if (encoded) {
+      try {
+        seg = encodeURIComponent(seg);
+      } catch (e) {
+        return '';
+      }
+    }
+    out = out + '/' + seg;
+  }
+  return out;
+}
+
+/** 多层目录清单快照的持久化载体。
+ *  只存 path / names / kinds —— uris 在重启后授权形态可能已失效，
+ *  恢复时留空，由调用方按层拼（upListUriOf 本来就有 target + 名字兜底）。 */
+export interface UpCacheLevel {
+  path: string;
+  names: Array<string>;
+  kinds: Array<number>;
+}
+
+/** 行内分隔符（SOH / STX）：文件名里不可能出现，比逗号 / 竖线安全。 */
+const UP_CACHE_SEP: string = '\u0001';
+const UP_CACHE_KIND_SEP: string = '\u0002';
+
+/** 编码多层快照：每层一行 `path(\u0001name\u0002kind)*`，行间换行分隔。
+ *  只收**尾部**（最近浏览的）maxLevels 层；每层只收前 maxNames 条；
+ *  总长度超过 maxChars 就停止追加（preferences 是轻量 KV，绝不塞大 value）。
+ *  编码侧不做伪行过滤 —— 缓存里本来就只有真实条目（R29 已从源头保证）。 */
+export function encodeUpCacheText(levels: Array<UpCacheLevel>,
+  maxLevels: number, maxNames: number, maxChars: number): string {
+  if (levels.length === 0 || maxLevels <= 0 || maxNames <= 0 || maxChars <= 0) {
+    return '';
+  }
+  const start: number = levels.length > maxLevels ? levels.length - maxLevels : 0;
+  const lines: string[] = [];
+  let total: number = 0;
+  for (let i = start; i < levels.length; i++) {
+    const lv: UpCacheLevel = levels[i];
+    const p: string = stripTrailingSlash(lv.path);
+    if (p.length === 0) {
+      continue;
+    }
+    let line: string = p;
+    const cap: number = lv.names.length > maxNames ? maxNames : lv.names.length;
+    for (let j = 0; j < cap; j++) {
+      const nm: string = lv.names[j];
+      if (nm.length === 0) {
+        continue;
+      }
+      const kd: number = j < lv.kinds.length ? lv.kinds[j] : -1;
+      line = line + UP_CACHE_SEP + nm + UP_CACHE_KIND_SEP + kd;
+    }
+    if (line.length > maxChars) {
+      continue;                          // 单行超长（异常脏数据）：整层丢弃
+    }
+    if (lines.length > 0 && total + line.length + 1 > maxChars) {
+      break;                             // 再加就超总长：到此为止
+    }
+    lines.push(line);
+    total = total + line.length + 1;
+  }
+  return lines.join('\n');
+}
+
+/** 解码多层快照并**逐项校验**：path 必须解析得出层级键；条目名剔除伪行
+ *  （空 / `..` / APP 自己的说明行）；kind 解析失败按 -1（未知）处理；
+ *  同层多次出现时保留最后一份；层与条目都按上限截断。
+ *  任何脏数据（分隔符缺失 / 超界下标）都静默跳过，绝不抛出 ——
+ *  这段代码跑在启动恢复链上，容错优先。 */
+export function decodeUpCacheText(text: string,
+  maxLevels: number, maxNames: number): Array<UpCacheLevel> {
+  const out: Array<UpCacheLevel> = [];
+  if (text.length === 0 || maxLevels <= 0 || maxNames <= 0) {
+    return out;
+  }
+  const lines: string[] = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line: string = lines[i];
+    if (line.length === 0) {
+      continue;
+    }
+    const parts: string[] = line.split(UP_CACHE_SEP);
+    if (parts.length < 1) {
+      continue;
+    }
+    const p: string = stripTrailingSlash(parts[0]);
+    if (p.length === 0 || canonicalLevelKeyOf(p).length === 0) {
+      continue;
+    }
+    const names: Array<string> = [];
+    const kinds: Array<number> = [];
+    for (let j = 1; j < parts.length; j++) {
+      const seg: string = parts[j];
+      const k: number = seg.indexOf(UP_CACHE_KIND_SEP);
+      if (k <= 0) {
+        continue;
+      }
+      const nm: string = seg.substring(0, k);
+      const kdRaw: string = seg.substring(k + 1);
+      const kd: number = Number(kdRaw);
+      if (isUpListPseudoName(nm) || names.length >= maxNames) {
+        continue;
+      }
+      names.push(nm);
+      kinds.push(Number.isNaN(kd) ? -1 : kd);
+    }
+    if (names.length === 0) {
+      continue;
+    }
+    // 同层去重：保留最后一份（越靠后越新）。
+    let hit: number = -1;
+    for (let j = 0; j < out.length; j++) {
+      if (sameDirPath(out[j].path, p)) {
+        hit = j;
+        break;
+      }
+    }
+    const lv: UpCacheLevel = { path: p, names: names, kinds: kinds };
+    if (hit >= 0) {
+      out[hit] = lv;
+    } else {
+      out.push(lv);
+    }
+  }
+  if (out.length > maxLevels) {
+    return out.slice(out.length - maxLevels);
+  }
+  return out;
+}

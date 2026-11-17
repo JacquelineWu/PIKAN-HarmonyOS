@@ -60,7 +60,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
   realPathOf, hierPathOf, textWidthVp, listWidthForNames,
   isStrictParentOf, sameEntryNames,
-  isUpListPseudoName, mergeUpListNames, rootFormParentOf } from '../common/DirName';
+  isUpListPseudoName, mergeUpListNames, rootFormParentOf,
+  isSameOrUnderLevelOf, restoreBrowseLevelOf, rawBrowseFormOf,
+  UpCacheLevel, encodeUpCacheText, decodeUpCacheText } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -122,7 +124,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R29';
+const ESC_BUILD_TAG: string = 'R30';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -888,6 +890,18 @@ const POS_KEY_DIR: string = 'lastDirUri';
  *  重开时若与本次要恢复的目录吻合，说明又是同一个死路径 —— 零 IO、零等待直接放弃。
  *  用户重新选到目录后立即清空，绝不误伤正常恢复。 */
 const POS_KEY_DEAD: string = 'deadDirUri';
+/** 第三十轮：上次退出时的**实际浏览层级**（browseBase 的持久化形态）。
+ *  只有当它与 lastDirUri（picker 授权根）同层或在其之下时才会被采纳 ——
+ *  重启后「往上层」从用户真正所在的目录起算，而不是从授权根跳级。 */
+const POS_KEY_BROWSE: string = 'lastBrowseBase';
+/** 第三十轮：多层目录清单快照（R29 upDirCache 的持久化形态，行式文本）。
+ *  重启后父目录仍列不出来时，APP 内清单能还原上次见过的全部兄弟目录。 */
+const POS_KEY_UPCACHE: string = 'lastUpCache';
+/** 快照持久化封顶：preferences 是轻量 KV，层 / 条目 / 总长都设上限，
+ *  绝不把启动读 prefs 再拖出一次 appfreeze（历史教训：600 条 uri 就够卡 8 秒）。 */
+const UP_CACHE_SAVE_LEVELS: number = 12;
+const UP_CACHE_SAVE_NAMES: number = 64;
+const UP_CACHE_SAVE_CHARS: number = 12000;
 /** 写盘防抖间隔：滚轮连翻时没必要每张都落盘，停手后再存 */
 const POS_SAVE_MS: number = 500;
 /** 启动预热推迟多少毫秒再开始解码。首帧渲染 + 窗口初始化那几十毫秒最金贵，
@@ -2055,6 +2069,14 @@ struct Index {
   // ---- 目录 URI 持久授权（见 PersistPlan.ts）----
   /** 启动时从 preferences 读回的上次目录 URI；空串 = 旧数据 / 首次安装。 */
   private savedDirUri: string = '';
+  /** 第三十轮：上次退出时持久化的**实际浏览层级**原文（恢复时经
+   *  restoreBrowseLevelOf 校验：与授权根同层或在其之下才采纳）。 */
+  private savedBrowseBase: string = '';
+  /** 第三十轮：持久化的多层清单快照原文（行式文本，恢复时解码 + 校验）。 */
+  private savedUpCacheRaw: string = '';
+  /** 第三十轮：upDirCache 有更新、尚未写进 preferences。
+   *  flushPosSync（切后台 / 退出）只在脏时才同步写这个 key，毫秒级必达。 */
+  private upCacheDirty: boolean = false;
   /** activate 竞速是否已收口：超时定时器与 activate 回调谁先到都只生效一次。 */
   private persistSettled: boolean = false;
   private persistTimer: number = -1;
@@ -2263,11 +2285,17 @@ struct Index {
       const rawOk = await p.get(POS_KEY_OK, '');
       const rawDir = await p.get(POS_KEY_DIR, '');
       const rawDead = await p.get(POS_KEY_DEAD, '');
+      // 第三十轮：实际浏览层级 + 多层清单快照。都是小 key（快照已封顶 12KB），
+      // 与上面几个一起在首帧之后异步读，绝不碰大快照、绝不重扫。
+      const rawBrowse = await p.get(POS_KEY_BROWSE, '');
+      const rawUpCache = await p.get(POS_KEY_UPCACHE, '');
       const idx: number = typeof rawIdx === 'number' ? rawIdx : -1;
       const uri: string = typeof rawUri === 'string' ? rawUri : '';
       const ok: string = typeof rawOk === 'string' ? rawOk : '';
       // 必须在 scheduleShowLast() / 可能的提前 return 之前读到：恢复前要先激活它。
       this.savedDirUri = typeof rawDir === 'string' ? rawDir : '';
+      this.savedBrowseBase = typeof rawBrowse === 'string' ? rawBrowse : '';
+      this.savedUpCacheRaw = typeof rawUpCache === 'string' ? rawUpCache : '';
       this.okUri = ok;
       this.deadMemory = typeof rawDead === 'string' ? rawDead : '';
       // 有「上次会话」记忆才给恢复链挂 3 秒看门狗；首次启动没有任何记忆，绝不弹选择器。
@@ -2421,24 +2449,76 @@ struct Index {
     if (!restoreUpEnabled(this.restoreMode, this.savedDirUri)) {
       return;
     }
-    const base: string = upContextBaseOf(this.savedDirUri);
+    // 第三十轮：优先采用持久化的「实际浏览层级」。退出前用户可能在授权根的
+    // 子目录里看图（browseBase 比授权根深）；旧版一律重置到授权根，重开点
+    // 「往上层」就会直接跳到授权根的父级 —— 越过实际目录的直接父级，
+    // 而那个父级又没有授权，只能降级 APP 内清单且缓存全空（层级 + 内容双错）。
+    // restoreBrowseLevelOf 校验持久化层级与授权根同层或在其之下，脏值回退授权根。
+    const base: string = restoreBrowseLevelOf(this.savedBrowseBase, this.savedDirUri);
     if (base.length === 0) {
       return;
     }
+    const pickBase: string = upContextBaseOf(this.savedDirUri);
+    const deep: boolean = pickBase.length > 0 && !sameDirPath(pickBase, base);
     const raw: string = upContextRawOf(this.savedDirUri);
-    // 三个锚点同层同源：base 是真实路径（层级运算 / statSync 认得），
-    // raw 是 picker 原始 URI（逐 URI 授权只认带 scheme 这个形态）。
+    // browseDir 用与授权同 scheme / 同编码习惯的**深层**形态（rawBrowseFormOf）：
+    // browseUp 的 upParentCandidates ① 剥一层得到的父 URI 命中率最高 ——
+    // 退出前在 `…/2026/编号202618` 的用户，重开点「往上层」时父候选里就有
+    // 授权形态的 `…/2026`，listFile 成功即列出该层**全部**子目录。
+    // 拼不出（授权根无 scheme / 层级对不上）就退纯路径，与旧版一致。
+    const rawDeep: string = raw.length > 0 ? rawBrowseFormOf(raw, base) : '';
     this.browseBase = base;
-    this.browseDir = raw.length > 0 ? raw : base;
-    this.pickRootUri = this.browseDir;
+    this.browseDir = rawDeep.length > 0 ? rawDeep : base;
+    // pickRootUri 恒为授权根的原始形态（browseUp 的 extraRoots 用它推同形态父 URI）。
+    this.pickRootUri = raw.length > 0 ? raw : base;
     this.titlePath = base;
     this.canGoUp = canGoUpFrom(base);
+    // 第三十轮：多层清单快照解码回内存（纯字符串零 IO），重开后的 APP 内
+    // 上层清单不再是「只剩当前目录一项」。
+    const upLevels: number = this.restoreUpCache(base);
     this.diagLine = 'up CTX | ' + UP_CTX_TAG + ' | ' +
       (this.restoreMode === RESTORE_READONLY ? 'ro' : 'full') +
-      ' | L' + dirLevelOf(base) + ' | ' + ellipsizeMiddle(base, 30) +
+      (deep ? ' | deep' : '') +
+      ' | L' + dirLevelOf(base) + ' | uc=' + upLevels +
+      ' | ' + ellipsizeMiddle(base, 30) +
       ' | v' + APP_VERSION;
-    hilog.info(DOMAIN, TAG, 'restore: up context rebuilt L%{public}d base=%{public}s',
-      dirLevelOf(base), base);
+    hilog.info(DOMAIN, TAG, 'restore: up context rebuilt L%{public}d deep=%{public}d uc=%{public}d base=%{public}s',
+      dirLevelOf(base), deep ? 1 : 0, upLevels, base);
+  }
+
+  /** 第三十轮：把持久化的多层清单快照解码回 upDirCache（纯字符串，零 IO）。
+   *  只保留「与授权根同层或在其之下」或「恢复层级的祖先」的层 ——
+   *  换过授权根之后的旧层直接丢弃；upListNamesOf 按 target 层键查询，
+   *  留下的层正是「往上层」会逐级走过的那些。
+   *  解码失败 / 空文本静默清空，绝不影响恢复链（容错优先）。
+   *  返回还原的层数（诊断串用）。 */
+  private restoreUpCache(base: string): number {
+    this.upDirCache = [];
+    this.lastUpPath = '';
+    this.lastUpNames = [];
+    if (this.savedUpCacheRaw.length === 0) {
+      return 0;
+    }
+    const levels: Array<UpCacheLevel> = decodeUpCacheText(this.savedUpCacheRaw,
+      UP_CACHE_SAVE_LEVELS, UP_CACHE_SAVE_NAMES);
+    for (let i = 0; i < levels.length; i++) {
+      const lv: UpCacheLevel = levels[i];
+      const inTree: boolean = isSameOrUnderLevelOf(this.savedDirUri, lv.path) ||
+        isSameOrUnderLevelOf(lv.path, base);
+      if (!inTree) {
+        continue;
+      }
+      // uris 不持久化（重启后授权形态可能失效）：留空，upListUriOf 按 target 拼兜底。
+      this.upDirCache.push({ path: lv.path, names: lv.names, uris: [], kinds: lv.kinds });
+    }
+    if (this.upDirCache.length > 0) {
+      // 旧单槽指向最深层快照，历史链路（诊断 / cached 判定）保持有值。
+      const last: UpDirSnapshot = this.upDirCache[this.upDirCache.length - 1];
+      this.lastUpPath = last.path;
+      this.lastUpNames = last.names;
+    }
+    this.savedUpCacheRaw = '';
+    return this.upDirCache.length;
   }
 
   // ------------------------------------------------------------------------
@@ -3166,6 +3246,13 @@ struct Index {
       await store.put(POS_KEY_SRC, p.src);
       await store.put(POS_KEY_OK, this.okUri); // 下次启动预热的那一张
       await store.put(POS_KEY_DIR, this.savedDirUri); // 下次启动 activate 的目录授权根
+      // 第三十轮：实际浏览层级（小 key，恒写；空串清掉脏值）+ 多层清单快照
+      // （只在有更新时写，避免每次切图防抖都重写一份封顶 12KB 的文本）。
+      await store.put(POS_KEY_BROWSE, this.browseBase);
+      if (this.upCacheDirty) {
+        await store.put(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
+        this.upCacheDirty = false;
+      }
       // 换了图片源才需要重写快照（切图时列表没变，不必每次都写这几千个 uri）
       if (this.snapDirty) {
         this.snapDirty = false;
@@ -3208,6 +3295,12 @@ struct Index {
       store.putSync(POS_KEY_SRC, p.src);
       store.putSync(POS_KEY_OK, this.okUri);
       store.putSync(POS_KEY_DIR, this.savedDirUri); // 切后台也补一次，进程被杀不丢授权根
+      // 第三十轮：退出 / 切后台同步补写（毫秒级必达）。快照只在脏时写。
+      store.putSync(POS_KEY_BROWSE, this.browseBase);
+      if (this.upCacheDirty) {
+        store.putSync(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
+        this.upCacheDirty = false;
+      }
       store.flushSync();
       this.posPending = undefined;
       hilog.info(DOMAIN, TAG, 'flushPosSync: idx=%{public}d uri=%{public}s',
@@ -6331,6 +6424,20 @@ struct Index {
     // 旧单槽缓存保留（历史链路仍读它），但同样只装真实条目名。
     this.lastUpPath = keyPath;
     this.lastUpNames = names;
+    // 第三十轮：快照有更新，标记待持久化（flushPos / flushPosSync 落盘后清零）。
+    this.upCacheDirty = true;
+  }
+
+  /** 第三十轮：把 upDirCache 序列化成行式文本（容量封顶，见 UP_CACHE_SAVE_*）。
+   *  只存 path / names / kinds；uris 重启后授权形态可能失效，不持久化。 */
+  private encodeUpCacheForSave(): string {
+    const levels: Array<UpCacheLevel> = [];
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      const s: UpDirSnapshot = this.upDirCache[i];
+      levels.push({ path: s.path, names: s.names, kinds: s.kinds });
+    }
+    return encodeUpCacheText(levels, UP_CACHE_SAVE_LEVELS, UP_CACHE_SAVE_NAMES,
+      UP_CACHE_SAVE_CHARS);
   }
 
   /** 第二十九轮：聚合目标父层的**全部**真实子目录名。
