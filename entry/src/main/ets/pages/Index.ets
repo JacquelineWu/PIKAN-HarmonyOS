@@ -65,7 +65,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   UpCacheLevel, encodeUpCacheText, decodeUpCacheText,
   prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache,
   FOLDER_PICK_OK, FOLDER_PICK_UNREADABLE,
-  folderPickStartOf, pickedFolderKind, folderPickHint } from '../common/DirName';
+  folderPickStartOf, pickedFolderKind, folderPickHint,
+  UpParentIndex, CACHED_UP_GO, CACHED_UP_TOP, CACHED_UP_MISS,
+  cachedUpIndexOf, cachedUpStateOf, cachedParentOf, cachedUpLandsAt } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -127,7 +129,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R32';
+const ESC_BUILD_TAG: string = 'R33';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1793,6 +1795,10 @@ struct Index {
    *  父层那份含全部兄弟目录的清单会丢 —— 上层清单于是只剩「恒列当前目录」一项。
    *  这里按层并存，sameDirPath 命中目标层的**全部**快照一起聚合，杜绝遗漏。 */
   private upDirCache: Array<UpDirSnapshot> = [];
+  /** 第三十三轮：初始化时从缓存目录结构预建的父子逻辑层级索引。
+   *  触发「往上层」时只查不建，绝不重新按路径字符串推父级。 */
+  private upParentIndex: UpParentIndex = { edges: [], keys: [], minLevel: -1 };
+  private upParentBuilt: boolean = false;
   /** 左栏当前是不是「APP 内自建清单态」。为真时点目录行绝不弹「目录内多选」兜底选择器。 */
   private inAppUpList: boolean = false;
   private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
@@ -2536,6 +2542,9 @@ struct Index {
     this.lastUpPath = '';
     this.lastUpNames = [];
     if (this.savedUpCacheRaw.length === 0) {
+      // 第三十三轮：空缓存也是一个确定的「初始化结果」—— 预建成空索引，
+      // 触发时据此判「缓存缺父级信息」并保持当前目录不变，不落到路径推导。
+      this.rebuildUpParentIndex();
       return 0;
     }
     // 第三十一轮：解码的是外部持久化数据（可能残留 R30 的坏文本），整体兜底，
@@ -2567,7 +2576,23 @@ struct Index {
       hilog.warn(DOMAIN, TAG, 'restore up cache failed (ignored): %{public}s', JSON.stringify(e));
     }
     this.savedUpCacheRaw = '';
+    // 第三十三轮：初始化时预先检索已还原的缓存目录结构，建好父子逻辑层级。
+    this.rebuildUpParentIndex();
     return this.upDirCache.length;
+  }
+
+  /** 第三十三轮：预检索缓存目录结构 → 预建父子逻辑层级索引。
+   *  纯字符串、零 IO；只在初始化 / 缓存结构变化时跑一次，触发「往上层」时只查不建。 */
+  private rebuildUpParentIndex(): void {
+    const levels: Array<UpCacheLevel> = [];
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      const s: UpDirSnapshot = this.upDirCache[i];
+      levels.push({ path: s.path, names: s.names, kinds: s.kinds });
+    }
+    this.upParentIndex = cachedUpIndexOf(levels);
+    this.upParentBuilt = true;
+    hilog.info(DOMAIN, TAG, 'up index built: levels=%{public}d keys=%{public}d edges=%{public}d',
+      levels.length, this.upParentIndex.keys.length, this.upParentIndex.edges.length);
   }
 
   // ------------------------------------------------------------------------
@@ -6477,6 +6502,7 @@ struct Index {
       kinds.push(rn.kind ?? ROW_IMAGE);
     }
     if (names.length === 0) {
+      this.rebuildUpParentIndex();
       return;
     }
     let hit: number = -1;
@@ -6527,6 +6553,8 @@ struct Index {
     this.lastUpNames = names;
     // 第三十轮：快照有更新，标记待持久化（flushPos / flushPosSync 落盘后清零）。
     this.upCacheDirty = true;
+    // 第三十三轮：缓存结构变了，立即刷新父子索引（触发时复用的一定是最新结构）。
+    this.rebuildUpParentIndex();
   }
 
   /** 第三十一轮：行式快照文本含 SOH / STX 分隔符（XML 非法控制字符），
@@ -6631,6 +6659,48 @@ struct Index {
     }
     // 唯一的当前路径：目录浏览态就是实测能列的真实路径；非目录浏览态为空。
     const current: string = this.browseBase;
+    // 第三十三轮：初始化时已从缓存目录结构预建父子逻辑层级索引，触发时直接复用，
+    // 不再按路径字符串剥一层推父级。索引未建立时落到下面的既有层级链兜底。
+    if (this.upParentBuilt && current.length > 0) {
+      const cachedState: number = cachedUpStateOf(this.upParentIndex, current);
+      if (cachedState !== CACHED_UP_GO) {
+        // 到顶层 / 缓存缺父级信息：保持当前目录不变，绝不按路径回退误跳。
+        this.canGoUp = false;
+        this.status = cachedState === CACHED_UP_TOP
+          ? '已到缓存目录结构的最上层「' + baseName(current) + '」· 保持当前目录不变'
+          : '缓存中缺少当前目录的父级信息 · 保持当前目录不变';
+        this.diagLine = 'up CACHED | ' + UP_NAV_TAG + ' | st=' +
+          (cachedState === CACHED_UP_TOP ? 'TOP' : 'MISS') +
+          ' | L' + dirLevelOf(current) + ' | cur=' + ellipsizeMiddle(current, 30) +
+          ' | can=0 | v' + APP_VERSION;
+        hilog.info(DOMAIN, TAG, 'browseUp cached no-go, keep dir: state=%{public}d', cachedState);
+        return;
+      }
+      const cachedParent: string = cachedParentOf(this.upParentIndex, current);
+      if (!isStrictParentOf(cachedParent, current)) {
+        this.status = '往上层：缓存父级与当前层级不一致 · 保持当前目录不变';
+        this.diagLine = 'up CACHED BADLEVEL | ' + UP_NAV_TAG + ' | v' + APP_VERSION;
+        return;
+      }
+      const okCached: boolean = await this.openFolder(cachedParent, false, false);
+      if (!okCached) {
+        // 父目录读不出来也保持当前目录不变，绝不退回路径推导兜底。
+        this.status = '往上层：缓存父级目录不可读取 · 保持当前目录不变';
+        this.diagLine = 'up CACHED FAIL | ' + UP_NAV_TAG + ' | v' + APP_VERSION;
+        return;
+      }
+      const consistent: boolean = cachedUpLandsAt(cachedParent, current, this.browseBase);
+      this.pickRootUri = '';
+      this.status = '往上层 → ' + baseName(this.browseBase) +
+        '（L' + dirLevelOf(this.browseBase) + '）· ' +
+        (consistent ? '缓存父子层级一致' : '落地层级与缓存不一致，请重新进入目录');
+      this.diagLine = 'up CACHED OK | ' + UP_NAV_TAG + ' | L' + dirLevelOf(current) +
+        '→L' + dirLevelOf(this.browseBase) + ' | consistent=' + (consistent ? '1' : '0') +
+        ' | v' + APP_VERSION;
+      hilog.info(DOMAIN, TAG, 'browseUp cached parent OK consistent=%{public}d',
+        consistent ? 1 : 0);
+      return;
+    }
     const state: number = upNavStateOf(current);
     const level: number = dirLevelOf(current);
     const root: string = volumeRootOf(current);

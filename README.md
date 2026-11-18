@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R32` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R33` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,98 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十三轮：往上层改走缓存父子逻辑层级（2026-11-19，R33）
+
+**用户规格（原文）**：「触发后应定位到当前目录对应的上一层逻辑目录，而不是简单按路径回退。
+功能需在初始化时预先检索缓存中的目录结构，据此确定父子逻辑层级，并在触发时复用结果；
+连续返回时保持层级一致，到达顶层或缓存中缺少父级信息时保持当前目录不变、不误跳。
+确保回上层后的目录状态与缓存结构中的父子关系一致。」
+
+（下文沿用 APP 里的按钮名「往上层」，即用户说的「回上层」。）
+
+### 现状差距：父级是「触发时按路径剥一层」推出来的
+
+第二十八～三十二轮的 `browseUp()` 已经能处理 NAS 挂载前缀 / URI 形态 / 编码差异，
+但父级真值仍然来自**触发时**的路径推导：
+
+```text
+browseUp() → upLevelOf(current)             // 按路径字符串剥一层
+           → isStrictParentOf(target, current)  // 只校验层级差 1
+           → upParentCandidates(...)        // 生成同层不同形态的候选逐个 openFolder
+```
+
+`upDirCache`（R29 起的多层真实目录清单快照）只被 `showUpListInApp()` 用来出 APP 内
+清单，**完全不参与父子层级判定**。于是有两个不符合本轮规格的地方：
+- 父级不是「缓存结构里当前目录对应的上一层」，而是路径推导出来的；
+- 缓存里根本没有父级信息时，照样会按路径去试父目录（或在列不出时切到 APP 内清单视图），
+  不满足「保持当前目录不变、不误跳」。
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | 新增第三十三轮「缓存父子逻辑层级索引」区块（全纯字符串、零 IO、零抛出）：`UpParentEdge` / `UpParentIndex` 两个接口；`CACHED_UP_MISS / TOP / GO` 三个状态常量；`cachedUpIndexOf(levels)` 一次性预建索引、`cachedParentOf(index, current)` 查直接父级、`cachedUpStateOf(index, current)` 判状态、`cachedUpLandsAt(parent, current, landed)` 校验落地层级与缓存一致 |
+| `entry/src/main/ets/pages/Index.ets` | ① import 新函数 / 常量 / 接口；② `ESC_BUILD_TAG` → `R33`；③ 新增 `upParentIndex` / `upParentBuilt` 字段与 `rebuildUpParentIndex()`；④ **初始化时**在 `restoreUpCache()` 两个出口（空缓存 / 解码后）预检索缓存结构建索引；⑤ **缓存结构变化时**在 `cacheUpDirSnapshot()` 两个出口刷新索引；⑥ `browseUp()` 开头新增缓存索引优先分支：触发时**只查不建**，非 GO 一律保持当前目录不变，GO 用索引父层 `openFolder(..., false, false)`，成功后做落地一致性校验 |；⑦ 原路径层级链完整保留，仅在索引未建立时兜底 |
+| `tests/dirname.test.mjs` | 构建标记 `R32 → R33`、旧包排除补 `R32`、截图 / 真机文案同步；新增第三十三轮 **34 条**断言（纯函数 19 / 源码接线 12 / 零回归 3） |
+| `README.md` | 抬头 `R32 → R33`；新增本章 |
+
+### 关键设计
+
+- **初始化预建、触发复用**：`cachedUpIndexOf()` 只在启动恢复回填 `upDirCache` 之后、
+  以及每次真实列目录写入快照之后跑；`browseUp()` 触发时只调
+  `cachedUpStateOf()` / `cachedParentOf()` 查表，**绝不重新推导路径**。
+- **真值源只有缓存**：一层快照的 `path` 是那一层的真实路径，`names` 是真实子目录名。
+  父子边要求 `isStrictParentOf()`（恰好差一级）且 `dirLevelOf` 差恰好 1；
+  父层 `names` 确实列出该子目录名时优先采纳。**绝不凭空按路径剥一层造父级**。
+  `canonicalLevelKeyOf` 抹平 scheme / NAS 挂载前缀 / `%XX` 编码形态差异，
+  所以 `file://192.168.100.61/…` 与 `/storage/userExternal/192.168.100.61/…`
+  命中同一条边。
+- **连续返回层级一致**：同一 `childKey` 只保留一条边，索引在目录结构没变时恒定，
+  L3→L2→L1→L0 逐级，不会漂、不会越级、不会绕圈。
+- **顶层 / 缺信息不误跳**：`CACHED_UP_TOP`（当前层已是缓存最浅层）与
+  `CACHED_UP_MISS`（缓存里没有当前层或没有父级信息）一律 `canGoUp=false` + 明确提示 +
+  `return`，**不调 `openFolder`、不切 `showUpListInApp`、不弹选择器**，当前目录原封不动。
+  缺中间层的缓存不会建出越级边，因此也不会误跳。
+- **落地一致性**：`cachedUpLandsAt()` 要求「索引父层确实是原 current 的直接父级」且
+  「实际 `browseBase` 与索引父层是同一个规范层级键」，结果写进状态栏与 `up CACHED OK`
+  诊断串；不一致会明确提示「落地层级与缓存不一致，请重新进入目录」，绝不静默。
+- **父目录读不出来也保持不变**：`openFolder(cachedParent, false, false)` 返回 false 时
+  只给「缓存父级目录不可读取 · 保持当前目录不变」，**绝不退回路径推导兜底**。
+- **零回归**：原 `upLevelOf` / `upParentCandidates` / `showUpListInApp` 链、
+  「往上层」按钮恒亮、APP 内清单、R32 FOLDER picker 有效起点与返回真值校验、
+  R31 安全编解码与核心优先落盘、R30 多层快照持久化、版本 `1.0.7` / `versionCode 7`、
+  诊断开关全部未动。新增函数全是纯字符串运算，恢复期仍零 IO。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 15 s 394 ms**（33 tasks：18 executed / 15 up-to-date），`CompileArkTS` **真实执行 8 s 742 ms**、**0 ERROR / 17 WARN**（8 条 `preferences`「Function may throw exceptions」+ 1 条 `READ_IMAGEVIDEO` + 8 条 2in1 系统栏 API，与 R32 基线完全一致，全在本轮**未改动**区域）；签名 HAP **962,004 bytes**（R32 为 949,525 bytes） |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 HAP 内 `ets/modules.abc`（均 **547,212 bytes**，R32 为 539,212 bytes）检出 `R33=1`（构建标记常量，紧邻 `1.0.7` 与各轮 tag）、`R32=0 / R31=0`；四个新纯函数、`rebuildUpParentIndex`、`up index built` 日志、`up CACHED` 诊断串与三类状态文案全部进入产物 |
+| **静态契约 + 纯函数** | **ALL PASS 1539 passed, 0 failed**（1505 → 1539，新增 34 条）；`git diff --check` 通过 |
+| **真机启动验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝。**编译校验 ≠ 真机验证** |
+
+### 覆盖的验证场景（请在装有 `R33` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R33`（仍是 `R32` 及更早说明装的是旧包） |
+| 2 | 逐层进入 `L0 → L1 → L2 → L3`（每层都真实列过目录） | 每层写入缓存快照并刷新父子索引 |
+| 3 | 连续点「往上层」 | **逐级 L3→L2→L1→L0**，每次状态栏显示「缓存父子层级一致」，不越级不绕圈 |
+| 4 | 在 L0 再点「往上层」 | **保持当前目录不变**，提示「已到缓存目录结构的最上层」，`can=0` |
+| 5 | 缓存里没有父级信息时（如直接跳进深层、中间层从未列过）点「往上层」 | **保持当前目录不变**，提示「缓存中缺少当前目录的父级信息」，不按路径误跳 |
+| 6 | 退出 APP 重开（R30/R31 多层快照跨会话还原） | 初始化时即预建索引，第一次点「往上层」就能按缓存父子层级上移 |
+| 7 | NAS 挂载形态与授权 URI 形态混用 | 命中同一条父子边，落地层级仍判定一致 |
+| 8 | 冷启动选目录 / 只读名单态 / 换授权根 / R32 FOLDER picker 选文件夹 | 与 R32 完全一致，零回归 |
+
+> **边界（必须诚实）**：本轮把「缓存结构」提升为往上层父级的**唯一真值源**。
+> 如果缓存里确实没有当前目录的父级信息（直接跳进一个从未逐层经过的深层目录），
+> 按规格会保持当前目录不变并给明确提示 —— 这是为了避免「简单按路径回退」误跳，
+> 属于设计取舍而非故障。此时逐层进入一次（让缓存补齐父子结构），或重新用
+> 「选择文件夹」打开父层，即可恢复逐级上移能力。
+> `upParentBuilt=false`（索引从未建立，如极端早退）时仍走原有路径层级链兜底，
+> 保证按钮不会变成完全没反应。
 
 ## 第三十二轮：启动阶段文件夹选择误报「不存在该名字的文件夹」（2026-11-18，R32）
 

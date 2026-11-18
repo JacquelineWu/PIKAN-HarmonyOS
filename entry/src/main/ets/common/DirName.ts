@@ -1271,3 +1271,147 @@ export function folderPickHint(kind: number): string {
   }
   return '';
 }
+
+// --------------------------------------------------------------------
+// 第三十三轮：缓存父子逻辑层级索引（2026-11-19，R33）
+//
+// 需求：触发「往上层」时定位到**缓存目录结构里**当前目录对应的上一层逻辑目录，
+// 而不是按路径字符串剥一层推父级。初始化时预检索缓存结构、预建父子层级，
+// 触发时直接复用；连续返回逐级一致；到顶层 / 缓存缺父级信息时保持当前目录不变。
+//
+// 真值源只有 upDirCache 的多层真实清单快照（每层 path = 那一层的真实路径，
+// names = 该层真实子目录名）。父子关系用 canonicalLevelKeyOf 抹平 scheme /
+// NAS 挂载前缀 / %XX 编码形态差异，再用 isStrictParentOf 要求「恰好差一级」；
+// 父层 names 里确实列出该子目录名时优先采纳（清单级佐证）。
+// 全是纯字符串运算，零 IO、零抛出，可直接用 Node 回归。
+// --------------------------------------------------------------------
+
+/** 一条缓存父子边：子的规范层级键 → 缓存里真实存在的直接父层路径。 */
+export interface UpParentEdge {
+  childKey: string;
+  parentPath: string;
+  parentKey: string;
+}
+
+/** 初始化时预建、触发时复用的父子逻辑层级索引。 */
+export interface UpParentIndex {
+  edges: Array<UpParentEdge>;
+  keys: Array<string>;
+  minLevel: number;
+}
+
+/** 缓存父子查询结果。 */
+export const CACHED_UP_MISS: number = 0;  // 缓存里没有当前层 / 缺父级信息
+export const CACHED_UP_TOP: number = 1;   // 当前层已是缓存结构的最顶层
+export const CACHED_UP_GO: number = 2;    // 有直接父级，可上移
+
+/** 从缓存目录结构预建父子逻辑层级索引（初始化时调一次）。
+ *  · 只认缓存里真实存在的层，绝不凭空按路径剥一层造父级；
+ *  · 父层必须是子层的严格直接父级且层级恰好差 1；
+ *  · 多个候选时优先取 names 里确实列出了该子目录名的那一层；
+ *  · 同一 childKey 只保留一条边 —— 连续返回时结果恒定，不会漂移。 */
+export function cachedUpIndexOf(levels: Array<UpCacheLevel>): UpParentIndex {
+  const out: UpParentIndex = { edges: [], keys: [], minLevel: -1 };
+  const seen: Set<string> = new Set<string>();
+  for (let i = 0; i < levels.length; i++) {
+    const key: string = canonicalLevelKeyOf(levels[i].path);
+    if (key.length === 0) {
+      continue;
+    }
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.keys.push(key);
+    }
+    const d: number = dirLevelOf(levels[i].path);
+    if (out.minLevel < 0 || d < out.minLevel) {
+      out.minLevel = d;
+    }
+  }
+  for (let i = 0; i < levels.length; i++) {
+    const child: UpCacheLevel = levels[i];
+    const ck: string = canonicalLevelKeyOf(child.path);
+    if (ck.length === 0) {
+      continue;
+    }
+    let exists: boolean = false;
+    for (let e = 0; e < out.edges.length; e++) {
+      if (out.edges[e].childKey === ck) {
+        exists = true;
+        break;
+      }
+    }
+    if (exists) {
+      continue;
+    }
+    const childLevel: number = dirLevelOf(child.path);
+    const childName: string = baseName(ck);
+    let best: number = -1;
+    for (let j = 0; j < levels.length; j++) {
+      if (i === j) {
+        continue;
+      }
+      const parent: UpCacheLevel = levels[j];
+      if (!isStrictParentOf(parent.path, child.path)) {
+        continue;
+      }
+      if (childLevel - dirLevelOf(parent.path) !== 1) {
+        continue;
+      }
+      if (parent.names.indexOf(childName) >= 0) {
+        best = j;
+        break;
+      }
+      if (best < 0) {
+        best = j;
+      }
+    }
+    if (best >= 0) {
+      out.edges.push({ childKey: ck,
+        parentPath: stripTrailingSlash(levels[best].path),
+        parentKey: canonicalLevelKeyOf(levels[best].path) });
+    }
+  }
+  return out;
+}
+
+/** 查当前目录在预建索引里的直接父级；无父级返回空串（绝不推路径）。 */
+export function cachedParentOf(index: UpParentIndex, current: string): string {
+  const key: string = canonicalLevelKeyOf(current);
+  if (key.length === 0) {
+    return '';
+  }
+  for (let i = 0; i < index.edges.length; i++) {
+    if (index.edges[i].childKey === key) {
+      return index.edges[i].parentPath;
+    }
+  }
+  return '';
+}
+
+/** 当前目录在缓存结构里的状态：可上移 / 已到最顶层 / 缺父级信息。
+ *  触发「往上层」时只读这个预建结果，绝不重新推导路径。 */
+export function cachedUpStateOf(index: UpParentIndex, current: string): number {
+  const key: string = canonicalLevelKeyOf(current);
+  if (key.length === 0) {
+    return CACHED_UP_MISS;
+  }
+  if (cachedParentOf(index, current).length > 0) {
+    return CACHED_UP_GO;
+  }
+  if (index.keys.indexOf(key) >= 0 && index.minLevel >= 0 &&
+      dirLevelOf(current) <= index.minLevel) {
+    return CACHED_UP_TOP;
+  }
+  return CACHED_UP_MISS;
+}
+
+/** 上移落地后校验：目标确实是当前目录的直接父级，且实际落到的目录与
+ *  缓存父级是同一个规范层级键 —— 目录状态与缓存父子关系一致。 */
+export function cachedUpLandsAt(parentPath: string, current: string,
+  landed: string): boolean {
+  if (!isStrictParentOf(parentPath, current)) {
+    return false;
+  }
+  const pk: string = canonicalLevelKeyOf(parentPath);
+  return pk.length > 0 && pk === canonicalLevelKeyOf(landed);
+}

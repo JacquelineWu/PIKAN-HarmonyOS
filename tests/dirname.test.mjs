@@ -33,8 +33,8 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
- * 第三十二轮「启动阶段 FOLDER picker 误报「不存在该名字的文件夹」—— 有效起点 + 返回真值校验 /\n *    未选择 / 名字无效 / 确实不存在三类明确提示 / R32 构建标记」、\n * 第三十一轮「R30 回归：退出重开不恢复图片 / 往上层无响应 —— preferences XML 安全编解码 /
- *    核心状态优先落盘 + 增强 key 隔离 / 恢复链隔离 + 坏数据自愈 / R32 构建标记」、
+ * 第三十三轮「往上层改走缓存父子逻辑层级 —— 初始化预建索引 / 触发复用 /\n *    顶层与缺父级保持不变 / 落地层级一致性校验 / R33 构建标记」、\n * 第三十二轮「启动阶段 FOLDER picker 误报「不存在该名字的文件夹」—— 有效起点 + 返回真值校验 /\n *    未选择 / 名字无效 / 确实不存在三类明确提示 / R33 构建标记」、\n * 第三十一轮「R30 回归：退出重开不恢复图片 / 往上层无响应 —— preferences XML 安全编解码 /
+ *    核心状态优先落盘 + 增强 key 隔离 / 恢复链隔离 + 坏数据自愈 / R33 构建标记」、
  * 第二十九轮「上层清单只列 2026 且混入伪目录：多层真实清单快照 / 全子目录聚合 /
  *    授权同形态父 URI / 真实行种类 / R29 构建标记」、
  * 第二十八轮「NAS 往上层错误文件夹清单：挂载前缀卷根判定 / 规范层级键 /
@@ -69,7 +69,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, 
   encodeUpCacheText, decodeUpCacheText,
   prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache,
   FOLDER_PICK_NONE, FOLDER_PICK_INVALID, FOLDER_PICK_OK, FOLDER_PICK_UNREADABLE,
-  pickerStartSafe, folderPickStartOf, pickedFolderUsable, pickedFolderKind, folderPickHint } from '../entry/src/main/ets/common/DirName.ts';
+  pickerStartSafe, folderPickStartOf, pickedFolderUsable, pickedFolderKind, folderPickHint,
+  CACHED_UP_GO, CACHED_UP_TOP, CACHED_UP_MISS,
+  cachedUpIndexOf, cachedUpStateOf, cachedParentOf, cachedUpLandsAt } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -1277,9 +1279,9 @@ check('右下角：正式版只显示缩放百分比；诊断层展开时显示�
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R32 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比恒在右下角；R33 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R32';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R33';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3758,8 +3760,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 诊断层展开时可见 R32 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") &&
+check('③ 诊断层展开时可见 R33 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3785,7 +3787,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R32，否则说明装的是旧包。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R33，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3846,8 +3848,9 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R32 构建标记已升级（R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") &&
+check('④ R33 构建标记已升级（R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
@@ -3875,7 +3878,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：展开诊断层后须出现 R32；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R33；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3943,8 +3946,9 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R32 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") &&
+check('⑤ R33 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
@@ -4018,8 +4022,9 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R32 构建标记且 R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") &&
+check('④ R33 构建标记且 R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
@@ -4069,9 +4074,10 @@ check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
   (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
 
-console.log('--- 第二十五轮 ③：R32 构建标记 + 既有链路零回归 ---');
-check('③ R32 构建标记，R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") &&
+console.log('--- 第二十五轮 ③：R33 构建标记 + 既有链路零回归 ---');
+check('③ R33 构建标记，R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R30';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R27';") === false &&
@@ -4149,10 +4155,10 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
   INDEX_CODE26.split('.autoResize(false)').length - 1 === 3 &&
   INDEX_CODE26.split('.dynamicRangeMode(').length - 1 === 3, true);
 
-console.log('--- 第二十六轮 ④：R32 构建标记 + 既有链路零回归 ---');
-check('④ ESC_BUILD_TAG=R32，R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") &&
-  ['R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+console.log('--- 第二十六轮 ④：R33 构建标记 + 既有链路零回归 ---');
+check('④ ESC_BUILD_TAG=R33，R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") &&
+  ['R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4266,13 +4272,13 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
-check('⑤ R32 构建标记，R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") &&
-  ['R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('⑤ R33 构建标记，R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") &&
+  ['R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
 console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
-console.log('  ⚠️ 真机步骤：装 R32 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
+console.log('  ⚠️ 真机步骤：装 R33 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
 
 // ==================== 第二十八轮：NAS 往上层显示错误文件夹清单（2026-11-16，R28） ====================
 // 用户复现路径：/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026
@@ -4390,9 +4396,9 @@ check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.browseBase = target;/.test(UPLIST_CODE) &&
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
-check('R32 构建标记，R31 及更早旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R32';/.test(INDEX) &&
-  ['R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R33 构建标记，R32 及更早旧标记全清除',
+  /const ESC_BUILD_TAG: string = 'R33';/.test(INDEX) &&
+  ['R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十八轮 ⑥：其它导航 / 历史修复零回归 ---');
@@ -4418,7 +4424,7 @@ check('R29 零回归：ro1 总闸门 / 启动路径零 new Promise 未动',
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   /new Promise|Promise\.race/.test(RESUME_FN) === false, true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R32 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
+console.log('  ⚠️ 真机步骤：装 R33 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
 
 // ==================== 第二十九轮：上层清单只列 2026、且混入伪目录行（2026-11-16，R29） ====================
 // 真机截图 screenshot_20261116_045747（R29 之前的 R28 包）：
@@ -4587,9 +4593,9 @@ check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧�
   /isStrictParentOf\(target, current\)/.test(UP_FN) &&
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
   /this\.pickRootUri = '';/.test(UP_FN), true);
-check('R32 构建标记且 R31 及更早旧包全部可从截图排除',
-  /const ESC_BUILD_TAG: string = 'R32';/.test(INDEX) &&
-  ['R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R33 构建标记且 R32 及更早旧包全部可从截图排除',
+  /const ESC_BUILD_TAG: string = 'R33';/.test(INDEX) &&
+  ['R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十九轮 ⑥：目录结构 / 命名 / 导航行为零回归 ---');
@@ -4614,7 +4620,7 @@ check('R29 零回归：非 NAS 卷根 / 文档 URI / 版本守卫 / R27 真异�
   /private readGuarded\(/.test(INDEX) &&
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R32 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
+console.log('  ⚠️ 真机步骤：装 R33 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
 
 // ==================== 第三十轮：重启后「往上层」层级与内容恢复（2026-11-18，R30） ====================
 // 实机复现：退出前在授权根的子目录（…/2026/编号202618 模特 奶茶）里看图，
@@ -4789,9 +4795,9 @@ check('R30 零回归：R27 真异步 / R26 翻页 / R25 诊断开关 / 版本守
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX) &&
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R32';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R33';/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机重启验证。');
-console.log('  ⚠️ 真机步骤：装 R32 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
+console.log('  ⚠️ 真机步骤：装 R33 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
 
 // ==================== 第三十一轮：R30 回归修复 —— 状态恢复 + 往上层响应（2026-11-18，R31） ====================
 // 回归现象：装 R30 后退出 APP 重开，上次的图片档案不再自动打开；点「往上层」像没反应。
@@ -4846,9 +4852,9 @@ check('R31 端到端：第三层中文条目名逐一致（中文不膨胀、不
 console.log('--- 第三十一轮 ②：Index.ets 静态接线（隔离 / 编码 / 自愈） ---');
 check('R31 接线：DirName import 三个新函数',
   /prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache/.test(INDEX), true);
-check('R32 接线：ESC_BUILD_TAG 升 R32 且源码不再有 R31 定义',
-  /const ESC_BUILD_TAG: string = 'R32';/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R31';/.test(INDEX) === false, true);
+check('R33 接线：ESC_BUILD_TAG 升 R33 且源码不再有 R32 定义',
+  /const ESC_BUILD_TAG: string = 'R33';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R32';/.test(INDEX) === false, true);
 check('R31 接线：readLastPos 主 try 只 await readBrowseExtras（增强 key 不再内联）',
   /await this\.readBrowseExtras\(p\);/.test(INDEX) &&
   /readLastPos\(\): Promise<void> \{[\s\S]{0,2500}await this\.readBrowseExtras\(p\);/.test(INDEX), true);
@@ -4896,7 +4902,7 @@ check('R31 零回归：两条恢复路径仍在 setItems 后回填、版本 1.0.
 check('R31 零回归：恢复期仍零 IO（restoreBrowseContext / restoreUpCache 无文件访问）',
   /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|startDirPoll|DocumentViewPicker|PhotoViewPicker/.test(UPC_CODE), false);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机重启验证；真实 ArkTS 编译是另一类证据。');
-console.log('  ⚠️ 真机步骤：装 R32 包 → 子目录看图 → 退出 APP 重开 → 应自动打开原图片档案；点「往上层」应返回上一层界面。');
+console.log('  ⚠️ 真机步骤：装 R33 包 → 子目录看图 → 退出 APP 重开 → 应自动打开原图片档案；点「往上层」应返回上一层界面。');
 
 // ==================== 第三十二轮：启动阶段 FOLDER picker 误报「不存在该名字的文件夹」 ====================
 console.log('\n--- 第三十二轮 ①：picker 起点 / 返回值纯函数（2026-11-18，R32） ---');
@@ -5006,7 +5012,138 @@ check('R32 零回归：R31 安全编解码 + 核心优先落盘仍在',
   /this\.savedUpCacheRaw = prefsSafeDecode\(/.test(INDEX) &&
   /save browse extras failed \(ignored\)/.test(INDEX), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；「不存在该名字的文件夹」是系统文件管理器的 UI 提示，属系统侧行为。');
-console.log('  ⚠️ 真机步骤：装 R32 包 → 制造 persist auth lost → 自动弹「选择路径」→ 选有效 NAS 目录点「选择」→ 应直接返回并进入目录。');
+console.log('  ⚠️ 真机步骤：装 R33 包 → 制造 persist auth lost → 自动弹「选择路径」→ 选有效 NAS 目录点「选择」→ 应直接返回并进入目录。');
+
+// ==================== 第三十三轮：缓存父子逻辑层级索引（2026-11-19，R33） ====================
+console.log('\n--- 第三十三轮 ①：缓存父子层级索引纯函数 ---');
+const R33_L0 = 'file://192.168.100.61/图片档案';
+const R33_L1 = 'file://192.168.100.61/图片档案/Collection';
+const R33_L2 = 'file://192.168.100.61/图片档案/Collection/4 中';
+const R33_L3 = 'file://192.168.100.61/图片档案/Collection/4 中/[奇丘画面] Nine tail Photography';
+const R33_LEVELS = [
+  { path: R33_L0, names: ['Collection', '2025', '2024'], kinds: [0, 0, 0] },
+  { path: R33_L1, names: ['4 中', 'A', 'B'], kinds: [0, 0, 0] },
+  { path: R33_L2, names: ['[奇丘画面] Nine tail Photography'], kinds: [0] },
+  { path: R33_L3, names: ['IMG_0001.HEIC'], kinds: [1] }
+];
+const R33_IDX = cachedUpIndexOf(R33_LEVELS);
+check('R33 索引：空缓存 → 空索引（keys/edges 空、minLevel=-1）',
+  (() => { const e = cachedUpIndexOf([]); return e.keys.length === 0 &&
+    e.edges.length === 0 && e.minLevel === -1; })(), true);
+check('R33 索引：四层结构预建 4 个层键、3 条父子边、最浅层 L1',
+  R33_IDX.keys.length === 4 && R33_IDX.edges.length === 3 && R33_IDX.minLevel === 1, true);
+check('R33 索引：每条边都指向缓存里真实存在、且恰好差一级的父层',
+  R33_IDX.edges.every(e => R33_IDX.keys.indexOf(e.parentKey) >= 0 &&
+    R33_IDX.keys.indexOf(e.childKey) >= 0 &&
+    isStrictParentOf(e.parentPath, R33_LEVELS.find(l => canonicalLevelKeyOf(l.path) === e.childKey).path)), true);
+check('R33 索引：同一 childKey 只有一条边（连续返回不漂移）',
+  new Set(R33_IDX.edges.map(e => e.childKey)).size, 3);
+check('R33 索引：父层 names 确实列出子目录名时优先采纳',
+  cachedParentOf(R33_IDX, R33_L3), R33_L2);
+check('R33 查询：L3→L2 / L2→L1 / L1→L0 逐级命中',
+  cachedParentOf(R33_IDX, R33_L3) === R33_L2 &&
+  cachedParentOf(R33_IDX, R33_L2) === R33_L1 &&
+  cachedParentOf(R33_IDX, R33_L1) === R33_L0, true);
+check('R33 查询：最顶层没有父级（返回空串）', cachedParentOf(R33_IDX, R33_L0), '');
+check('R33 查询：缓存里没有的层不造父级', cachedParentOf(R33_IDX, '/other/unknown'), '');
+check('R33 查询：NAS 挂载形态与授权 URI 形态命中同一条边（规范层级键抹平差异）',
+  cachedParentOf(R33_IDX,
+    '/storage/userExternal/192.168.100.61/图片档案/Collection/4 中/[奇丘画面] Nine tail Photography'), R33_L2);
+check('R33 查询：挂载形态的每一层都逐级命中（不是只认最深一层）',
+  cachedParentOf(R33_IDX,
+    '/storage/userExternal/192.168.100.61/图片档案/Collection/4 中') === R33_L1 &&
+  cachedParentOf(R33_IDX,
+    '/storage/userExternal/192.168.100.61/图片档案/Collection') === R33_L0, true);
+check('R33 状态：中层可上移、最浅层 TOP、未知层 MISS',
+  cachedUpStateOf(R33_IDX, R33_L3) === CACHED_UP_GO &&
+  cachedUpStateOf(R33_IDX, R33_L0) === CACHED_UP_TOP &&
+  cachedUpStateOf(R33_IDX, '/other') === CACHED_UP_MISS, true);
+check('R33 状态：空串 / 空索引一律 MISS，绝不抛',
+  cachedUpStateOf(R33_IDX, '') === CACHED_UP_MISS &&
+  cachedUpStateOf(cachedUpIndexOf([]), R33_L3) === CACHED_UP_MISS, true);
+check('R33 连续返回：L3→L2→L1→L0→TOP 状态链恒定（不越级、不绕圈）',
+  (() => { let cur = R33_L3; const chain = [];
+    for (let i = 0; i < 6; i++) { const st = cachedUpStateOf(R33_IDX, cur);
+      chain.push(st); if (st !== CACHED_UP_GO) { break; } cur = cachedParentOf(R33_IDX, cur); }
+    return chain.join(','); })(), '2,2,2,1');
+check('R33 缺层不误跳：只有 L0 和 L3 两层（缺中间层）时绝不建越级边',
+  cachedUpIndexOf([R33_LEVELS[0], R33_LEVELS[3]]).edges.length, 0);
+check('R33 缺层不误跳：此时 L3 查不到父级 → MISS（保持当前目录不变）',
+  cachedUpStateOf(cachedUpIndexOf([R33_LEVELS[0], R33_LEVELS[3]]), R33_L3), CACHED_UP_MISS);
+check('R33 重复层去重：同层出现两次不产生第二条边',
+  cachedUpIndexOf([R33_LEVELS[0], R33_LEVELS[1], R33_LEVELS[1]]).edges.length, 1);
+check('R33 落地校验：落在缓存父层 → 一致',
+  cachedUpLandsAt(R33_L2, R33_L3, R33_L2), true);
+check('R33 落地校验：落到别层 / 越级 / 空串一律不一致',
+  cachedUpLandsAt(R33_L2, R33_L3, R33_L1) === false &&
+  cachedUpLandsAt(R33_L1, R33_L3, R33_L1) === false &&
+  cachedUpLandsAt(R33_L2, R33_L3, '') === false, true);
+check('R33 落地校验：挂载形态落地也算同一层级（形态差异不算不一致）',
+  cachedUpLandsAt(R33_L2, R33_L3,
+    '/storage/userExternal/192.168.100.61/图片档案/Collection/4 中'), true);
+
+console.log('--- 第三十三轮 ②：Index.ets 初始化预建 + 触发复用接线 ---');
+const R33_RESTORE = INDEX.slice(INDEX.indexOf('private restoreUpCache('),
+  INDEX.indexOf('private rebuildUpParentIndex('));
+const R33_CACHEFN = INDEX.slice(INDEX.indexOf('private cacheUpDirSnapshot('),
+  INDEX.indexOf('private encodeUpCacheForSave('));
+const R33_NOGO = UP_FN.slice(UP_FN.indexOf('if (cachedState !== CACHED_UP_GO)'),
+  UP_FN.indexOf('const cachedParent: string'));
+check('R33 接线：DirName import 四个新函数 + 三个状态常量 + 索引类型',
+  /cachedUpIndexOf, cachedUpStateOf, cachedParentOf, cachedUpLandsAt/.test(INDEX) &&
+  /CACHED_UP_GO, CACHED_UP_TOP, CACHED_UP_MISS/.test(INDEX) &&
+  /UpParentIndex/.test(INDEX), true);
+check('R33 接线：索引字段初始化为空索引 + built 标志',
+  /private upParentIndex: UpParentIndex = \{ edges: \[\], keys: \[\], minLevel: -1 \};/.test(INDEX) &&
+  /private upParentBuilt: boolean = false;/.test(INDEX), true);
+check('R33 接线：rebuildUpParentIndex 用缓存快照预建索引并置 built',
+  /private rebuildUpParentIndex\(\): void \{/.test(INDEX) &&
+  /this\.upParentIndex = cachedUpIndexOf\(levels\);/.test(INDEX) &&
+  /this\.upParentBuilt = true;/.test(INDEX) && /up index built/.test(INDEX), true);
+check('R33 接线：初始化（restoreUpCache）两个出口都预检索缓存结构',
+  (R33_RESTORE.match(/this\.rebuildUpParentIndex\(\);/g) || []).length, 2);
+check('R33 接线：缓存结构变化（cacheUpDirSnapshot）两个出口都刷新索引',
+  (R33_CACHEFN.match(/this\.rebuildUpParentIndex\(\);/g) || []).length, 2);
+check('R33 接线：browseUp 优先查预建索引，触发时不重新推导路径',
+  /if \(this\.upParentBuilt && current\.length > 0\) \{/.test(UP_FN) &&
+  /const cachedState: number = cachedUpStateOf\(this\.upParentIndex, current\);/.test(UP_FN), true);
+check('R33 接线：TOP / MISS 保持当前目录不变、canGoUp=0、明确提示、直接 return',
+  /this\.canGoUp = false;/.test(R33_NOGO) &&
+  /已到缓存目录结构的最上层/.test(R33_NOGO) &&
+  /缓存中缺少当前目录的父级信息/.test(R33_NOGO) &&
+  /保持当前目录不变/.test(R33_NOGO) && /return;/.test(R33_NOGO), true);
+check('R33 接线：TOP / MISS 分支绝不碰 openFolder / showUpListInApp（不误跳）',
+  /this\.openFolder|this\.showUpListInApp|upLevelOf|upParentCandidates/.test(R33_NOGO), false);
+check('R33 接线：GO 复用索引父级 + 严格直接父级校验',
+  /const cachedParent: string = cachedParentOf\(this\.upParentIndex, current\);/.test(UP_FN) &&
+  /if \(!isStrictParentOf\(cachedParent, current\)\)/.test(UP_FN), true);
+check('R33 接线：GO 用缓存父层列目录，第三参 false 不弹多选',
+  /const okCached: boolean = await this\.openFolder\(cachedParent, false, false\);/.test(UP_FN), true);
+check('R33 接线：列不出也保持当前目录不变，绝不退回路径推导兜底',
+  /if \(!okCached\) \{[\s\S]{0,280}缓存父级目录不可读取 · 保持当前目录不变/.test(UP_FN) &&
+  /up CACHED FAIL/.test(UP_FN), true);
+check('R33 接线：成功后校验落地层级与缓存父子关系一致、清旧锚点',
+  /const consistent: boolean = cachedUpLandsAt\(cachedParent, current, this\.browseBase\);/.test(UP_FN) &&
+  /缓存父子层级一致/.test(UP_FN) && /consistent=/.test(UP_FN) &&
+  /this\.pickRootUri = '';/.test(UP_FN), true);
+
+console.log('--- 第三十三轮 ③：既有链路零回归 + 验证边界 ---');
+check('R33 零回归：原路径层级链 / 同层候选 / APP 内清单仍在（仅索引未建立时兜底）',
+  /let target: string = upLevelOf\(current\)/.test(UP_FN) &&
+  /upParentCandidates\(current, rawUri, '', upRoots\)/.test(UP_FN) &&
+  (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2, true);
+check('R33 零回归：往上层仍不弹系统选择器 / 版本 / 诊断开关 / R32-R31 链路未动',
+  /chooseFolder\(|DocumentViewPicker|dv\.select|pickerStartOf\(/.test(UP_FN) === false &&
+  /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
+  /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
+  /folderPickStartOf\(this\.browseDir, this\.pickRootUri, this\.savedDirUri\)/.test(INDEX) &&
+  /return prefsSafeEncode\(raw\);/.test(INDEX) && /chooseFolderAt/.test(INDEX) === false, true);
+check('R33 零回归：恢复期仍零 IO（新增函数全是纯字符串）',
+  /fs\.listFile|fs\.statSync|fs\.openSync|DocumentViewPicker/.test(
+    INDEX.slice(INDEX.indexOf('private rebuildUpParentIndex('),
+      INDEX.indexOf('/** 第三十一轮'))) === false, true);
+console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
+console.log('  ⚠️ 真机步骤：装 R33 包 → 逐层进入 L0→L1→L2→L3 → 连续点「往上层」→ 应逐级 L3→L2→L1→L0，到 L0 保持不变。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
