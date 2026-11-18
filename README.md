@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R33` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R34` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,115 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十四轮：「往上层」无响应修复 —— 缓存索引从唯一闸门降级为优先候选（2026-11-19，R34）
+
+**用户报障（原文）**：「之前的修改反而把功能改坏了：现在触发『返回上层』操作没有任何响应。
+请定位并修复该问题，恢复返回上层的正常行为。排查时请聚焦上一层的逻辑结构，厘清它与当前层之间的
+调用关系、状态传递与事件响应链路，不要盲目地仅凭缓存记录推断原因。请说明无响应的根因、本次改动
+涉及的逻辑范围，并确认修复后返回上层可正常触发且原有功能不受影响。」
+
+（下文沿用 APP 里的按钮名「往上层」，即用户说的「返回上层 / 回上层」。）
+
+### 根因：不是「缓存里缺父级记录」，而是调用结构把事件吞了
+
+先按用户要求完整走一遍**事件响应链路 / 调用关系 / 状态传递**，不先看缓存：
+
+```text
+三条入口（R33 全未改动，事件确实到达 browseUp）
+  ① 按钮  case 'up'  → doAction() → this.browseUp()
+  ② 键盘  KEYCODE_DEL / KEYCODE_BACK → this.browseUp()
+  ③ 左栏  ROW_UP（'..' 行）→ onRowTap() → this.browseUp()
+        │
+        ▼
+browseUp()
+  ├ folderBusy 早退（正常）
+  ├ RESTORE_READONLY && browseBase.length===0 早退（正常）
+  ├ const current = this.browseBase
+  └ ★ R33 插入的「缓存索引唯一闸门」
+       if (upParentBuilt && current.length > 0) {
+         TOP / MISS / BADLEVEL / FAIL / OK  ← 五条路径**全部 return**
+       }
+        ▼（闸门一旦生效，下面整条链永远不可达 → 死代码）
+  upNavStateOf → upLevelOf → upParentCandidates → openFolder → showUpListInApp
+  （R28~R32 逐轮真机验证过的、唯一真正执行上移 / 出 APP 内清单的层级链）
+```
+
+三个层面的结论：
+
+1. **调用关系（主因）**：R33 把「缓存父子索引」从辅助信息**错误提升为 `browseUp()` 入口的唯一
+   真值源 + 前置闸门**，且闸门内五条路径全部 `return`。只要闸门生效，下面整条路径层级链就被
+   短路成死代码，`openFolder` / `showUpListInApp` 一次都调不到。README 第三十三轮写的
+   「原链仅在索引未建立时兜底」在实机上不成立 —— 见下条。
+2. **状态传递**：`upParentBuilt` 在恢复链 `restoreUpCache()` 两个出口（**含空缓存**）和每次
+   `openFolder` 成功后的 `cacheUpDirSnapshot()` 两个出口都会置 `true`，**全文没有任何复位为
+   false 的路径**。因此它是「一旦启动就恒真」的单向锁，闸门恒生效。用户从 picker 直接选一个
+   深层目录进入时，`upDirCache` 只有当前一层 → `cachedUpIndexOf()` 建不出任何父子边 →
+   `cachedUpStateOf()` 判 `CACHED_UP_TOP`（`minLevel` 正是当前层自己）→ 闸门只写一句状态栏
+   文案就 `return`。目录、清单、视图全不动 —— 这就是用户看到的「**没有任何响应**」。
+   注意：**缓存里缺父级是常态而非异常**，用「缓存最浅层」冒充「卷根 / 逻辑顶层」是判据错位。
+3. **事件响应链路**：三条入口都完好、事件确实进了 `browseUp()`，但被入口闸门吞掉；同时闸门里
+   `this.canGoUp = false` 覆盖了 `applyItems` 的同源状态，状态栏与按钮语义互相矛盾。
+
+> 换句话说：**不是数据问题，是控制流问题**。补缓存记录、补父层快照都治不了本 —— 只要
+> 「缓存说了算且一律 return」这个结构还在，按钮就恒无响应。
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | 新增第三十四轮区块两个纯字符串、零 IO、零抛出函数：`cachedUpPreferredParentOf(index, current, target)`（命中 GO + 严格直接父级 + 与本次逻辑父层同规范层级键时返回缓存父级，否则空串）、`cachedUpPreferredCandidates(preferred, candidates)`（命中则把缓存父级提到候选最前并精确去重，**否则原数组原样返回**）。R33 的索引 / 状态 / 落地校验函数全部保留不动 |
+| `entry/src/main/ets/pages/Index.ets` | ① `browseUp()` **整段删除 R33 的「唯一闸门」**（约 48 行、五条 `return` 分支），事件无条件流向原路径层级链；② 在 `upParentCandidates()` 生成同层候选之后、遍历之前接入两个新纯函数，缓存命中仅作**首选候选**；③ `cachedUpLandsAt()` 降级为成功后的**落地一致性诊断**（`up OK … | cache=1/0/-`），不再决定能否上移；④ 顶层恢复由 `upNavStateOf()` + `volumeRootOf()` 判定，不再看缓存 `minLevel`；⑤ 精简 import（移除闸门专用的 `CACHED_UP_TOP/MISS`、`cachedUpStateOf`、`cachedParentOf`）；⑥ `ESC_BUILD_TAG` → `R34`；⑦ 订正四处 R33 过时注释 |
+| `tests/dirname.test.mjs` | 构建标记 `R33 → R34`、旧包排除补 `R33`、文件头注释补第三十四轮；**移除 7 条断言「闸门存在」的旧接线断言**（它们断言的正是本轮要修的 bug），新增 R34 **25 条**断言（纯函数 13 / 事件链路·调用关系·状态传递·零回归 12） |
+| `README.md` | 抬头 `R33 → R34`；新增本章 |
+
+### 关键设计
+
+- **原链恢复为事件主链**：`browseUp()` 前两个合法早退（`folderBusy` / 只读名单无层级）之后，
+  `const current` 无条件进入 `upNavStateOf` → `upLevelOf` → `isStrictParentOf` 严格父级校验 →
+  `upParentCandidates` 同层多形态候选 → 逐个 `openFolder(parent, false, false)` → 全失败由
+  `showUpListInApp` 出 APP 内清单。**按钮恒有响应**：能上移就上移，列不出就出清单，真到卷根
+  给明确提示，绝不静默返回。
+- **缓存索引降级为「优先候选佐证」**：初始化预检索 + 触发时复用（R33 的合理部分）全部保留，
+  但只在同层候选里把缓存父级**排到最前**，`cachedUpPreferredCandidates` 保证原候选一个不少。
+  于是「父子层级一致优先 / 连续返回逐级不漂移」仍成立，而 TOP / MISS / 缺中间层 / 索引未建 /
+  target 不同层时一律空串 → 原链照常上移，**缓存再也不能拦事件**。
+- **顶层判据归位**：`CACHED_UP_TOP` 的语义是「缓存里最浅的一层」，不是卷根；R34 顶层只由
+  `upNavStateOf()` + `volumeRootOf()` 判定，从根上消除「缓存只有一层就被误报成已到最上层」。
+- **落地一致性只作诊断**：`cachedUpLandsAt(preferred, current, browseBase)` 写进 `cache=` 诊断字段，
+  一致与否都不回滚、不误跳、不影响上移结果。
+- **零回归**：三条事件入口、`folderBusy` / `READONLY` 早退、`pickRootUri` 清理、严格父级校验、
+  APP 内清单两处兜底、往上层恒亮不禁用、不弹系统选择器、R32 FOLDER picker 校验、R31 安全编解码、
+  R30 多层快照持久化、版本 `1.0.7` / `versionCode 7`、诊断开关全部未动。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 19 s 510 ms**（33 tasks：18 executed / 15 up-to-date），`CompileArkTS` 真实执行 **12 s 370 ms**、**0 ERROR / 17 WARN**（`preferences` 抛异常、`READ_IMAGEVIDEO` 受限权限、2in1 系统栏 API，与 R33 基线完全一致，全在本轮未改动区域）；签名 HAP **962,938 bytes**（R33 为 962,004 bytes） |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 HAP 内 `ets/modules.abc`（均 **546,280 bytes**，R33 为 547,212 bytes）检出 `R34=1 / R33=0 / R32=0`；两个新纯函数各 2 处、`up index built`、`up OK` 进入产物；**闸门诊断串 `up CACHED` = 0**（已从产物彻底消失） |
+| **静态契约 + 纯函数** | **ALL PASS 1557 passed, 0 failed**（R33 为 1539；移除 7 条闸门旧断言、新增 25 条 R34 断言）；`node --check` 与 `git diff --check` 通过 |
+| **真机启动验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝。**编译校验 ≠ 真机验证** |
+
+### 覆盖的验证场景（请在装有 `R34` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R34`（仍是 `R33` 及更早说明装的是旧包） |
+| 2 | **直接选一个深层目录进入**（缓存只有一层，R33 复现路径）→ 点「往上层」 | **目录正常上移**或出现 APP 内上层清单，绝不再「无响应」 |
+| 3 | 逐层进入 `L0 → L1 → L2 → L3` 后连续点「往上层」 | 逐级 `L3→L2→L1→L0`，状态栏 `up OK … | cache=1`（命中缓存父子边），不越级不绕圈 |
+| 4 | 在真卷根再点「往上层」 | 提示「已到卷 / 硬盘的逻辑最上层」，保持当前目录不变（由 `upNavStateOf` 判定，不是缓存） |
+| 5 | 缓存缺父级 / 缺中间层 / 换授权根后点「往上层」 | 按路径层级链正常上移或出 APP 内清单（`cache=-`），不被缓存拦下 |
+| 6 | 退出重开（R30/R31 快照跨会话还原）→ 第一次点「往上层」 | 初始化即预建索引，缓存命中时优先、未命中时照常上移，均有响应 |
+| 7 | 退格 / DEL 键、左栏 `..` 行 | 与按钮一致，三条入口全部正常触发 |
+| 8 | 冷启动选目录 / 只读名单态 / R32 FOLDER picker 选文件夹 | 与 R33 之前完全一致，零回归 |
+
+> **边界（必须诚实）**：本轮只把「缓存父子索引」从**唯一闸门**降级为**优先候选**，
+> 因此第三十三轮规格里「缓存中缺少父级信息时保持当前目录不变、不误跳」这一条**不再生效** ——
+> 该条正是导致按钮无响应的直接原因，按本轮「恢复正常行为」的要求必须撤销。现在的行为是：
+> 缓存缺信息时按真实目录层级正常上移（或列不出时出 APP 内清单），「不误跳」由
+> `isStrictParentOf` / `canonicalLevelKeyOf` 的严格同层校验保证，而非靠「干脆不动」。
+> 真机上的目录可达性仍取决于 picker 逐 URI 授权，编译与静态契约都无法替代实机验证。
 
 ## 第三十三轮：往上层改走缓存父子逻辑层级（2026-11-19，R33）
 

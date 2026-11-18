@@ -1415,3 +1415,53 @@ export function cachedUpLandsAt(parentPath: string, current: string,
   const pk: string = canonicalLevelKeyOf(parentPath);
   return pk.length > 0 && pk === canonicalLevelKeyOf(landed);
 }
+
+// --------------------------------------------------------------------
+// 第三十四轮：缓存父子索引降级为「优先候选佐证」（R34，2026-11-19）
+//
+// R33 把索引做成了 browseUp() 开头的**唯一闸门**：upParentBuilt 一旦置 true
+// （恢复链 / 任一次 openFolder 成功后都会置，且全文没有复位路径）就恒真，
+// 闸门内 TOP / MISS / BADLEVEL / FAIL / OK 五条路径**全部 return**，
+// 把下面 R28~R32 逐轮真机验证过的路径层级链整条短路成死代码。
+// 缓存只有当前一层（用户直接选深层目录进入）时 cachedUpStateOf 判 TOP，
+// 点「往上层」只改一句状态栏就返回 —— 目录 / 清单 / 视图全不动，
+// 这正是用户看到的「触发返回上层没有任何响应」。
+//
+// R34 恢复原链为主：缓存索引只在「触发时复用」层面提供**优先候选**，
+// 命中就把它排到同层候选最前（父子层级一致优先，连续返回仍逐级），
+// 未命中 / 到顶层 / 缺父级 / 层级不一致时**原样返回**，
+// 原链照常逐级上移、列不出时出 APP 内清单，按钮恒有响应。
+// 纯字符串、零 IO、零抛出，可直接用 Node 回归。
+// --------------------------------------------------------------------
+
+/** 从预建索引取当前层的「缓存优先父级」。
+ *  · 仅 CACHED_UP_GO + 严格直接父级 + 与本次逻辑父层 target 同一规范层级键时返回；
+ *  · 其余（TOP / MISS / 索引未建 / 层级不一致）一律返回空串 —— 不干预原链。 */
+export function cachedUpPreferredParentOf(index: UpParentIndex, current: string,
+  target: string): string {
+  if (target.length === 0 || cachedUpStateOf(index, current) !== CACHED_UP_GO) {
+    return '';
+  }
+  const parent: string = cachedParentOf(index, current);
+  if (parent.length === 0 || !isStrictParentOf(parent, current)) {
+    return '';
+  }
+  const tk: string = canonicalLevelKeyOf(target);
+  return tk.length > 0 && canonicalLevelKeyOf(parent) === tk ? parent : '';
+}
+
+/** 把缓存优先父级提到同层候选最前（按字符串精确去重，保留全部原候选）。
+ *  preferred 为空时**原样返回** —— 零改动、零回归，绝不删减任何既有候选。 */
+export function cachedUpPreferredCandidates(preferred: string,
+  candidates: string[]): string[] {
+  if (preferred.length === 0) {
+    return candidates;
+  }
+  const out: string[] = [preferred];
+  for (let i = 0; i < candidates.length; i++) {
+    if (candidates[i] !== preferred) {
+      out.push(candidates[i]);
+    }
+  }
+  return out;
+}
