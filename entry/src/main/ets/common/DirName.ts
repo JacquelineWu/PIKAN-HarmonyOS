@@ -1465,3 +1465,99 @@ export function cachedUpPreferredCandidates(preferred: string,
   }
   return out;
 }
+
+// --------------------------------------------------------------------
+// 第三十五轮：往上层「探索这一层的全部目录」（R35，2026-11-19）
+//
+// 用户反馈：按「往上层」后只显示一个目录，没有探索这一层的其它目录。
+// 根因不在事件链（R34 已修好），也不在缓存记录，而在**列举阶段**：
+//   openFolder() 对 dirCandidates(父层 URI) 的多个写法逐个 fs.listFile，
+//   却用覆盖式 `names = n` 只保留一份；父层通常全是子文件夹 → probeChild
+//   恒 false → 采用 fallbackBase（第一个能列出的形态）那一份。逐 URI 授权下
+//   那一份往往只暴露「被选中的那一个子目录」，其它写法列出来的兄弟目录
+//   全被丢弃 —— 代码探索过多种形态，却把探索结果扔了。
+//
+// R35 让列举结果「合并而非覆盖」：把同一层每个成功候选的真实 names 并集，
+// 再补一次有界的跨候选探索，两条落地路径（真实目录表 / APP 内清单）都用
+// 合并后的完整清单。纯字符串、零 IO、零抛出，可直接用 Node 回归。
+// --------------------------------------------------------------------
+
+/** 合并「同一目录在多个 URI 写法下各自 fs.listFile 到的条目名」为完整清单。
+ *  · 逐组按原顺序收纳、按原名去重（绝不因后一份覆盖前一份而漏掉兄弟目录）；
+ *  · 过滤空串 / `..` / `.` 隐藏点文件 / APP 内清单伪说明行 —— 与
+ *    openFolder 的 HIDE_DOT_FILES 同口径，不引入任何非目录项；
+ *  · 只收真实 `fs.listFile` / 缓存快照返回的名字，**绝不凭空编造目录名**；
+ *  · 全空输入返回空数组。 */
+export function mergeExploreNames(groups: Array<Array<string>>): Array<string> {
+  const cleaned: Array<Array<string>> = [];
+  for (let g = 0; g < groups.length; g++) {
+    const list: Array<string> = groups[g];
+    const one: Array<string> = [];
+    for (let i = 0; i < list.length; i++) {
+      const nm: string = list[i];
+      if (nm.length === 0 || nm === '..' || nm === '.' || nm.charAt(0) === '.') {
+        continue;
+      }
+      if (isUpListPseudoName(nm)) {
+        continue;
+      }
+      one.push(nm);
+    }
+    cleaned.push(one);
+  }
+  return mergeUpListNames(cleaned);
+}
+
+/** 从会话内多层目录快照「探索」出 target 层的全部兄弟目录名（零 IO、纯字符串）。
+ *  · 与 target 同层的快照：它的 names 就是这一层真实 `fs.listFile` 列过的全部子目录；
+ *  · 以 target 为**直接父级**的更深层快照：`baseName(path)` 是这一层的一个子目录
+ *    （用户曾在那个兄弟目录里浏览过，缓存留下了它的真实路径）；
+ *  · 恒含 currentName（当前目录一定是 target 的子目录）；
+ *  · 过滤伪说明行、按原名去重；绝不把祖先层级 / 其它层的名字混进来
+ *    （R28 曾因把 pathChainOf 画成上层文件夹而显示错误清单）。
+ *  全部名字都来自真实列过的目录结构，**绝不凭空编造**。 */
+export function exploreSiblingNamesOf(levels: Array<UpCacheLevel>, target: string,
+  currentName: string): Array<string> {
+  const groups: Array<Array<string>> = [];
+  const tk: string = canonicalLevelKeyOf(target);
+  if (tk.length > 0) {
+    for (let i = 0; i < levels.length; i++) {
+      const p: string = levels[i].path;
+      if (sameDirPath(p, target)) {
+        groups.push(levels[i].names);
+      } else if (isStrictParentOf(target, p)) {
+        groups.push([baseName(p)]);
+      }
+    }
+  }
+  groups.push([currentName]);
+  return mergeUpListNames(groups);
+}
+
+/** 探索完成后挑「看得最全」的 URI 写法作为子项 URI 的拼接基准。
+ *  · 取有效条目数最多那一组对应的 form；并列时取第一个（连续触发结果稳定）；
+ *  · 各组都为空 / 输入为空 / 长度不等时安全退化（绝不越界、不返回空形态）；
+ *  · 纯字符串，只做选择不做 IO。 */
+export function exploreBaseOf(forms: Array<string>,
+  groups: Array<Array<string>>): string {
+  let best: number = -1;
+  let bestCount: number = 0;
+  const n: number = forms.length < groups.length ? forms.length : groups.length;
+  for (let i = 0; i < n; i++) {
+    let c: number = 0;
+    const list: Array<string> = groups[i];
+    for (let j = 0; j < list.length; j++) {
+      const nm: string = list[j];
+      if (nm.length === 0 || nm === '..' || nm === '.' || nm.charAt(0) === '.' ||
+          isUpListPseudoName(nm)) {
+        continue;
+      }
+      c++;
+    }
+    if (c > bestCount) {
+      bestCount = c;
+      best = i;
+    }
+  }
+  return best >= 0 ? forms[best] : '';
+}

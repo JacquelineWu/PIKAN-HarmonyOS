@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R34` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R35` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,102 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十五轮：「往上层」后只显示一个目录 —— 完整探索并列举父层全部目录（2026-11-19，R35）
+
+**用户报障**：按「往上层」之后只显示一个目录，没有探索这一层的其它目录；要求进入父层后
+**真正列举该层下的全部目录（含兄弟目录）**，而不是只显示缓存 / 候选构造出来的单一目录。
+
+### 根因：不在事件链，也不在「缓存有没有记过父层」，而在**列举阶段**
+
+R34 已经把事件响应链路修好（三条入口 → `browseUp()` → 层级链 → `openFolder()`），
+所以本轮先按数据流核对 `browseUp() → upParentCandidates() → openFolder() → applyItems()`
+的每一段，最后定位到 **`openFolder()` 的候选循环**：
+
+```text
+browseUp()
+  └ upParentCandidates()  → 同层父目录的多个 URI 写法 parents[]
+        └ openFolder(parent, false, false)
+              └ dirCandidates(parent) → candidates[]（raw / 解码 / FileUri / realPath / hierPath）
+                    └ for (c of candidates)
+                          n = await fs.listFile(cand)      ← 每个写法都会真列一次
+                          ★ 旧版：if (fallbackBase.length===0) { fallbackBase = cand; names = n; }
+                          ★ 旧版：if (probeChild(cand, n)) { base = cand; names = n; break; }
+                                        └ 两种写法都是**覆盖式赋值**，只保留最后一份 n
+```
+
+父层通常**全是子文件夹、本层零图片**，于是 `probeChild()` 恒为 `false`（它只抽查前 12 个
+名字里的图片后缀并试 `openSync`），循环不会 `break`、会走完所有候选，但最终 `names` 只有
+`fallbackBase` 那一份：**代码探索过多种形态，却把探索结果扔了**。在 picker 逐 URI 授权下，
+那一份往往只暴露「被选中的那一个子目录」，其它写法真实列出来的兄弟目录全被丢弃 ——
+这就是「只显示一个目录」。
+
+APP 内清单态是同一问题的另一半：`upListNamesOf(target)` 只会收集「与 target 同层的快照
+`names`」+ 旧单槽 `lastUpNames` + 恒列的 `currentName`。用户从 picker **直接选深层目录**进入时，
+`upDirCache` 里根本没有父层自己的清单快照，于是只剩 `currentName` 一项。
+
+> **结论**：不是「父级候选只命中一个」，也不是「父层目录里真的只有一个子项」，而是
+> **列举结果被覆盖 / 父层清单没有来源**。所以修法是「合并而非覆盖 + 从缓存的真实目录结构
+> 反推兄弟目录 + 挑列得最全的写法拼子项 URI」，绝不靠凭空补目录名。
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | 新增第三十五轮区块三个**纯字符串、零 IO、零抛出**函数：`mergeExploreNames(groups)`（多份 `fs.listFile` 结果并集，按组顺序收纳、按原名去重，过滤空串 / `.` / `..` / 点文件 / APP 内清单伪说明行）、`exploreSiblingNamesOf(levels, target, currentName)`（同层快照 `names` + 以 target 为**直接父级**的更深层路径末段 + `currentName`，反推这一层的兄弟目录）、`exploreBaseOf(forms, groups)`（挑有效条目最多的 URI 写法，并列取第一个） |
+| `entry/src/main/ets/pages/Index.ets` | ① `openFolder()` 新增 `exploreForms` / `exploreGroups`，每次成功 `listFile` 都把形态与条目名收进来；**删除两处覆盖式 `names = n`**，循环末统一 `names = mergeExploreNames(exploreGroups)`；② `base` 为空时用 `exploreBaseOf()` 挑列得最全的形态，空结果仍由 `fallbackBase` 兜底，并补 `forms=/names=` 可观测日志；③ `upListNamesOf()` 把 `upDirCache` 转成 `UpCacheLevel[]` 后并入 `exploreSiblingNamesOf()`；④ `ESC_BUILD_TAG` → `R35` |
+| `tests/dirname.test.mjs` | 引入三个新纯函数；构建标记 `R34 → R35`、旧包排除补 `R34`；订正文件头注释里被批量替换写错的 R31~R34 历史构建标记；新增 R35 **45 条**断言（纯函数 31 / 静态接线·根因护栏·零回归 14） |
+| `README.md` | 抬头 `R34 → R35`；新增本章 |
+
+### 关键设计
+
+- **合并而非覆盖**：`exploreGroups` 收集的每一次 `listFile` 本来就会执行（父层全是子文件夹时
+  `probeChild` 恒 false、循环走完所有候选），R35 **零新增 IO**，只是不再丢弃结果。
+- **两条落地路径都用完整清单**：真实目录表走 `mergeExploreNames`，APP 内清单走
+  `mergeUpListNames(groups)` 且额外并入 `exploreSiblingNamesOf`，伪行 / 隐藏点文件过滤口径一致。
+- **绝不编造目录名**：三个纯函数的所有输出都来自「真实 `fs.listFile` 结果 / 缓存里真实列过的
+  `names` / 缓存里真实路径的末段名 / 当前目录名」，没有任何按年份、数字、点号猜名字的逻辑。
+- **不混入其它层级（R28 回归护栏）**：`exploreSiblingNamesOf` 只认 `sameDirPath` 的同层快照与
+  `isStrictParentOf(target, path)` 的**直接**子级；祖先层、孙层、旁支一律排除，
+  `canonicalLevelKeyOf` 同时抹平 NAS 的 scheme 授权形态 / 挂载形态 / 百分号编码差异。
+- **基准形态按「看得最全」选**：`exploreBaseOf` 让子项 URI 拼在列得最多的那个写法上，
+  提高 `statSync` 命中率；全空 / 长度不等 / 空输入都安全退化，绝不越界或返回空形态。
+- **零回归**：`probeChild` 仍优先挑「子文件真能读」的形态、`childReadable` / `needFileFallback`
+  语义未改；R34 的三条事件入口、无闸门主链、两处 `showUpListInApp` 兜底、缓存优先候选，
+  R28~R33 的层级校验 / 多层快照 / 安全编解码 / FOLDER picker 校验，版本 `1.0.7` /
+  `versionCode 7`、诊断开关、往上层恒亮不禁用、不弹系统选择器全部未动。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 17 s 217 ms**（33 tasks：18 executed / 15 up-to-date），`CompileArkTS` 真实执行 **10 s 474 ms**、**0 ERROR / 17 WARN**（`preferences` 抛异常、`READ_IMAGEVIDEO` 受限权限、2in1 系统栏 API，与 R34 基线完全一致，全在本轮未改动区域）；签名 HAP **971,749 bytes**（R34 为 962,938 bytes），未签名 934,898 bytes |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 HAP 内 `ets/modules.abc`（均 **549,756 bytes**，R34 为 546,280 bytes）检出 `R35=1 / R34=0 / R30=1`（`R30` 是 hilog 文案，不是构建标记）；`mergeExploreNames` / `exploreBaseOf` / `exploreSiblingNamesOf` 各 2 处进入产物；**覆盖式 `names = n` = 0**（已从产物彻底消失） |
+| **静态契约 + 纯函数** | **ALL PASS 1602 passed, 0 failed**（R34 为 1557；新增 45 条 R35 断言）；`node --check` 与 `git diff --check` 通过 |
+| **真机验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝。**编译校验 ≠ 真机验证** |
+
+### 覆盖的验证场景（请在装有 `R35` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R35`（仍是 `R34` 及更早说明装的是旧包） |
+| 2 | 进入深层目录 → 点「往上层」 | 左栏列出**该层全部子目录**（含非当前目录的兄弟目录），不再只有一个 |
+| 3 | 父层全是子文件夹（本层零图片）的 NAS 路径 → 点「往上层」 | 多个 URI 写法各自列到的兄弟目录合并进同一份清单，状态栏 `本层没有图片 · N 个子文件夹` 的 N 应显著大于 1 |
+| 4 | 父层无授权、降级 APP 内清单 | 清单里出现缓存中曾浏览过的兄弟目录，而不只是当前目录一项；仍**不弹系统选择器** |
+| 5 | 逐层进入 `L0 → L1 → L2 → L3` 后连续点「往上层」 | 逐级 `L3→L2→L1→L0`，不越级不绕圈（R34 主链零回归） |
+| 6 | 左栏点某个文件夹行 / 1.5s 自动重扫 / 退出重开 | 目录表、当前张、排序、恢复行为与 R34 完全一致，无闪烁、无 appfreeze |
+| 7 | 退格 / DEL 键、左栏 `..` 行 | 与按钮一致，三条入口全部正常触发 |
+| 8 | 冷启动选目录 / 只读名单态 / R32 FOLDER picker 选文件夹 | 与 R34 之前完全一致，零回归 |
+
+> **边界（必须诚实）**：
+> ① 当父层含图片且**首个候选就能打开子文件**时，候选循环仍按既有逻辑在首个可读形态
+> `break`，沿用该形态清单 —— 该形态通常已具备完整授权。刻意不为「往上层」额外放大
+> `startDirPoll()` 每 1.5s 重扫 / 启动恢复链上的 NAS IO，避免重蹈 R27 的 `THREAD_BLOCK_6S`；
+> 也避免把 URI 归一化到不同 provider 的写法混进同一份清单（R28 错误清单的成因）。
+> ② APP 内清单是**零 IO 兜底**：父层完全无 URI 授权、且会话缓存里也没有任何其它兄弟目录的
+> 真实痕迹时，清单仍只能列出当前目录。此时唯一能拿到完整兄弟目录的办法是重新用
+> 「选择文件夹」授权父层；APP **绝不凭空编造目录名**来凑数。
+> ③ 真机上的目录可达性仍取决于 picker 逐 URI 授权，编译与静态契约都无法替代实机验证。
 
 ## 第三十四轮：「往上层」无响应修复 —— 缓存索引从唯一闸门降级为优先候选（2026-11-19，R34）
 

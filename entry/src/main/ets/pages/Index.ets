@@ -67,7 +67,8 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   FOLDER_PICK_OK, FOLDER_PICK_UNREADABLE,
   folderPickStartOf, pickedFolderKind, folderPickHint,
   UpParentIndex, cachedUpIndexOf, cachedUpLandsAt,
-  cachedUpPreferredParentOf, cachedUpPreferredCandidates } from '../common/DirName';
+  cachedUpPreferredParentOf, cachedUpPreferredCandidates,
+  mergeExploreNames, exploreBaseOf, exploreSiblingNamesOf } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -129,7 +130,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R34';
+const ESC_BUILD_TAG: string = 'R35';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -6113,19 +6114,26 @@ struct Index {
       let childReadable: boolean = false;
       let fallbackBase: string = '';
       let lastErr: string = '';
+      // 第三十五轮：同一目录的多个 URI 写法在逐 URI 授权下**各自只能看到一部分
+      // 子目录**。旧版用覆盖式 `names = n` 只留第一份，其余候选真实列出来的兄弟
+      // 目录全被丢弃 —— 表现就是「往上层只显示一个目录，没探索这一层其它目录」。
+      // 这里把每次成功 listFile 的结果收集起来，循环末合并成完整清单（零新增 IO，
+      // 这些 listFile 本来就会跑），再挑「看得最全」的写法做子项 URI 拼接基准。
+      const exploreForms: Array<string> = [];
+      const exploreGroups: Array<Array<string>> = [];
       for (let c = 0; c < candidates.length; c++) {
         const cand: string = candidates[c];
         try {
           const n: string[] = await fs.listFile(cand, { recursion: false, listNum: 0 });
           hilog.info(DOMAIN, TAG, 'listFile OK [%{public}d] %{public}s → %{public}d entries',
             c, cand, n.length);
+          exploreForms.push(cand);
+          exploreGroups.push(n);
           if (fallbackBase.length === 0) {
             fallbackBase = cand;
-            names = n;
           }
           if (n.length > 0 && this.probeChild(cand, n)) {
             base = cand;
-            names = n;
             childReadable = true;
             hilog.info(DOMAIN, TAG, 'openFolder using candidate [%{public}d] %{public}s', c, cand);
             break;
@@ -6136,12 +6144,19 @@ struct Index {
             c, cand, lastErr);
         }
       }
-      if (base.length === 0 && fallbackBase.length > 0) {
-        // 目录能列、但子文件一个都打不开：列表照样显示，日志里说清楚是授权问题
-        base = fallbackBase;
-        hilog.error(DOMAIN, TAG,
-          'openFolder: listed but NO child file can be opened (per-item URI authorization). base=%{public}s',
-          base);
+      // 合并所有真实列举结果：兄弟目录一个不漏，伪行 / 隐藏点文件由纯函数过滤。
+      names = mergeExploreNames(exploreGroups);
+      if (base.length === 0) {
+        // 没有「子文件可读」的命中形态：用列得最全的形态拼子项 URI，命中率最高。
+        const best: string = exploreBaseOf(exploreForms, exploreGroups);
+        base = best.length > 0 ? best : fallbackBase;
+        if (base.length > 0) {
+          // 目录能列、但子文件一个都打不开：列表照样显示，日志里说清楚是授权问题。
+          hilog.error(DOMAIN, TAG,
+            'openFolder: listed but NO child file can be opened (per-item URI authorization). ' +
+            'base=%{public}s forms=%{public}d names=%{public}d',
+            base, exploreForms.length, names.length);
+        }
       }
       if (base.length === 0) {
         this.status = '无法列出该目录 · ' + lastErr + '；可点「选择文件夹」重新选择';
@@ -6590,6 +6605,17 @@ struct Index {
       groups.push(this.lastUpNames);
     }
     groups.push([currentName]);
+    // 第三十五轮：从缓存的**目录结构**反推这一层的其它兄弟目录。
+    // 用户直接选深层目录进入时，upDirCache 里没有父层自己的清单快照，
+    // 旧逻辑就只剩「恒列当前目录」一项 → 上层清单只显示一个目录。
+    // 现在把「曾浏览过、以 target 为直接父级」的那些层也算作兄弟目录，
+    // 纯字符串零 IO、绝不编造名字、绝不混入其它层级（R28 回归护栏）。
+    const levels: Array<UpCacheLevel> = [];
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      const s: UpDirSnapshot = this.upDirCache[i];
+      levels.push({ path: s.path, names: s.names, kinds: s.kinds });
+    }
+    groups.push(exploreSiblingNamesOf(levels, target, currentName));
     return mergeUpListNames(groups);
   }
 
