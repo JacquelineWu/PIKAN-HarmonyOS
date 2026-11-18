@@ -1162,3 +1162,112 @@ function prefsHexNib(ch: string): number {
   }
   return -1;
 }
+
+// --------------------------------------------------------------------
+// 第三十二轮：FOLDER picker 起点与返回真值校验（2026-11-18，R32）
+//
+// 现象：启动恢复失败（persist auth lost）自动打开系统 FOLDER picker，
+// 用户导航到有效 NAS 目录后点「选择」，系统却弹「不存在该名字的文件夹，请重新选择」。
+//
+// 根因（APP 侧可修的两处）：
+//  · chooseFolder() 只设 selectMode / maxSelectNumber，没有 defaultFilePathUri。
+//    SDK 语义：该字段空则「显示最近打开的页面」——也就是上次那个授权已失效的
+//    深层目录，且系统窗口底部「文件夹」名字框为空，点「选择」时系统按空名字校验。
+//  · chooseFilesInDir() 反过来把 APP 内部拼出的纯路径 / 父 URI 直接塞给
+//    defaultFilePathUri，系统把它最后一段当成「文件夹名」去查找，找不到同样误报。
+//  · picker 返回值零校验 + openFolder() 的 Promise<boolean> 被 fire-and-forget 丢弃：
+//    空名字 / 无效 URI 照样写持久授权、清死路径记忆，启动流程停在选择窗口，
+//    而「未选择 / 确实不存在」又没有 APP 内的明确提示。
+//
+// 本区块全是纯字符串函数，零 IO、零抛异常，可直接用 Node 回归；
+// 返回值判定只看 URI 形态，绝不做目录名字符串比对（那正是系统误报的来源）。
+// --------------------------------------------------------------------
+
+/** picker 选择结果的四种收口状态。 */
+export const FOLDER_PICK_NONE: number = 0;        // 用户取消 / 未选择
+export const FOLDER_PICK_INVALID: number = 1;     // 返回的不是可用文件夹标识
+export const FOLDER_PICK_OK: number = 2;          // 有效，可继续启动流程
+export const FOLDER_PICK_UNREADABLE: number = 3;  // 有效但列不出（确实不存在 / 无授权）
+
+/** 交给系统 picker 的字符串最长长度：绝不把超长脏串塞给系统文件管理器。 */
+const PICKER_URI_MAX: number = 4096;
+
+/** 是否含 C0 控制字符 / DEL。R31 的 P1: 快照文本若被误当路径传出去，
+ *  系统文件管理器会按「名字」解析并报「不存在该名字的文件夹」。 */
+function pickerUriUnsafe(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c: number = s.charCodeAt(i);
+    if (c < 0x20 || c === 0x7F) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 能否作为 DocumentViewPicker.defaultFilePathUri。
+ *  SDK：该字段是「可被选中的文件 / 目录 URI」，空则显示最近页面。
+ *  只接受带 scheme 的干净 URI；纯文件系统路径 / 纯名字 / R31 的 P1: 前缀
+ *  一律拒绝 —— 它们会被系统当成「文件夹名」去查找，正是误报来源。 */
+export function pickerStartSafe(s: string): boolean {
+  if (s.length === 0 || s.length > PICKER_URI_MAX) {
+    return false;
+  }
+  if (s.indexOf('://') < 0 || s.indexOf(PREFS_SAFE_TAG) === 0) {
+    return false;
+  }
+  return !pickerUriUnsafe(s);
+}
+
+/** 给 FOLDER picker 挑一个安全起点：优先本次会话已授权的当前目录，
+ *  再退到 picker 原始根，最后退到上次持久化的 picker 原始 URI —— 启动阶段
+ *  两个会话锚点都为空，正是靠它把系统从「失效的最近页面」拉回有效目录。
+ *  全部不合格返回空串：调用方就不设 defaultFilePathUri，行为与旧版一致、零回归。 */
+export function folderPickStartOf(browseDir: string, pickRootUri: string,
+  savedDirUri: string): string {
+  const tries: string[] = [browseDir, pickRootUri, savedDirUri];
+  for (let i = 0; i < tries.length; i++) {
+    const s: string = stripTrailingSlash(tries[i]);
+    if (pickerStartSafe(s)) {
+      return s;
+    }
+  }
+  return '';
+}
+
+/** picker 返回的标识是否是一个可用文件夹。
+ *  比 pickerStartSafe 宽松：某些设备 / 版本会返回不带 scheme 的绝对路径，
+ *  那也是合法目录；真正要拦的是「纯名字」「空串」「控制字符」「P1: 前缀」——
+ *  系统把名字输入框里的串拼出来返回时，恰恰就是这种形态。 */
+export function pickedFolderUsable(s: string): boolean {
+  if (s.length === 0 || s.length > PICKER_URI_MAX) {
+    return false;
+  }
+  if (s.indexOf(PREFS_SAFE_TAG) === 0 || pickerUriUnsafe(s)) {
+    return false;
+  }
+  return s.indexOf('/') >= 0;
+}
+
+/** 把 picker 结果收口成四种状态之一，纯函数、绝不抛异常。 */
+export function pickedFolderKind(uris: Array<string>): number {
+  if (!uris || uris.length === 0) {
+    return FOLDER_PICK_NONE;
+  }
+  const first: string = typeof uris[0] === 'string' ? uris[0] : '';
+  return pickedFolderUsable(first) ? FOLDER_PICK_OK : FOLDER_PICK_INVALID;
+}
+
+/** 四种状态对应的明确提示。OK 返回空串（不覆盖 openFolder 自己的目录提示）。
+ *  未选择 / 名字无效 / 确实不存在三类都保留明确指引，绝不静默吞掉。 */
+export function folderPickHint(kind: number): string {
+  if (kind === FOLDER_PICK_NONE) {
+    return '未选择文件夹（已取消）· 可点左栏「选择文件夹」重新选择';
+  }
+  if (kind === FOLDER_PICK_INVALID) {
+    return '所选文件夹名无效或不存在 · 请重新选择文件夹（在系统窗口选中目录后点「选择」）';
+  }
+  if (kind === FOLDER_PICK_UNREADABLE) {
+    return '所选文件夹无法读取或已不存在 · 请点「选择文件夹」重新选择';
+  }
+  return '';
+}

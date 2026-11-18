@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R31` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R32` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -533,6 +533,114 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十二轮：启动阶段文件夹选择误报「不存在该名字的文件夹」（2026-11-18，R32）
+
+**用户报障（原文）**：「进入 APP 时弹出文件夹选择窗口，点击『选择』后错误显示
+『不存在该名字的文件夹，请重新选择』……确保成功选择有效文件夹后不再出现该提示且能继续
+启动流程，同时保留对文件夹确实不存在或未选择时的明确提示。」
+
+**截图判读（按真实界面，不臆测）**：前台窗口是系统文件管理器
+（`com.huawei.hmos.filemanager`）的「选择路径」对话框，路径面包屑为
+`192.168.100.61 › 图片档案 › Collection › 4 中 › [奇丘画面] Nine tail Photography`；
+底部「文件夹」输入框**完全为空**；APP 状态栏是
+`上次目录无法打开 (persist auth lost) · 已立即停止恢复 · 请重新选择文件夹`。
+即：启动恢复的持久授权失效 → `giveUpNow('persist auth lost')` 自动打开了 FOLDER picker。
+
+### 先厘清一件事：这句提示不是 APP 弹的
+
+全项目源码、资源文件、**以及完整 git 历史**都搜不到「不存在该名字的文件夹」；
+`Index.ets` 里也没有任何 `AlertDialog` / `promptAction` / `CustomDialog` / `TextInput` 弹窗组件。
+它是**系统文件管理器**在 FOLDER picker 内对「文件夹名输入框」做的校验提示。
+APP 无法改写系统 UI 的文案，但可以修掉**把系统逼到这条校验分支**的接线问题 ——
+本轮修的正是后者。
+
+### 问题定位：APP 侧三处接线把有效目录送进了「按名字查找」分支
+
+SDK（`@ohos.file.picker.d.ts`）对 `DocumentSelectOptions.defaultFilePathUri` 的定义是：
+「**URI of the file or directory that can be selected. It is empty by default
+(the recently opened page is displayed)**」。
+
+1. **FOLDER picker 缺有效起点（主要触发条件）**：`chooseFolder()` 只设了
+   `selectMode = FOLDER` / `maxSelectNumber = 1`，**没有 `defaultFilePathUri`**。
+   系统只能显示「最近打开的页面」——也就是上次那个授权已失效的 NAS 深层目录，
+   且底部「文件夹」名字框为空（截图证实）。用户即使已经导航到有效目录，
+   点「选择」时系统仍按空名字去校验，于是对**确实存在的目录**报「不存在」。
+   项目里早有 `pickerStartOf()` 专门挑「带 scheme、已授权」的起点，但第二十九轮
+   删掉 `chooseFolderAt()` 后再无任何调用点（静态契约甚至断言「Index 不再引用
+   `pickerStartOf`」），**起点接线彻底丢失**。
+2. **反向把脏串塞给系统（同类误报源）**：`chooseFilesInDir()` 无条件
+   `opt.defaultFilePathUri = dirUri`，而 `dirUri` 常是 `dirCandidates()` /
+   `upParentCandidates()` 拼出的**纯路径或父 URI**。系统把最后一段当成「文件夹名」
+   去查找，找不到就复现同一句误报。
+3. **返回值零校验 + 启动结果被丢弃**：`chooseFolder().then` 拿到 `uris[0]` 就直接
+   `saveDeadTag('')` → `persistFolderUri()` → `openFolder()`，且 `openFolder()` 的
+   `Promise<boolean>` 被 fire-and-forget 丢掉。于是**空名字 / 纯名字 / 无效 URI**
+   也会被当成有效目录写进持久授权、清掉死路径记忆；启动流程停在选择窗口，
+   而「未选择 / 文件夹确实不存在」在 APP 内**没有明确提示**。
+
+### 改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | 新增第三十二轮「FOLDER picker 起点与返回真值校验」区块（全纯字符串、零 IO、零抛出）：四个状态常量 `FOLDER_PICK_NONE / INVALID / OK / UNREADABLE`；`pickerStartSafe(s)` 只认带 scheme 的干净 URI（拒绝纯路径 / 纯名字 / C0 控制字符 / `P1:` 前缀 / 超长）；`folderPickStartOf(browseDir, pickRootUri, savedDirUri)` 按优先级挑起点、去尾斜杠、全不合格返回空串；`pickedFolderUsable(s)` 宽松判定返回 URI（兼容不带 scheme 的绝对路径，但拦下纯名字 / 空串 / 控制字符 / `P1:` 前缀）；`pickedFolderKind(uris)` 收口四种状态；`folderPickHint(kind)` 出三类明确提示 |
+| `entry/src/main/ets/pages/Index.ets` | ① import 新函数 / 常量；② `ESC_BUILD_TAG` → `R32`；③ `chooseFolder()` 显式 `opt.defaultFilePathUri = folderPickStartOf(this.browseDir, this.pickRootUri, this.savedDirUri)`，仅在非空时设置 —— 启动阶段两个会话锚点为空，靠 `savedDirUri`（上次 picker 返回的原始 URI）把系统从「失效的最近页面」拉回真实目录；④ `chooseFilesInDir()` 不再直接传 `dirUri`，改走同一安全起点；⑤ picker 结果经 `pickedFolderKind()` 分流：非 OK 只给 `folderPickHint(kind)` 并 `return`，**绝不写持久授权、绝不清死路径记忆、绝不动视图**；⑥ 有效目录才走原「清死路径 → 持久授权 → `openFolder()`」；⑦ `openFolder()` 的 `Promise<boolean>` 用 `.then((ok: boolean) => …)` 收口，失败时保留它自己更具体的「无法列出该目录 · …；可点「选择文件夹」重新选择」只补日志，抛异常才补统一提示；⑧ picker reject 仍给「选择文件夹失败：…」 |
+| `tests/dirname.test.mjs` | 构建标记 `R31 → R32`、所有旧包排除列表补 `R31`、截图 / 真机文案同步；`uris[0]` 接线断言改为 `picked`；新增第三十二轮 **30 条**断言（纯函数 17 / 源码接线 10 / 零回归 3） |
+| `README.md` | 抬头 `R31 → R32`；新增本章 |
+
+**关键设计**：
+- **有效起点优先**：`folderPickStartOf()` 只输出「带 scheme 的干净 URI」，
+  把「系统按名字查找」的入口堵死；纯路径 / 纯名字 / `P1:` 快照 / 控制字符
+  一律不设起点（SDK 语义下退回「最近页面」，比传一个坏名字安全）。
+- **真值而非字符串相等**：是否「有效」以 picker 返回的形态 +
+  `openFolder()` 的真实 `fs.listFile` 结果为准，**绝不做目录名字符串比对** ——
+  这正是「不误报」的根。
+- **三类明确提示一字未丢**：未选择 →「未选择文件夹（已取消）· 可点左栏
+  「选择文件夹」重新选择」；名字无效 →「所选文件夹名无效或不存在 · 请重新选择
+  文件夹」；确实列不出 → 保留 `openFolder()` 带具体错误原因的
+  「无法列出该目录 · …；可点「选择文件夹」重新选择」。
+- **零回归**：`openFolder()` / `persistFolderUri()` / `saveDeadTag('')` /
+  `giveUpNow()` / 死路径立即放弃 / 「往上层」不弹系统选择器 /
+  R31 安全编解码与核心优先落盘 / 版本 `1.0.7` / `versionCode 7` / 诊断开关全部未动。
+  恢复期仍然零 IO：新增函数全是纯字符串运算，没有一次 `listFile` / `stat` / `open`。
+
+### 回归验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 12 s 920 ms**（33 tasks：17 executed / 16 up-to-date），`CompileArkTS` **真实执行 8 s 526 ms**、**0 ERROR / 17 WARN**（8 条 `preferences`「Function may throw exceptions」+ 1 条 `READ_IMAGEVIDEO` + 8 条 2in1 系统栏 API，与 R31 基线完全一致，全在本轮**未改动**区域）；签名 HAP **949,525 bytes**（R31 为 941,561 bytes）。详见本节末「编译记录」 |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 HAP 内 `ets/modules.abc`（均 **539,212 bytes**，R31 为 534,888 bytes）检出 `R32=1`（构建标记常量，位于字符串常量表，紧邻 `1.0.7` 与各轮 tag）、`R31=0 / R29=0`；四个新纯函数、`chooseFolder start=` 日志、三类新提示文案、`prefsSafeEncode` / `lastBrowseBase` 全部进入产物 |
+| **静态契约 + 纯函数** | **ALL PASS 1505 passed, 0 failed**（1475 → 1505，新增 30 条）；`git diff --check` 通过 |
+| **真机启动验证** | ⚠️ **本会话无法自行完成**：`hdc` 无目标、`bm install` 失败、`hilog` 权限拒绝。**编译校验 ≠ 真机验证** |
+
+### 覆盖的验证场景（请在装有 `R32` 新包的机器上执行）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R32`（仍是 `R31` 及更早说明装的是旧包） |
+| 2 | 制造 `persist auth lost`（清掉目录授权 / 换 NAS 挂载）后启动 APP | 自动弹「选择路径」，**直接定位到上次的有效目录**，底部「文件夹」名不再为空 |
+| 3 | 在该窗口选中有效 NAS 目录 → 点「选择」 | **不再弹「不存在该名字的文件夹」**，picker 直接返回、APP 进入目录浏览并继续启动（本轮回归点） |
+| 4 | 点「取消」/ 不选任何目录直接关闭 | APP 给「未选择文件夹（已取消）· 可点左栏「选择文件夹」重新选择」，绝不写持久授权 |
+| 5 | 让系统只回一个「名字」（或目录已被删除 / NAS 下线） | APP 给「所选文件夹名无效或不存在 / 无法读取…请重新选择文件夹」，不会假装成功 |
+| 6 | 子目录看图 → 退出 APP → 重开 → 点「往上层」 | R31 两项行为零回归：自动恢复原图片、正常返回上一层 |
+| 7 | 冷启动首次安装 / 换授权根 / 只读名单态重开 | 与 R31 完全一致，零回归 |
+
+> **边界（必须诚实）**：「不存在该名字的文件夹，请重新选择」是**系统文件管理器**的
+> UI 提示，APP 无法改写它的文案。本轮修的是 APP 侧把系统逼到这条校验分支的接线
+> （空起点 + 脏 `defaultFilePathUri`）。如果目录**真的**被删除或 NAS 真的下线，
+> 系统仍可能提示「不存在」——这是正确行为；此时 APP 侧会给出上表第 5 行的明确指引，
+> 用户重新选一个存在的目录即可继续启动流程。
+
+### 编译记录（如实）
+
+- 首次 `assembleHap` 与 `--rerun-tasks` 两次都显示 `CompileArkTS UP-TO-DATE`
+  （增量缓存命中，不能当作「本轮代码已编译」的证据）；
+- 试 `hvigorw clean` 时被环境挡住：`entry/build` 下产物属主为 `file_manager`，
+  当前账号无权删除（`00308004 Operation Error`），HAP 未被清掉；
+- 于是在 `DirName.ts` 改了一行注释强制输入变化，再跑一次普通
+  `assembleHap --no-daemon`：`CompileArkTS ... after 8 s 526 ms` **真实执行**，
+  `BUILD SUCCESSFUL in 12 s 920 ms` / 0 ERROR / 17 WARN，产物重新签名打包。
+  **结论以这次为准**。
 
 ## 第三十一轮：R30 回归 —— 退出重开不恢复图片 / 「往上层」无响应（2026-11-18，R31）
 

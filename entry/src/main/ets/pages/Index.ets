@@ -63,7 +63,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   isUpListPseudoName, mergeUpListNames, rootFormParentOf,
   isSameOrUnderLevelOf, restoreBrowseLevelOf, rawBrowseFormOf,
   UpCacheLevel, encodeUpCacheText, decodeUpCacheText,
-  prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache } from '../common/DirName';
+  prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache,
+  FOLDER_PICK_OK, FOLDER_PICK_UNREADABLE,
+  folderPickStartOf, pickedFolderKind, folderPickHint } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -125,7 +127,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R31';
+const ESC_BUILD_TAG: string = 'R32';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -5964,7 +5966,12 @@ struct Index {
       const opt = new picker.DocumentSelectOptions();
       opt.maxSelectNumber = PICKER_MAX;
       opt.fileSuffixFilters = FILE_FILTERS;
-      opt.defaultFilePathUri = dirUri;
+      // R32：只把带 scheme 的干净 picker URI 交给系统文件管理器。APP 内部拼出的
+      // 纯路径 / 父 URI 会被系统当成「文件夹名」去查找，找不到就弹误报提示。
+      const start: string = folderPickStartOf(dirUri, this.pickRootUri, this.savedDirUri);
+      if (start.length > 0) {
+        opt.defaultFilePathUri = start;
+      }
       dv.select(opt)
         .then((uris: Array<string>) => {
           if (!uris || uris.length === 0) {
@@ -5998,21 +6005,48 @@ struct Index {
       const opt = new picker.DocumentSelectOptions();
       opt.selectMode = picker.DocumentSelectMode.FOLDER;
       opt.maxSelectNumber = 1;
+      // R32：显式给系统文件管理器一个有效起点。启动恢复失败自动弹窗时
+      // browseDir / pickRootUri 都为空，savedDirUri（上次 picker 返回的原始 URI）
+      // 会把系统从「失效的最近页面」拉回真实目录，底部「文件夹」名字框不再是空的
+      // —— 那正是「不存在该名字的文件夹」误报的触发条件。纯路径 / 纯名字 /
+      // 控制字符 / P1: 前缀一律不设起点，绝不把脏串塞给系统。
+      const start: string = folderPickStartOf(this.browseDir, this.pickRootUri, this.savedDirUri);
+      if (start.length > 0) {
+        opt.defaultFilePathUri = start;
+        hilog.info(DOMAIN, TAG, 'chooseFolder start=%{public}s', start);
+      }
       dv.select(opt)
         .then((uris: Array<string>) => {
-          if (!uris || uris.length === 0) {
-            this.status = '已取消选择文件夹';
+          const kind: number = pickedFolderKind(uris);
+          if (kind !== FOLDER_PICK_OK) {
+            // 未选择 / 系统只回了一个「名字」：给明确提示，绝不写持久授权、
+            // 绝不清死路径记忆、也不动视图，让用户重新选一次。
+            this.status = folderPickHint(kind);
+            hilog.warn(DOMAIN, TAG, 'chooseFolder unusable pick, kind=%{public}d', kind);
             return;
           }
-          hilog.info(DOMAIN, TAG, 'chooseFolder picked uri=%{public}s', uris[0]);
+          const picked: string = uris[0];
+          hilog.info(DOMAIN, TAG, 'chooseFolder picked uri=%{public}s', picked);
           // 第十轮 ff1：用户已经重新选到目录 → 死路径记忆立刻作废，
           // 下次启动正常恢复，绝不因为这个标记一直被动弹选择器。
           this.saveDeadTag('');
           // 这是 picker 授予的**原始目录 URI**：立刻建立持久授权，
           // 下次重开就能直接出图，不必再选一次文件夹。fire-and-forget，不挡列目录。
-          this.persistFolderUri(uris[0]);
-          this.pickRootUri = uris[0]; // 只作 picker 起点，不参与父级推算
-          this.openFolder(uris[0], false);
+          this.persistFolderUri(picked);
+          this.pickRootUri = picked; // 只作 picker 起点，不参与父级推算
+          // R32：openFolder 返回 Promise<boolean>，不再丢弃结果。
+          // false 时它自己已给出「无法列出该目录 · …；可点「选择文件夹」重新选择」，
+          // 这里只补日志，绝不覆盖更具体的错误原因；只有抛异常才补统一提示。
+          this.openFolder(picked, false)
+            .then((ok: boolean) => {
+              if (!ok) {
+                hilog.warn(DOMAIN, TAG, 'chooseFolder picked folder not readable');
+              }
+            })
+            .catch((e: Object) => {
+              this.status = folderPickHint(FOLDER_PICK_UNREADABLE);
+              hilog.error(DOMAIN, TAG, 'chooseFolder open rejected: %{public}s', JSON.stringify(e));
+            });
         })
         .catch((e: Object) => {
           this.status = '选择文件夹失败：' + JSON.stringify(e);
