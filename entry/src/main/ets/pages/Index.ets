@@ -72,6 +72,8 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
 // 第三十六轮：用户主动「往上层」的真实全量列举决策（跨同层候选、不 early break）。
 import { upFullExploreWanted, upExploreFormsOf, upExploreCapOf,
   upExploreNeedFallback } from '../common/DirName';
+// 第三十八轮：用户主目录（用户卷根）重新可选择 / 可真实列举。
+import { rootReenterWantedOf, rootReenterFormsOf } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -146,7 +148,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R37';
+const ESC_BUILD_TAG: string = 'R38';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -7073,6 +7075,44 @@ struct Index {
       ' | cur=' + ellipsizeMiddle(current, 30) +
       ' | root=' + ellipsizeMiddle(root, 24) + ' | v' + APP_VERSION;
     if (!canUp) {
+      // 第三十八轮：用户主目录（用户卷根）虽然是「往上层」的逻辑顶，但它自己
+      // 必须能被选择 / 进入并真实列出该层全部顶层资料夹。旧链路在这里无条件按
+      // TOP 早退，/storage/Users/<id> 就成了唯一一个「没有父级、没有同层候选、
+      // 点 .. 永远只回一句提示」的死层 —— 正是「无法选择该路径」的根因。
+      // 只放行「TOP + 恰好是用户卷根」这一种情况：原地重新真实列举本层，
+      // 绝不越过卷根到 /storage、/；其它 TOP / NONE / GO / UNKNOWN 逐字不变。
+      if (rootReenterWantedOf(current, state)) {
+        const reenterRoots: Array<string> = [];
+        if (this.pickRootUri.length > 0) {
+          reenterRoots.push(this.pickRootUri);
+        }
+        if (this.browseDir.length > 0 && this.browseDir !== this.pickRootUri) {
+          reenterRoots.push(this.browseDir);
+        }
+        if (this.savedDirUri.length > 0 && this.savedDirUri !== this.pickRootUri &&
+            this.savedDirUri !== this.browseDir) {
+          reenterRoots.push(this.savedDirUri);
+        }
+        const reenterRaw: string = this.browseDir.length > 0 ? this.browseDir : current;
+        const reenterForms: Array<string> = rootReenterFormsOf(current, reenterRaw, reenterRoots);
+        this.status = '重新进入用户主目录「' + baseName(current) + '」· 真实列举 ' +
+          reenterForms.length + ' 个同层写法';
+        this.diagLine = 'up ROOT | ' + UP_NAV_TAG + ' | st=' + state + ' | L' + level +
+          ' | forms=' + reenterForms.length + ' | root=1 | v' + APP_VERSION;
+        // 用户主动点击才发生的一次真实全量列举；不弹系统选择器、不动恢复态。
+        const reenterOk: boolean = await this.openFolder(current, false, false, false,
+          reenterForms, true);
+        if (reenterOk) {
+          this.status = '已进入「' + baseName(this.browseBase) + '」· 真实列举 ' +
+            this.lastUpExploreNames + ' 项 · 点目录名进入';
+          this.diagLine = 'up ROOT OK | ' + UP_NAV_TAG + ' | L' +
+            dirLevelOf(this.browseBase) + ' | rows=' + this.lastUpExploreNames +
+            ' | forms=' + reenterForms.length + ' | v' + APP_VERSION;
+          return;
+        }
+        // 真实列举失败不静默、不弹系统选择器：回落到下面原有的 TOP 明确提示。
+        hilog.info(DOMAIN, TAG, 'browseUp root reenter list failed, current=%{public}s', current);
+      }
       // 三种「不动」要分开说清楚，绝不把 URI 解析失败误报成「已到最上层」。
       if (state === UP_NAV_NONE || current.length === 0) {
         this.status = '当前是图片列表，没有上层目录（用「选择文件夹」进入目录浏览）';

@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R37` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R38` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -30,6 +30,7 @@
 | 纯文本 / 源码预览 | **11-19 起**：左栏直接列出 `.log` / `.txt` / `.c` / `.py` / `.asm` / `.v` 等 **111 种**文本 / 源码后缀；自动识别语言，C-like / Python / ASM / Verilog 启用语法高亮，**未命中高亮规则的文件仍按普通文本完整展示**；只读不写、保留原始换行 / 缩进 / 特殊字符；行号 + 等宽字体；UTF-8 / UTF-16 BOM / GB18030 / Big5 / Windows-1252 兼容；横向滚动不裁长行、纵向 `LazyForEach` 虚拟化可稳定显示十几万行（见第三十七轮章节） |
 | 挑图入口 | 仅 `选择文件夹`（`DocumentSelectMode.FOLDER`）；**`打开图库`（v1.0.6）、`选择图片` 与 `回到上次`（11-10）三个按钮均已取消**，界面上不再出现（见「按钮区精简」章节） |
 | 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `往上层` / `退格` 按**目录层级**进入直接父目录（**不按浏览历史回退**，连续点击逐级到卷 / 硬盘逻辑最上层后停止）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
+| 路径选择 / 用户主目录 | **11-19 起（R38）**：`往上层` 到 `/storage/Users/<id>` 这一用户卷根时不再被 TOP 早退锁成死层，用户主动点击即**原地真实重新列举该层全部顶层资料夹**并可正常进入；其它路径（`/` / 盘符 / NAS 设备根 / 深层）的选择与「往上层」行为逐字不变，R28 越级护栏保留（见第三十八轮章节） |
 | 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` **恒亮恒可点，永不 grey out / 永不禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
@@ -534,6 +535,68 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十八轮：`/storage/Users/currentUser` 无法选择 —— 用户卷根重新可进入 / 可真实列举（2026-11-19，R38）
+
+**用户需求**：检查相关代码与配置，定位无法选择 `/storage/Users/currentUser` 的原因并修复，使该路径能够正常被选择；**仅调整与路径选择限制相关的逻辑，保持其他路径的选择行为不变**；完成后简要说明改动范围、修复内容和验证结果。经追问确认落点为 **APP 左栏目录行**（不是 WorkBuddy 工作区选择，也不是系统 FOLDER picker 主入口）。
+
+### 排查：按事件链路走，不凭缓存记录推断原因
+
+先排除配置侧：`AppScope/app.json5`（版本守卫）、`module.json5`（仅 `FILE_ACCESS_PERSIST`）、`build-profile.json5`、`.bitfun/project.json`、WorkBuddy `settings.json` 的 96 条 sandbox 规则、客户端 `app.asar` 内的 `HARMONY_USER_DIR_FALLBACKS` / `pickFolder()` / `taskStarter` 默认工作区校验（`Ti` / `NT` 实为过滤 `claw` 内部目录），**均无针对 `/storage/Users/currentUser` 的显式拒绝**。系统 FOLDER picker 侧 `defaultFilePathUri` 也只由 `pickerStartSafe()` 生成干净 URI，不拦该路径。
+
+再按用户要求从**事件入口 → `browseUp()` → 状态标志 → 下游主链**走一遍纯函数探针（`/tmp/r38_probe*.mjs`），而不是从 `upDirCache` 反推：
+
+| 环节 | `/storage/Users/currentUser` 实际值 |
+|---|---|
+| `volumeRootOf()` | `/storage/Users/currentUser`（**用户卷根 L0**） |
+| `upLevelOf()` | `''`（无父层） |
+| `upNavStateOf()` | `UP_NAV_TOP` |
+| `upParentCandidates()` | `[]`（无同层父候选） |
+| `canUp` | `false` → 进入 `browseUp()` 的 `if (!canUp)` 分支 |
+| 分支行为 | **无条件按 TOP 早退**，只回一句「已到卷 / 硬盘的逻辑最上层」提示 |
+
+**根因**：R28 的卷根护栏本身是正确的（阻止「往上层」越级到 `/storage`、`/` 这类系统目录），但它的副作用是把**用户主目录本身**锁成了一个「没有父级、没有同层候选、点 `..` / `往上层` 永远只回一句提示、既不重新列举也无法进入」的死层 —— 这正是左栏目录行表现为「无法选择该路径」的原因。
+
+### 改动范围（3 个文件，只碰路径选择限制相关逻辑）
+
+| 文件 | 内容 |
+|---|---|
+| `entry/src/main/ets/common/DirName.ts` | 新增第三十八轮区块 3 个**纯字符串、零 IO、零抛出**函数：`isUserVolumeRootOf()`（精确识别 `/storage/(Users\|media\|emulated)/<id>`，恰好 4 段且 id 非空；深层 / `/` / 盘符 / NAS / URI 碎片一律 false）、`rootReenterWantedOf()`（唯一放行条件 = `TOP` 态**且**当前层恰好是用户卷根）、`rootReenterFormsOf()`（用 `rootFormParentOf()` 把深层 picker 授权 URI 还原成与卷根同 scheme 的写法，加真实路径兜底，并用 `canonicalLevelKeyOf()` 卡死同层、绝不生成 `/storage` / `/`）。**`volumeRootOf()` / `upLevelOf()` / `upNavStateOf()` / `upParentCandidates()` 一字未改** |
+| `entry/src/main/ets/pages/Index.ets` | `ESC_BUILD_TAG → R38`；仅在 `browseUp()` 的 `if (!canUp)` 分支内、原有 TOP 早退**之前**插入唯一放行分支：`rootReenterWantedOf(current, state)` 为真时，收集 `pickRootUri` / `browseDir` / `savedDirUri` 作授权形态锚点，调 `rootReenterFormsOf()` 得到同层写法，再 `openFolder(current, false, false, false, reenterForms, true)` **原地真实全量列举本层**；成功更新 `status` / `diagLine`（`up ROOT OK`）并 `return`，失败 `hilog.info()` 后回落到原有 TOP 明确提示。**不弹系统选择器、不动恢复态、不改 `chooseFolder()` / `chooseFilesInDir()` / `openFolder()` 主体** |
+| `tests/dirname.test.mjs` | 构建标记 `R37 → R38`、7 组旧包排除数组补 `R37`；新增 **22 条** R38 断言（用户卷根精确识别 / 其它 TOP 一律不重新列举 / 同层写法与越级护栏 / `Index.ets` 接线 / R28 零回归 / 版本与旧包排除 / 新纯函数零 SDK·零 IO·零 await·零 throw），另有 5 条既有构建标记断言随 R38 升级，合计 27 条 `R38` 断言 |
+
+### 三类证据（严格分开）
+
+| 类别 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw --mode module -p product=default assembleHap --no-daemon` → **BUILD SUCCESSFUL in 19 s 551 ms**，日志出现 `Finished :entry:default@CompileArkTS... after 11 s 889 ms`（**真实编译，非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（全为既有 `Function may throw exceptions`，与 R37 基线一致）；签名 HAP **1,101,835 bytes**（R37 为 1,093,949），未签名 1,066,201 bytes |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 signed / unsigned HAP 内 `ets/modules.abc`（均 **624,472 bytes**，R37 为 620,068）检出 **`R38=1 / R37=0 / R36=0 / R35=0 / R34=0 / R33=0`**；`1.0.7=1 / 1.0.6=0`；`isUserVolumeRootOf` / `rootReenterWantedOf` / `rootReenterFormsOf` **各 2 处**进入产物，`up ROOT OK=1`、`up ROOT \|=1` |
+| **静态契约 + 纯函数** | **ALL PASS 1769 passed, 0 failed**（R37 为 1747，新增 22 条 R38 断言）；`node --experimental-strip-types`、`node --check`、`git diff --check` 通过；相对 HEAD：`DirName.ts +91`、`Index.ets +42`、`tests/dirname.test.mjs +232/-53`，合计 `312 insertions / 53 deletions` |
+
+> ⚠️ **`node --experimental-strip-types` 只剥离 TS 类型、不做完整类型检查；静态契约不能
+> 代替真实 ArkTS 编译，编译校验更不能代替真机验证。** 真机 DevEco / 设备安装 / `hdc` /
+> `hilog` 侧验证由用户完成。
+
+### 覆盖的验证场景（请在装有 `R38` 新包的机器上执行）
+
+| # | 场景 | 期望 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R38`（仍是 `R37` 及更早说明装的是旧包） |
+| 2 | 从任意子目录反复「往上层」直到 `/storage/Users/currentUser`，再点一次 `..` / `往上层` | 不再只回一句「已到最上层」；**原地重新真实列举**该层全部顶层资料夹（Download / Desktop / Documents / Pictures / Music / Videos …），诊断串出现 `up ROOT OK ... root=1` |
+| 3 | 左栏点这些顶层资料夹目录行 | 正常进入子目录，与 R36 / R37 既有目录浏览、退出恢复行为完全一致 |
+| 4 | 在 `/`（或 `C:`、NAS 设备根）点「往上层」 | **仍**给「已到卷 / 硬盘的逻辑最上层」提示，绝不越级到 `/storage` / 系统目录（R28 护栏零回归） |
+| 5 | 深层目录连续「往上层」、空目录 / 无图片目录、反复进入子目录 | R36 的目录恢复与父层全量列举仍正确；`/storage/Users/currentUser` 只在**用户主动点击且当前层恰好是卷根**时才重列举 |
+| 6 | 自动重扫（每 1.5s）/ 启动恢复期 | 零新增 `fs.listFile`，绝不重演 R27 `THREAD_BLOCK_6S` |
+| 7 | 系统 FOLDER picker 选择其它任意路径 | 选择行为逐字不变（R32 的起点 / 校验 / 提示链路未动） |
+
+### 边界（刻意保留）
+
+- **只放行一种情况**：`TOP` 态 + 当前层恰好是用户卷根 + 用户主动点击；其它 `TOP`（`/`、`C:`、NAS 设备根）、`NONE` / `GO` / `UNKNOWN` 以及所有深层路径的「往上层」逻辑逐字不变。
+- **不越过卷根**：`rootReenterFormsOf()` 用 `canonicalLevelKeyOf()` 卡死同层，产物中不含 `/storage` / `/` 形态；R28 越级护栏保留。
+- **零新增常驻 IO**：仅用户主动点击时一次真实全量列举；自动重扫 / 启动恢复期不触发。
+- **不动配置**：版本恒为 `1.0.7 / versionCode 7`；`module.json5` 权限、`build-profile.json5`、picker 配置均未改；未 `push`、未跑 `build.sh`、未把 HAP 放桌面。
+
+---
 
 ## 第三十七轮：纯文本 / 源码文件预览（2026-11-19，R37）
 

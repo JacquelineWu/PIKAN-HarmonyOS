@@ -1627,3 +1627,94 @@ export function upExploreCapOf(formCount: number, cap: number): number {
 export function upExploreNeedFallback(realNameCount: number): boolean {
   return realNameCount <= 0;
 }
+
+// --------------------------------------------------------------------
+// 第三十八轮：用户主目录（用户卷根）重新可选择 / 可真实列举（2026-11-19，R38）
+//
+// 症状：APP 内从任何深层反复「往上层」，或直接用「选择文件夹」选中
+//   `/storage/Users/currentUser` 后，这一层进不去、列不出它下面全部顶层资料夹。
+//
+// 根因（纯函数探针实测，不靠缓存记录猜）：
+//   volumeRootOf('/storage/Users/currentUser') → 卷根 L0；
+//   upLevelOf(卷根) = '' → upNavStateOf(卷根) = UP_NAV_TOP；
+//   upParentCandidates(卷根, ...) = []；isUpTargetOf(picked, 卷根) 恒 false。
+//   R28 用卷根护栏阻止「往上层」越级到 /storage、/ 这类系统目录，这个护栏本身
+//   是对的；但它把 /storage/Users/<id> 也一并锁成了「没有父级、没有同层候选、
+//   不能作为目标层」的死层 —— browseUp() 在 !canUp 分支直接早退，这一层永远
+//   不会被真实重新列举，用户也就选不中它。
+//
+// 本轮只松开「用户卷根能否被选择 / 重新真实列举」这一条限制：
+//   · 不改 volumeRootOf / upLevelOf / upNavStateOf / upParentCandidates，
+//     卷根仍然是「往上层」的逻辑顶，绝不越级到系统目录（R28 护栏零回归）；
+//   · 仅当用户主动点击且当前层确实是「用户卷根」时，才允许原地重新列举本层，
+//     把该层全部顶层资料夹真实列出来；其它层级 / NAS / 盘符根 / 文档 URI 零改动。
+// --------------------------------------------------------------------
+
+/** 是否恰好是鸿蒙「用户卷根」`/storage/(Users|media|emulated)/<id>`。
+ *  必须恰好 4 段且 id 非空：更深的路径、/storage/Users、/、盘符根、NAS 卷、
+ *  文档 URI 碎片一律 false。纯字符串、零 IO、零抛出，可直接 Node 回归。 */
+export function isUserVolumeRootOf(path: string): boolean {
+  const s: string = hierPathOf(path);
+  if (s.length === 0 || s.charAt(0) !== '/') {
+    return false;
+  }
+  const parts: string[] = s.split('/');
+  if (parts.length !== 4 || parts[0].length !== 0 || parts[1] !== 'storage') {
+    return false;
+  }
+  if (parts[2] !== 'Users' && parts[2] !== 'media' && parts[2] !== 'emulated') {
+    return false;
+  }
+  return parts[3].length > 0;
+}
+
+/** 是否允许在「已到逻辑顶层」时原地重新真实列举当前层。
+ *  唯一放行条件：TOP 态 + 当前层确实是用户卷根。
+ *  其它 TOP（`/`、`C:`、NAS 设备根）与 NONE / GO / UNKNOWN 一律 false，
+ *  保证其它路径的「往上层」选择行为逐字不变。 */
+export function rootReenterWantedOf(current: string, navState: number): boolean {
+  return navState === UP_NAV_TOP && isUserVolumeRootOf(current);
+}
+
+/** 用户卷根的「同层」全部 URI 写法，供 openFolder 逐个真实 listFile 再合并。
+ *  授权是按 URI 字符串逐项发放的：纯路径 `/storage/Users/currentUser` 未必有授权，
+ *  而 picker 原始授权 URI 剥到卷根层的同 scheme 形态最可能被 fs.listFile 接受。
+ *  rootFormParentOf() 已负责把任意深层授权 URI 还原成与 target 同形态的写法，
+ *  这里再补解码 / 百分号编码形态，并用 canonicalLevelKeyOf 卡死「必须落在卷根层」，
+ *  绝不生成 /storage、/ 等越级形态。纯字符串、零 IO。 */
+export function rootReenterFormsOf(current: string, rawUri: string,
+  extraRoots: Array<string>): Array<string> {
+  const out: Array<string> = [];
+  if (!isUserVolumeRootOf(current)) {
+    return out;
+  }
+  const targetKey: string = canonicalLevelKeyOf(current);
+  const seen: Set<string> = new Set<string>();
+  const add = (s: string): void => {
+    if (s.length === 0 || seen.has(s)) {
+      return;
+    }
+    if (canonicalLevelKeyOf(s) !== targetKey) {
+      return;
+    }
+    seen.add(s);
+    out.push(s);
+  };
+  // ① 与 picker 授权同 scheme 的卷根写法（命中率最高，排最前）
+  const roots: Array<string> = [rawUri];
+  for (let i = 0; i < extraRoots.length; i++) {
+    roots.push(extraRoots[i]);
+  }
+  for (let i = 0; i < roots.length; i++) {
+    const rp: string = rootFormParentOf(roots[i], current);
+    if (rp.length > 0) {
+      add(rp);
+      add(safeDecode(rp));
+      add(encodePathForm(rp));
+    }
+  }
+  // ② 真实路径兜底，保证至少有一条能列的形态
+  add(current);
+  add(encodePathForm(current));
+  return out;
+}

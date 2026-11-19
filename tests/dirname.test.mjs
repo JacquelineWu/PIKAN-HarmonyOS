@@ -33,6 +33,8 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第三十八轮「用户主目录 /storage/Users/currentUser 重新可选择：用户卷根原地真实列举 /
+ *    R28 越级护栏零回归 / 其它路径选择行为逐字不变 / R38 构建标记」、
  * 第三十七轮「纯文本 / 源码文件预览：类型自动识别 / C·Python·ASM·Verilog 语法高亮 /
  *    编码兼容 / 行号等宽排版 / 大文件稳定 / R37 构建标记」、
  * 第三十五轮「往上层后只显示一个目录 —— 多 URI 写法列举结果合并而非覆盖 / 缓存目录结构
@@ -86,6 +88,7 @@ import { baseName, dirDisplayName, stripTrailingSlash, realPathOf, parentDirOf, 
   mergeExploreNames, exploreBaseOf, exploreSiblingNamesOf } from '../entry/src/main/ets/common/DirName.ts';
 import { upFullExploreWanted, upExploreFormsOf, upExploreCapOf,
   upExploreNeedFallback } from '../entry/src/main/ets/common/DirName.ts';
+import { isUserVolumeRootOf, rootReenterWantedOf, rootReenterFormsOf } from '../entry/src/main/ets/common/DirName.ts';
 import { HoverGuard } from '../entry/src/main/ets/common/HoverGuard.ts';
 import { preloadWindowSize, preloadOrder, preloadSaturated,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -1305,9 +1308,9 @@ check('右下角：正式版只显示缩放百分比；诊断层展开时显示�
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R37 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比恒在右下角；R38 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3786,8 +3789,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 诊断层展开时可见 R37 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+check('③ 诊断层展开时可见 R38 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3813,7 +3816,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R37，否则说明装的是旧包。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3874,8 +3877,8 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R37 构建标记已升级（R33 / R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+check('④ R38 构建标记已升级（R33 / R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -3907,7 +3910,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：展开诊断层后须出现 R37；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R38；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3975,8 +3978,8 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R37 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+check('⑤ R38 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4054,8 +4057,8 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R37 构建标记且 R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+check('④ R38 构建标记且 R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4109,9 +4112,9 @@ check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
   (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
 
-console.log('--- 第二十五轮 ③：R37 构建标记 + 既有链路零回归 ---');
-check('③ R37 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+console.log('--- 第二十五轮 ③：R38 构建标记 + 既有链路零回归 ---');
+check('③ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4193,10 +4196,10 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
   INDEX_CODE26.split('.autoResize(false)').length - 1 === 3 &&
   INDEX_CODE26.split('.dynamicRangeMode(').length - 1 === 3, true);
 
-console.log('--- 第二十六轮 ④：R37 构建标记 + 既有链路零回归 ---');
+console.log('--- 第二十六轮 ④：R38 构建标记 + 既有链路零回归 ---');
 check('④ ESC_BUILD_TAG=R35，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
-  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4310,13 +4313,13 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
-check('⑤ R37 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
-  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('⑤ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
 console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
 
 // ==================== 第二十八轮：NAS 往上层显示错误文件夹清单（2026-11-16，R28） ====================
 // 用户复现路径：/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026
@@ -4434,9 +4437,9 @@ check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.browseBase = target;/.test(UPLIST_CODE) &&
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
-check('R37 构建标记，R33 及更早旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
-  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R38 构建标记，R33 及更早旧标记全清除',
+  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十八轮 ⑥：其它导航 / 历史修复零回归 ---');
@@ -4462,7 +4465,7 @@ check('R29 零回归：ro1 总闸门 / 启动路径零 new Promise 未动',
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   /new Promise|Promise\.race/.test(RESUME_FN) === false, true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
 
 // ==================== 第二十九轮：上层清单只列 2026、且混入伪目录行（2026-11-16，R29） ====================
 // 真机截图 screenshot_20261116_045747（R29 之前的 R28 包）：
@@ -4631,9 +4634,9 @@ check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧�
   /isStrictParentOf\(target, current\)/.test(UP_FN) &&
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
   /this\.pickRootUri = '';/.test(UP_FN), true);
-check('R37 构建标记且 R33 及更早旧包全部可从截图排除',
-  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
-  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R38 构建标记且 R33 及更早旧包全部可从截图排除',
+  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十九轮 ⑥：目录结构 / 命名 / 导航行为零回归 ---');
@@ -4658,7 +4661,7 @@ check('R29 零回归：非 NAS 卷根 / 文档 URI / 版本守卫 / R27 真异�
   /private readGuarded\(/.test(INDEX) &&
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
 
 // ==================== 第三十轮：重启后「往上层」层级与内容恢复（2026-11-18，R30） ====================
 // 实机复现：退出前在授权根的子目录（…/2026/编号202618 模特 奶茶）里看图，
@@ -4833,9 +4836,9 @@ check('R30 零回归：R27 真异步 / R26 翻页 / R25 诊断开关 / 版本守
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX) &&
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机重启验证。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
 
 // ==================== 第三十一轮：R30 回归修复 —— 状态恢复 + 往上层响应（2026-11-18，R31） ====================
 // 回归现象：装 R30 后退出 APP 重开，上次的图片档案不再自动打开；点「往上层」像没反应。
@@ -4890,8 +4893,8 @@ check('R31 端到端：第三层中文条目名逐一致（中文不膨胀、不
 console.log('--- 第三十一轮 ②：Index.ets 静态接线（隔离 / 编码 / 自愈） ---');
 check('R31 接线：DirName import 三个新函数',
   /prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache/.test(INDEX), true);
-check('R35 接线：ESC_BUILD_TAG 升 R37 且源码不再有 R34 定义',
-  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
+check('R35 接线：ESC_BUILD_TAG 升 R38 且源码不再有 R34 定义',
+  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
   /const ESC_BUILD_TAG: string = 'R35';/.test(INDEX) === false &&
   /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) === false, true);
 check('R31 接线：readLastPos 主 try 只 await readBrowseExtras（增强 key 不再内联）',
@@ -4941,7 +4944,7 @@ check('R31 零回归：两条恢复路径仍在 setItems 后回填、版本 1.0.
 check('R31 零回归：恢复期仍零 IO（restoreBrowseContext / restoreUpCache 无文件访问）',
   /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|startDirPoll|DocumentViewPicker|PhotoViewPicker/.test(UPC_CODE), false);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机重启验证；真实 ArkTS 编译是另一类证据。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 子目录看图 → 退出 APP 重开 → 应自动打开原图片档案；点「往上层」应返回上一层界面。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 子目录看图 → 退出 APP 重开 → 应自动打开原图片档案；点「往上层」应返回上一层界面。');
 
 // ==================== 第三十二轮：启动阶段 FOLDER picker 误报「不存在该名字的文件夹」 ====================
 console.log('\n--- 第三十二轮 ①：picker 起点 / 返回值纯函数（2026-11-18，R32） ---');
@@ -5051,7 +5054,7 @@ check('R32 零回归：R31 安全编解码 + 核心优先落盘仍在',
   /this\.savedUpCacheRaw = prefsSafeDecode\(/.test(INDEX) &&
   /save browse extras failed \(ignored\)/.test(INDEX), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；「不存在该名字的文件夹」是系统文件管理器的 UI 提示，属系统侧行为。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 制造 persist auth lost → 自动弹「选择路径」→ 选有效 NAS 目录点「选择」→ 应直接返回并进入目录。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 制造 persist auth lost → 自动弹「选择路径」→ 选有效 NAS 目录点「选择」→ 应直接返回并进入目录。');
 
 // ==================== 第三十三轮：缓存父子逻辑层级索引（2026-11-19，R33） ====================
 console.log('\n--- 第三十三轮 ①：缓存父子层级索引纯函数 ---');
@@ -5238,7 +5241,7 @@ check('R34 零回归：R33 初始化预建索引仍是纯字符串零 IO（恢�
     INDEX.slice(INDEX.indexOf('private rebuildUpParentIndex('),
       INDEX.indexOf('/** 第三十一轮'))) === false, true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 逐层进入或直接选深层目录 → 点「往上层」→ 目录应上移或出 APP 内清单，绝不再「无响应」。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 逐层进入或直接选深层目录 → 点「往上层」→ 目录应上移或出 APP 内清单，绝不再「无响应」。');
 
 console.log('--- 第三十三轮 ③：既有链路零回归 + 验证边界 ---');
 check('R33 零回归：原路径层级链 / 同层候选 / APP 内清单仍在（仅索引未建立时兜底）',
@@ -5256,7 +5259,7 @@ check('R33 零回归：恢复期仍零 IO（新增函数全是纯字符串）',
     INDEX.slice(INDEX.indexOf('private rebuildUpParentIndex('),
       INDEX.indexOf('/** 第三十一轮'))) === false, true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 逐层进入 L0→L1→L2→L3 → 连续点「往上层」→ 应逐级 L3→L2→L1→L0，到 L0 保持不变。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 逐层进入 L0→L1→L2→L3 → 连续点「往上层」→ 应逐级 L3→L2→L1→L0，到 L0 保持不变。');
 
 // ==================== 第三十五轮：往上层后完整探索并列举父层全部目录（2026-11-19，R35） ====================
 // 用户报障：点「往上层」后只显示一个目录，没有探索这一层的其它目录。
@@ -5432,12 +5435,12 @@ check('R35 零回归：版本 1.0.7 / 诊断默认关闭 / 往上层恒亮不禁
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /\.enabled\(/.test(CODE_LINES) === false &&
   /isStrictParentOf\(target, current\)/.test(UP_FN), true);
-check('R37 构建标记升 R37，R34 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
-  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+check('R38 构建标记升 R38，R34 及更早旧包可从截图一眼排除',
+  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤：装 R37 包 → 进入深层目录 → 点「往上层」→ 应列出该层全部子目录（含非当前目录的兄弟目录）。');
+console.log('  ⚠️ 真机步骤：装 R38 包 → 进入深层目录 → 点「往上层」→ 应列出该层全部子目录（含非当前目录的兄弟目录）。');
 console.log('  ⚠️ 边界：父层完全无 URI 授权、且会话缓存里也没有其它兄弟目录痕迹时，');
 console.log('     APP 内清单仍只能列出当前目录 —— 零 IO 兜底绝不凭空编造目录名。');
 
@@ -5552,9 +5555,9 @@ check('R36 接线：Index 引入两组新纯函数（DirName 列举 / ResumePlan
 check('R36 接线：目录态持久化 key + 全量探索夹界常量',
   /const POS_KEY_DIRCTX: string = 'lastDirCtx';/.test(INDEX) &&
   /const UP_EXPLORE_MAX_FORMS: number = 64;/.test(INDEX), true);
-check('R37 构建标记升 R37，R35 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
-  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+check('R38 构建标记升 R38，R35 及更早旧包可从截图一眼排除',
+  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('R36 根因护栏 A：markPos 无图片时不再直接 return，仍排一次写盘',
   /private markPos\(\): void \{[\s\S]{0,700}dirContextSaveWanted\(this\.browseBase, this\.items\.length, false\)[\s\S]{0,160}this\.scheduleFlush\(\);/.test(INDEX), true);
@@ -5640,7 +5643,7 @@ check('R36 纯函数区块零 IO / 零 await / 零抛出（可直接 Node 回归
   /export function dirContextSaveWanted\(/.test(R36_RP_SRC) &&
   /export function dirOnlyResumeWanted\(/.test(R36_RP_SRC), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤 A：装 R37 包 → 进入空目录 / 无图片 / 只有子文件夹的目录 → 退出 APP →');
+console.log('  ⚠️ 真机步骤 A：装 R38 包 → 进入空目录 / 无图片 / 只有子文件夹的目录 → 退出 APP →');
 console.log('     重开应直接停在该目录（不得回默认目录、不得弹选择器、不得因零图片丢状态）。');
 console.log('  ⚠️ 真机步骤 B：从深层目录连续点「往上层」多级、反复进子目录再上移，');
 console.log('     每次都应真实列出该层全部资料夹目录（含非当前目录的兄弟目录），不是只显示一个。');
@@ -5869,9 +5872,9 @@ check('R37 TextDoc.ts 零 SDK import / 零 await 语句 / 零 throw 语句 / 零
   /@ohos\.|fs\.|DocumentViewPicker|\basync\s+function\b/.test(TEXTDOC_CODE) === false, true);
 check('R37 TextDoc.ts 纯函数导出齐全（59 个 export）',
   (TEXTDOC.match(/^export (const|function|interface)/gm) || []).length, 59);
-check('R37 Index import TextDoc 真值源，且构建标记升 R37',
+check('R38 Index import TextDoc 真值源，且构建标记升 R38',
   INDEX.includes("from '../common/TextDoc';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';"), true);
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';"), true);
 check('R37 新增 ROW_TEXT=4，文本行只进 rows 不进 items',
   /const ROW_TEXT: number = 4;/.test(INDEX) &&
   INDEX.includes('texts.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_TEXT, itemIndex: -1 });') &&
@@ -5991,13 +5994,13 @@ check('R37 零回归：往上层主链 / R36 目录态 / ESC 严格两态 / 诊�
   INDEX.includes("const POS_KEY_DIRCTX: string = 'lastDirCtx';") &&
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   INDEX.includes('escActionByState(this.fullscreen, this.pendingSystemEcho);'), true);
-check('R37 构建标记 R37，R36 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
-  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
+check('R38 构建标记 R38，R37 及更早旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
     'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤 A：装 R37 包 → 选含 .log/.txt/.c/.py/.asm/.v 的目录 → 点文本行 →');
+console.log('  ⚠️ 真机步骤 A：装 R38 包 → 选含 .log/.txt/.c/.py/.asm/.v 的目录 → 点文本行 →');
 console.log('     右栏应出行号 + 等宽排版 + 对应语法着色；未知后缀文件按普通文本完整展示。');
 console.log('  ⚠️ 真机步骤 B：UTF-8 / UTF-16 BOM / GB18030 / Big5 / Windows-1252 各准备一份，');
 console.log('     抬头应显示识别出的编码；CRLF / CR / LF、缩进 / Tab / 特殊字符不得丢失或改写。');
@@ -6006,6 +6009,131 @@ console.log('     「往上层」应退出文本态且图片预览、目录恢�
 console.log('  ⚠️ 边界：单次最多读 8MB / 12 万行，超出在抬头明确提示「已显示前 8 MB / 120000 行」；');
 console.log('     二进制内容（NUL / 高比例控制字符）按提示展示，不刷满屏乱码；全程只读不写。');
 
+
+
+// ==================== 第三十八轮：用户主目录（用户卷根）重新可选择（2026-11-19，R38） ====================
+// 需求：/storage/Users/currentUser 能正常被选择 / 进入，并真实列出该层全部资料夹；
+//       仅调整与「路径选择限制」相关的逻辑，其它路径的选择行为保持不变。
+// 根因（纯函数探针实测，不靠缓存记录猜）：volumeRootOf 把它判为卷根 L0 →
+//   upLevelOf(卷根)='' → upNavStateOf=UP_NAV_TOP → upParentCandidates(卷根)=[] →
+//   browseUp() 在 !canUp 分支直接早退，这一层永远不会被真实重新列举，也选不中。
+// 修法：只放行「TOP + 恰好是用户卷根」，原地重新真实列举本层；
+//       volumeRootOf / upLevelOf / upNavStateOf / upParentCandidates 一字不改，
+//       R28「绝不越级到 /storage、/」的护栏完整保留。
+// VOLROOT 已在上方「卷根 / 层级」组定义，本组直接复用同一真值，绝不另立常量。
+const R38_DEEPURI = 'file://docs/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc/人像/编号202601 模特 猫/';
+
+console.log('--- 第三十八轮 ①：用户卷根识别（精确 4 段，其它形态一律 false） ---');
+check('R38 用户卷根：纯路径 / 尾斜杠 / file://docs 形态都认得',
+  isUserVolumeRootOf(VOLROOT) && isUserVolumeRootOf(VOLROOT + '/') &&
+  isUserVolumeRootOf('file://docs' + VOLROOT), true);
+check('R38 用户卷根：media / emulated 桶同样认得',
+  isUserVolumeRootOf('/storage/media/100') && isUserVolumeRootOf('/storage/emulated/10'), true);
+check('R38 非用户卷根：深层 / /storage/Users / /storage / / 全拒绝',
+  isUserVolumeRootOf(VOLROOT + '/Download') === false &&
+  isUserVolumeRootOf('/storage/Users') === false &&
+  isUserVolumeRootOf('/storage') === false && isUserVolumeRootOf('/') === false, true);
+check('R38 非用户卷根：盘符 / NAS / 挂载前缀 / URI 碎片 / 空串全拒绝',
+  isUserVolumeRootOf('C:/') === false && isUserVolumeRootOf('C:') === false &&
+  isUserVolumeRootOf('/192.168.100.61') === false &&
+  isUserVolumeRootOf('/storage/userExternal/192.168.100.61/图片档案') === false &&
+  isUserVolumeRootOf('file://docs') === false && isUserVolumeRootOf('') === false, true);
+
+console.log('--- 第三十八轮 ②：只放行「TOP + 用户卷根」，其它导航状态零放行 ---');
+check('R38 rootReenterWantedOf 唯一放行情景',
+  rootReenterWantedOf(VOLROOT, UP_NAV_TOP), true);
+check('R38 其它导航态一律不重新列举（NONE / GO / UNKNOWN）',
+  rootReenterWantedOf(VOLROOT, UP_NAV_NONE) === false &&
+  rootReenterWantedOf(VOLROOT, UP_NAV_GO) === false &&
+  rootReenterWantedOf(VOLROOT, UP_NAV_UNKNOWN) === false, true);
+check('R38 其它 TOP 顶层一律不重新列举（/ / 盘符 / NAS 设备根 / 深层）',
+  rootReenterWantedOf('/', UP_NAV_TOP) === false &&
+  rootReenterWantedOf('C:', UP_NAV_TOP) === false &&
+  rootReenterWantedOf('/192.168.100.61', UP_NAV_TOP) === false &&
+  rootReenterWantedOf(VOLROOT + '/Download', UP_NAV_TOP) === false, true);
+check('R38 用户卷根自身仍是 TOP，但重新进入不改变「没有父级」语义',
+  upNavStateOf(VOLROOT) === UP_NAV_TOP && upLevelOf(VOLROOT) === '' &&
+  volumeRootOf(VOLROOT) === VOLROOT, true);
+
+console.log('--- 第三十八轮 ③：同层写法生成，绝不越级 ---');
+const R38_FORMS = rootReenterFormsOf(VOLROOT, R38_DEEPURI,
+  [R38_DEEPURI, 'file://docs' + VOLROOT + '/Download/']);
+check('R38 卷根写法含授权同 scheme 形态与真实路径兜底',
+  R38_FORMS.indexOf('file://docs' + VOLROOT) >= 0 &&
+  R38_FORMS.indexOf(VOLROOT) >= 0, true);
+check('R38 卷根写法全部落在卷根层，绝不生成 /storage、/ 等越级形态',
+  R38_FORMS.length >= 2 && R38_FORMS.every(f =>
+    canonicalLevelKeyOf(f) === canonicalLevelKeyOf(VOLROOT)) &&
+  R38_FORMS.every(f => isUserVolumeRootOf(f)), true);
+check('R38 卷根写法按原名去重、首个是授权同形态',
+  new Set(R38_FORMS).size === R38_FORMS.length &&
+  R38_FORMS[0] === 'file://docs' + VOLROOT, true);
+check('R38 非用户卷根调用一律返回空数组（绝不误列举其它层）',
+  rootReenterFormsOf(VOLROOT + '/Download', R38_DEEPURI, []).length === 0 &&
+  rootReenterFormsOf('/', R38_DEEPURI, []).length === 0 &&
+  rootReenterFormsOf('', R38_DEEPURI, []).length === 0, true);
+
+console.log('--- 第三十八轮 ④：Index.ets 接线（只改 !canUp 的卷根分支） ---');
+check('R38 三个新纯函数已 import 进 Index.ets',
+  /rootReenterWantedOf, rootReenterFormsOf/.test(INDEX) &&
+  INDEX.includes('rootReenterWantedOf(current, state)') &&
+  INDEX.includes('rootReenterFormsOf(current, reenterRaw, reenterRoots)'), true);
+check('R38 卷根分支在 !canUp 内、由 TOP+用户卷根唯一放行',
+  UP_FN.indexOf('if (rootReenterWantedOf(current, state)) {') >
+    UP_FN.indexOf('if (!canUp) {') &&
+  UP_FN.indexOf('if (rootReenterWantedOf(current, state)) {') <
+    UP_FN.indexOf('// 三种「不动」要分开说清楚'), true);
+check('R38 卷根分支真实全量列举本层，绝不弹系统选择器',
+  UP_FN.includes('const reenterOk: boolean = await this.openFolder(current, false, false, false,') &&
+  UP_FN.includes('reenterForms, true)') &&
+  /root reenter list failed/.test(UP_FN) &&
+  /DocumentViewPicker|dv\.select|chooseFolder\(|isUpTargetOf\(/.test(UP_FN) === false, true);
+check('R38 成功后给出真实列举项数并 return；失败回落原 TOP 提示',
+  UP_FN.includes('up ROOT OK |') && UP_FN.includes('this.lastUpExploreNames') &&
+  UP_FN.includes('this.status = \'已到卷 / 硬盘的逻辑最上层') &&
+  (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2, true);
+check('R38 三个原始授权锚点都交给同层写法生成',
+  /reenterRoots\.push\(this\.pickRootUri\)/.test(UP_FN) &&
+  /reenterRoots\.push\(this\.browseDir\)/.test(UP_FN) &&
+  /reenterRoots\.push\(this\.savedDirUri\)/.test(UP_FN), true);
+
+console.log('--- 第三十八轮 ⑤：既有链路零回归护栏 ---');
+check('R28 越级护栏一字未改（卷根仍不可上移 / 无父级候选 / 卷根一律拒绝）',
+  upLevelOf(VOLROOT) === '' && upParentCandidates(VOLROOT, 'file://docs' + VOLROOT + '/').length === 0 &&
+  isUpTargetOf('/storage/Users/currentUser/Download', VOLROOT) === false &&
+  upLooseParentOf(VOLROOT) === '' && canGoUpFrom(VOLROOT) === false, true);
+check('R38 既有往上层主链 / 全量探索 / R36 目录态 / R37 文本态全未动',
+  /const strictParent: boolean = loose/.test(UP_FN) &&
+  /const allForms: Array<string> = upExploreFormsOf\(formGroups\);/.test(UP_FN) &&
+  /const ok: boolean = await this\.openFolder\(landUri, false, false, false,/.test(UP_FN) &&
+  INDEX.includes("const POS_KEY_DIRCTX: string = 'lastDirCtx';") &&
+  INDEX.includes("if (this.textMode) {"), true);
+check('R38 版本恒定 1.0.7 / 7，构建标记 R38',
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") === false, true);
+check('R38 旧包排除：R37 及更早旧标记全不在源码里',
+  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28',
+    'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+    INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
+check('R38 DirName.ts 新纯函数零 SDK import / 零文件 IO / 零 await / 零 throw 语句',
+  (() => {
+    const seg = DIRNAME_SRC.slice(DIRNAME_SRC.indexOf('第三十八轮：用户主目录'));
+    // 只按「代码行」判定：注释里写了 fs.listFile 是说明文字，不是 SDK 调用
+    // （与 R37「关键字表字符串别当语句」同一类踩坑）。
+    const code = seg.split('\n').filter(l => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n');
+    return /^import /m.test(code) === false &&
+      /@ohos\.|fs\.|DocumentViewPicker|\basync\s+function\b/.test(code) === false &&
+      /^\s*await\s/m.test(code) === false &&
+      /\bthrow\s+(new|[A-Za-z_$])/m.test(code) === false;
+  })(), true);
+console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
+console.log('  ⚠️ 真机步骤 A：装 R38 包 → 选 /storage/Users/currentUser 或从深层反复点「往上层」到 L0；');
+console.log('     该层应真实列出 Download / Desktop / Documents / WorkBuddy 等全部顶层资料夹，可点名称进入。');
+console.log('  ⚠️ 真机步骤 B：在任意 NAS 目录 / 盘符根 / 图片列表态点「往上层」，行为应与 R37 完全一致；');
+console.log('     到 / 或 NAS 设备根仍给「已到最上层」提示，绝不越级到 /storage、/ 等系统目录。');
+console.log('  ⚠️ 边界：只在用户主动点击且当前层恰好是用户卷根时做一次真实全量列举；');
+console.log('     自动重扫（每 1.5s）/ 启动恢复期仍零新增 IO，绝不重演 THREAD_BLOCK_6S。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {
