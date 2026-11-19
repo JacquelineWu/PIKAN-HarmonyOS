@@ -33,6 +33,8 @@
  * 一次性补发吞键 / 几何快照放宽到所有普通窗口态 / 绝对像素缩小自愈」、
  * 第十九轮「第二次 ESC 无响应修复：严格两态定稿 / 彻底废除补发吞键（恒不置位）/
  * Index.ets 代码行零改动 / 复现路径与端到端场景护栏」、
+ * 第三十七轮「纯文本 / 源码文件预览：类型自动识别 / C·Python·ASM·Verilog 语法高亮 /
+ *    编码兼容 / 行号等宽排版 / 大文件稳定 / R37 构建标记」、
  * 第三十五轮「往上层后只显示一个目录 —— 多 URI 写法列举结果合并而非覆盖 / 缓存目录结构
  *    反推兄弟目录 / 挑列得最全的写法拼子项 URI / R35 构建标记」、
  * 第三十四轮「往上层无响应修复 —— 缓存索引从唯一闸门降级为优先候选佐证 / 恢复路径层级链为事件主链 /
@@ -138,6 +140,16 @@ import { SCROLL_NONE, SCROLL_UP, SCROLL_DOWN, SCROLL_FOLLOW,
   escActionByState, shouldArmSystemEcho, shouldCaptureRectAll,
   shouldApplyRectRestore, shouldSelfHealOnResize,
   windowStatusIsFullscreen, shouldSyncFullFromWindow } from '../entry/src/main/ets/common/InteractionPlan.ts';
+import { LANG_NONE, LANG_PLAIN, LANG_C, LANG_PYTHON, LANG_ASM, LANG_VERILOG,
+  textExtOf, textLangOf, isTextFileName, textLangLabelOf, highlightWanted,
+  textSuffixListOf, ENC_UTF8, ENC_UTF16LE, ENC_UTF16BE, ENC_GB18030, ENC_BIG5, ENC_WIN1252,
+  textBomEncodingOf, textBomSkipOf, isValidUtf8, looksBinary, textBodyOf,
+  encodingCandidatesOf, pickDecodedIndexOf, encodingLabelOf,
+  TEXT_MAX_BYTES, TEXT_MAX_LINES, TEXT_TAB_WIDTH, TEXT_ROW_H_VP, TEXT_WHEEL_LINES,
+  TEXT_CHAR_W_VP, TEXT_CONTENT_MAX_VP, textReadCapOf, textByteTruncatedOf,
+  splitTextLines, expandTabsOf, lineNoWidthOf, textStatusOf, textContentWidthOf,
+  TOK_PLAIN, TOK_KEYWORD, TOK_COMMENT, TOK_STRING, TOK_NUMBER, TOK_PREPROC, TOK_LABEL,
+  tokenColorOf, tokenizeLine, blockStartsOf, joinTokensOf } from '../entry/src/main/ets/common/TextDoc.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -1293,9 +1305,9 @@ check('右下角：正式版只显示缩放百分比；诊断层展开时显示�
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R36 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比恒在右下角；R37 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3774,8 +3786,8 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('this.escDedupEvent = undefined;') &&
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
-check('③ 诊断层展开时可见 R36 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") &&
+check('③ 诊断层展开时可见 R37 构建标记 + 诊断行（正式版默认收起，只留百分比）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3801,7 +3813,7 @@ check('④ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十一轮章节。');
-console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R36，否则说明装的是旧包。');
+console.log('  ⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R37，否则说明装的是旧包。');
 
 // ==================== 第二十二轮：零按键到达 APP（用户 R21 截图证据驱动） ====================
 // 截图放大读到的角标：14% · R21 · full=F · win=T，且角标上方**没有黄色诊断行**。
@@ -3862,9 +3874,10 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
-check('④ R36 构建标记已升级（R33 / R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") &&
+check('④ R37 构建标记已升级（R33 / R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
@@ -3894,7 +3907,7 @@ check('⑤ 既有接线全未坏：画质三处 / AA 五源 / 右键 toggle / �
   INDEX.includes('shouldSelfHealOnResize(this.fullscreen, healReady,') &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 console.log('  ⚠️ 本组仍为源码静态契约，不替代真机按键验证；真机步骤见 README 第二十三轮章节。');
-console.log('  ⚠️ 截图判定：展开诊断层后须出现 R36；keys=0 且有红字即证明键盘事件未到 APP。');
+console.log('  ⚠️ 截图判定：展开诊断层后须出现 R37；keys=0 且有红字即证明键盘事件未到 APP。');
 
 // ==================== 第二十三轮：系统级按键通道 + 窗口级焦点 + 鼠标确定解 ====================
 // R22 截图放大读到的角标：keys=0 · fc=Y f=N r12 · 未收到任何按键 / full=T · win=T。
@@ -3962,9 +3975,10 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
   /Text\('退出 APP'\)[\s\S]{0,400}\.onClick\(\(\) => \{\s*this\.quitApp\(\);/.test(INDEX), true);
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
-check('⑤ R36 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") &&
+check('⑤ R37 构建标记升级且旧标记已清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
@@ -4040,9 +4054,10 @@ console.log('--- 第二十四轮 ④：键盘确定解 Ctrl+Q + 构建标记 + �
 check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
-check('④ R36 构建标记且 R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") &&
+check('④ R37 构建标记且 R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
@@ -4094,10 +4109,11 @@ check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
   (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
 
-console.log('--- 第二十五轮 ③：R36 构建标记 + 既有链路零回归 ---');
-check('③ R36 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") &&
+console.log('--- 第二十五轮 ③：R37 构建标记 + 既有链路零回归 ---');
+check('③ R37 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R32';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R31';") === false &&
@@ -4177,10 +4193,10 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
   INDEX_CODE26.split('.autoResize(false)').length - 1 === 3 &&
   INDEX_CODE26.split('.dynamicRangeMode(').length - 1 === 3, true);
 
-console.log('--- 第二十六轮 ④：R36 构建标记 + 既有链路零回归 ---');
+console.log('--- 第二十六轮 ④：R37 构建标记 + 既有链路零回归 ---');
 check('④ ESC_BUILD_TAG=R35，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") &&
-  ['R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4294,13 +4310,13 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
-check('⑤ R36 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") &&
-  ['R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('⑤ R37 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
 console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 打开 NAS 图库 → 观察缓存期间界面是否仍可操作、无 appfreeze。');
 
 // ==================== 第二十八轮：NAS 往上层显示错误文件夹清单（2026-11-16，R28） ====================
 // 用户复现路径：/192.168.100.61/图片档案/Collection/4 中/[青丘图鉴] Nine tail Photography/2026
@@ -4418,9 +4434,9 @@ check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.browseBase = target;/.test(UPLIST_CODE) &&
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
-check('R36 构建标记，R33 及更早旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) &&
-  ['R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R37 构建标记，R33 及更早旧标记全清除',
+  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
+  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十八轮 ⑥：其它导航 / 历史修复零回归 ---');
@@ -4446,7 +4462,7 @@ check('R29 零回归：ro1 总闸门 / 启动路径零 new Promise 未动',
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   /new Promise|Promise\.race/.test(RESUME_FN) === false, true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 打开复现路径 → 点「往上层」→ 应进入父目录并列出真实子目录。');
 
 // ==================== 第二十九轮：上层清单只列 2026、且混入伪目录行（2026-11-16，R29） ====================
 // 真机截图 screenshot_20261116_045747（R29 之前的 R28 包）：
@@ -4615,9 +4631,9 @@ check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧�
   /isStrictParentOf\(target, current\)/.test(UP_FN) &&
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
   /this\.pickRootUri = '';/.test(UP_FN), true);
-check('R36 构建标记且 R33 及更早旧包全部可从截图排除',
-  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) &&
-  ['R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R37 构建标记且 R33 及更早旧包全部可从截图排除',
+  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
+  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十九轮 ⑥：目录结构 / 命名 / 导航行为零回归 ---');
@@ -4642,7 +4658,7 @@ check('R29 零回归：非 NAS 卷根 / 文档 URI / 版本守卫 / R27 真异�
   /private readGuarded\(/.test(INDEX) &&
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
 
 // ==================== 第三十轮：重启后「往上层」层级与内容恢复（2026-11-18，R30） ====================
 // 实机复现：退出前在授权根的子目录（…/2026/编号202618 模特 奶茶）里看图，
@@ -4817,9 +4833,9 @@ check('R30 零回归：R27 真异步 / R26 翻页 / R25 诊断开关 / 版本守
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX) &&
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机重启验证。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
 
 // ==================== 第三十一轮：R30 回归修复 —— 状态恢复 + 往上层响应（2026-11-18，R31） ====================
 // 回归现象：装 R30 后退出 APP 重开，上次的图片档案不再自动打开；点「往上层」像没反应。
@@ -4874,9 +4890,10 @@ check('R31 端到端：第三层中文条目名逐一致（中文不膨胀、不
 console.log('--- 第三十一轮 ②：Index.ets 静态接线（隔离 / 编码 / 自愈） ---');
 check('R31 接线：DirName import 三个新函数',
   /prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache/.test(INDEX), true);
-check('R35 接线：ESC_BUILD_TAG 升 R36 且源码不再有 R34 定义',
-  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R35';/.test(INDEX) === false, true);
+check('R35 接线：ESC_BUILD_TAG 升 R37 且源码不再有 R34 定义',
+  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R35';/.test(INDEX) === false &&
+  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) === false, true);
 check('R31 接线：readLastPos 主 try 只 await readBrowseExtras（增强 key 不再内联）',
   /await this\.readBrowseExtras\(p\);/.test(INDEX) &&
   /readLastPos\(\): Promise<void> \{[\s\S]{0,2500}await this\.readBrowseExtras\(p\);/.test(INDEX), true);
@@ -4924,7 +4941,7 @@ check('R31 零回归：两条恢复路径仍在 setItems 后回填、版本 1.0.
 check('R31 零回归：恢复期仍零 IO（restoreBrowseContext / restoreUpCache 无文件访问）',
   /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder|startDirPoll|DocumentViewPicker|PhotoViewPicker/.test(UPC_CODE), false);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机重启验证；真实 ArkTS 编译是另一类证据。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 子目录看图 → 退出 APP 重开 → 应自动打开原图片档案；点「往上层」应返回上一层界面。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 子目录看图 → 退出 APP 重开 → 应自动打开原图片档案；点「往上层」应返回上一层界面。');
 
 // ==================== 第三十二轮：启动阶段 FOLDER picker 误报「不存在该名字的文件夹」 ====================
 console.log('\n--- 第三十二轮 ①：picker 起点 / 返回值纯函数（2026-11-18，R32） ---');
@@ -5034,7 +5051,7 @@ check('R32 零回归：R31 安全编解码 + 核心优先落盘仍在',
   /this\.savedUpCacheRaw = prefsSafeDecode\(/.test(INDEX) &&
   /save browse extras failed \(ignored\)/.test(INDEX), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；「不存在该名字的文件夹」是系统文件管理器的 UI 提示，属系统侧行为。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 制造 persist auth lost → 自动弹「选择路径」→ 选有效 NAS 目录点「选择」→ 应直接返回并进入目录。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 制造 persist auth lost → 自动弹「选择路径」→ 选有效 NAS 目录点「选择」→ 应直接返回并进入目录。');
 
 // ==================== 第三十三轮：缓存父子逻辑层级索引（2026-11-19，R33） ====================
 console.log('\n--- 第三十三轮 ①：缓存父子层级索引纯函数 ---');
@@ -5221,7 +5238,7 @@ check('R34 零回归：R33 初始化预建索引仍是纯字符串零 IO（恢�
     INDEX.slice(INDEX.indexOf('private rebuildUpParentIndex('),
       INDEX.indexOf('/** 第三十一轮'))) === false, true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 逐层进入或直接选深层目录 → 点「往上层」→ 目录应上移或出 APP 内清单，绝不再「无响应」。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 逐层进入或直接选深层目录 → 点「往上层」→ 目录应上移或出 APP 内清单，绝不再「无响应」。');
 
 console.log('--- 第三十三轮 ③：既有链路零回归 + 验证边界 ---');
 check('R33 零回归：原路径层级链 / 同层候选 / APP 内清单仍在（仅索引未建立时兜底）',
@@ -5239,7 +5256,7 @@ check('R33 零回归：恢复期仍零 IO（新增函数全是纯字符串）',
     INDEX.slice(INDEX.indexOf('private rebuildUpParentIndex('),
       INDEX.indexOf('/** 第三十一轮'))) === false, true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 逐层进入 L0→L1→L2→L3 → 连续点「往上层」→ 应逐级 L3→L2→L1→L0，到 L0 保持不变。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 逐层进入 L0→L1→L2→L3 → 连续点「往上层」→ 应逐级 L3→L2→L1→L0，到 L0 保持不变。');
 
 // ==================== 第三十五轮：往上层后完整探索并列举父层全部目录（2026-11-19，R35） ====================
 // 用户报障：点「往上层」后只显示一个目录，没有探索这一层的其它目录。
@@ -5415,12 +5432,12 @@ check('R35 零回归：版本 1.0.7 / 诊断默认关闭 / 往上层恒亮不禁
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /\.enabled\(/.test(CODE_LINES) === false &&
   /isStrictParentOf\(target, current\)/.test(UP_FN), true);
-check('R36 构建标记升 R36，R34 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) &&
-  ['R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+check('R37 构建标记升 R37，R34 及更早旧包可从截图一眼排除',
+  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
+  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤：装 R36 包 → 进入深层目录 → 点「往上层」→ 应列出该层全部子目录（含非当前目录的兄弟目录）。');
+console.log('  ⚠️ 真机步骤：装 R37 包 → 进入深层目录 → 点「往上层」→ 应列出该层全部子目录（含非当前目录的兄弟目录）。');
 console.log('  ⚠️ 边界：父层完全无 URI 授权、且会话缓存里也没有其它兄弟目录痕迹时，');
 console.log('     APP 内清单仍只能列出当前目录 —— 零 IO 兜底绝不凭空编造目录名。');
 
@@ -5535,9 +5552,9 @@ check('R36 接线：Index 引入两组新纯函数（DirName 列举 / ResumePlan
 check('R36 接线：目录态持久化 key + 全量探索夹界常量',
   /const POS_KEY_DIRCTX: string = 'lastDirCtx';/.test(INDEX) &&
   /const UP_EXPLORE_MAX_FORMS: number = 64;/.test(INDEX), true);
-check('R36 构建标记升 R36，R35 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) &&
-  ['R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+check('R37 构建标记升 R37，R35 及更早旧包可从截图一眼排除',
+  /const ESC_BUILD_TAG: string = 'R37';/.test(INDEX) &&
+  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('R36 根因护栏 A：markPos 无图片时不再直接 return，仍排一次写盘',
   /private markPos\(\): void \{[\s\S]{0,700}dirContextSaveWanted\(this\.browseBase, this\.items\.length, false\)[\s\S]{0,160}this\.scheduleFlush\(\);/.test(INDEX), true);
@@ -5623,12 +5640,372 @@ check('R36 纯函数区块零 IO / 零 await / 零抛出（可直接 Node 回归
   /export function dirContextSaveWanted\(/.test(R36_RP_SRC) &&
   /export function dirOnlyResumeWanted\(/.test(R36_RP_SRC), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
-console.log('  ⚠️ 真机步骤 A：装 R36 包 → 进入空目录 / 无图片 / 只有子文件夹的目录 → 退出 APP →');
+console.log('  ⚠️ 真机步骤 A：装 R37 包 → 进入空目录 / 无图片 / 只有子文件夹的目录 → 退出 APP →');
 console.log('     重开应直接停在该目录（不得回默认目录、不得弹选择器、不得因零图片丢状态）。');
 console.log('  ⚠️ 真机步骤 B：从深层目录连续点「往上层」多级、反复进子目录再上移，');
 console.log('     每次都应真实列出该层全部资料夹目录（含非当前目录的兄弟目录），不是只显示一个。');
 console.log('  ⚠️ 边界：父层完全无 URI 授权、真实列举一个名字都拿不到时，才退回零 IO 的 APP 内清单；');
 console.log('     自动重扫（每 1.5s）仍走 R35 早停，绝不放大 NAS IO；启动恢复期仍零文件 IO。');
+
+
+// ==================== 第三十七轮：纯文本 / 源码文件预览（2026-11-19，R37） ====================
+// 规格：支持 .log/.txt/.c/.asm 等常见纯文本与源码；自动识别文件类型；
+//       C / Python / ASM / Verilog 启用对应语法高亮；未命中规则仍按普通文本完整展示；
+//       保留原始内容 / 换行 / 缩进 / 特殊字符；不修改文件；行号 + 等宽排版；
+//       兼容常见文本编码；行数较多也稳定显示。
+const TEXTDOC = readFileSync(new URL('../entry/src/main/ets/common/TextDoc.ts', import.meta.url), 'utf8');
+const TEXTDOC_CODE = stripComments(TEXTDOC);
+
+console.log('\n--- 第三十七轮 ①：TextDoc.ts 文件类型自动识别 / 语言映射 ---');
+check('R37 语言常量六态', [LANG_NONE, LANG_PLAIN, LANG_C, LANG_PYTHON, LANG_ASM, LANG_VERILOG].join(','),
+  '-1,0,1,2,3,4');
+check('R37 textExtOf 取小写后缀 / 无后缀 / 尾点',
+  [textExtOf('a.C'), textExtOf('Makefile'), textExtOf('a.')].join('|'), '.c||');
+check('R37 .log/.txt/.md 判纯文本（不高亮）',
+  [textLangOf('a.log'), textLangOf('a.TXT'), textLangOf('a.md')].join(','), '0,0,0');
+check('R37 C-like 家族后缀共用 LANG_C',
+  [textLangOf('a.c'), textLangOf('a.cpp'), textLangOf('a.ts'), textLangOf('a.java'),
+    textLangOf('a.js'), textLangOf('a.sql')].join(','), '1,1,1,1,1,1');
+check('R37 Python / ASM / Verilog 各自映射',
+  [textLangOf('a.py'), textLangOf('a.asm'), textLangOf('a.s'),
+    textLangOf('a.v'), textLangOf('a.sv')].join(','), '2,3,3,4,4');
+check('R37 未知二进制后缀判 LANG_NONE（绝不把 .exe 当文本读）',
+  [textLangOf('a.exe'), textLangOf('a.zip'), textLangOf('a.heic')].join(','), '-1,-1,-1');
+check('R37 无后缀 / 点开头文件名乐观按纯文本',
+  [textLangOf('Makefile'), textLangOf('README'), textLangOf('.gitignore')].join(','), '0,0,0');
+check('R37 isTextFileName 与 textLangOf 同源',
+  [isTextFileName('a.log'), isTextFileName('a.c'), isTextFileName('a.exe')].join(','), 'true,true,false');
+check('R37 语言显示名',
+  [textLangLabelOf(LANG_C), textLangLabelOf(LANG_PYTHON), textLangLabelOf(LANG_ASM),
+    textLangLabelOf(LANG_VERILOG), textLangLabelOf(LANG_PLAIN), textLangLabelOf(LANG_NONE)].join('|'),
+  'C / C-like|Python|ASM|Verilog|纯文本|未知');
+check('R37 只有四种语言开高亮，纯文本 / 未知不开',
+  [highlightWanted(LANG_C), highlightWanted(LANG_PYTHON), highlightWanted(LANG_ASM),
+    highlightWanted(LANG_VERILOG), highlightWanted(LANG_PLAIN), highlightWanted(LANG_NONE)].join(','),
+  'true,true,true,true,false,false');
+check('R37 选择器后缀清单：不带点号、无重复、覆盖六类代表后缀',
+  textSuffixListOf().every(x => x.length > 0 && x.charAt(0) !== '.') &&
+  new Set(textSuffixListOf()).size === textSuffixListOf().length &&
+  ['log', 'txt', 'c', 'py', 'asm', 'v'].every(x => textSuffixListOf().indexOf(x) >= 0), true);
+check('R37 后缀清单数量稳定（111 项，新增后缀必须同步更新此断言）',
+  textSuffixListOf().length, 111);
+
+console.log('--- 第三十七轮 ②：编码识别 / 二进制嗅探 ---');
+const BOM8 = new Uint8Array([0xef, 0xbb, 0xbf, 65, 66]);
+const BOM16LE = new Uint8Array([0xff, 0xfe, 65, 0x00]);
+const BOM16BE = new Uint8Array([0xfe, 0xff, 0x00, 65]);
+check('R37 BOM 判定 UTF-8 / UTF-16LE / UTF-16BE / 无 BOM',
+  [textBomEncodingOf(BOM8), textBomEncodingOf(BOM16LE),
+    textBomEncodingOf(BOM16BE), textBomEncodingOf(new Uint8Array([65, 66]))].join('|'),
+  'utf-8|utf-16le|utf-16be|');
+check('R37 BOM 跳过字节数 3 / 2 / 2 / 0',
+  [textBomSkipOf(BOM8), textBomSkipOf(BOM16LE), textBomSkipOf(BOM16BE),
+    textBomSkipOf(new Uint8Array([65]))].join(','), '3,2,2,0');
+check('R37 textBodyOf 自行剥 BOM，不改原始字节',
+  [textBodyOf(BOM8).join(','), BOM8.join(',')].join('|'),
+  '65,66|239,187,191,65,66');
+check('R37 textBodyOf 空 / 仅 BOM 不越界',
+  textBodyOf(new Uint8Array(0)).length === 0 && textBodyOf(BOM8.slice(0, 3)).length === 0, true);
+check('R37 isValidUtf8：ASCII / 2 字节 / 3 字节中文 / 4 字节 emoji 全合法',
+  [isValidUtf8(new Uint8Array([65, 66, 10])),
+    isValidUtf8(new Uint8Array([0xc3, 0xa9])),
+    isValidUtf8(new Uint8Array([0xe4, 0xb8, 0xad])),
+    isValidUtf8(new Uint8Array([0xf0, 0x9f, 0x98, 0x80]))].join(','), 'true,true,true,true');
+check('R37 isValidUtf8 拒绝 overlong / 代理区 / >U+10FFFF / 断裂续字节 / 孤立续字节',
+  [isValidUtf8(new Uint8Array([0xc0, 0x80])),
+    isValidUtf8(new Uint8Array([0xed, 0xa0, 0x80])),
+    isValidUtf8(new Uint8Array([0xf4, 0x90, 0x80, 0x80])),
+    isValidUtf8(new Uint8Array([0xe4, 0xb8])),
+    isValidUtf8(new Uint8Array([0x80]))].join(','), 'false,false,false,false,false');
+check('R37 looksBinary：NUL 立即判二进制',
+  looksBinary(new Uint8Array([65, 0x00, 66])), true);
+check('R37 looksBinary：UTF-16 BOM 的 0x00 不误判',
+  looksBinary(BOM16LE), false);
+check('R37 looksBinary：普通文本 / CRLF / Tab 不误判',
+  [looksBinary(new Uint8Array([65, 10, 13, 9, 66])),
+    looksBinary(new Uint8Array(0))].join(','), 'false,false');
+check('R37 looksBinary：高比例 C0 控制字符判二进制',
+  looksBinary(new Uint8Array(100).fill(0x01)), true);
+check('R37 encodingCandidatesOf：BOM 命中只给一个候选',
+  [encodingCandidatesOf(BOM8).join(','), encodingCandidatesOf(BOM16LE).join(','),
+    encodingCandidatesOf(BOM16BE).join(',')].join('|'),
+  'utf-8|utf-16le|utf-16be');
+check('R37 encodingCandidatesOf：合法 UTF-8 优先 UTF-8 再 GB18030',
+  encodingCandidatesOf(new Uint8Array([65, 66])).join(','), 'utf-8,gb18030');
+check('R37 encodingCandidatesOf：非法 UTF-8 走 GB18030/Big5/Win1252/UTF-8 回退',
+  encodingCandidatesOf(new Uint8Array([0x41, 0x81, 0x40])).join(','),
+  'gb18030,big5,windows-1252,utf-8');
+check('R37 pickDecodedIndexOf：U+FFFD 最少者优先',
+  pickDecodedIndexOf(['ab\uFFFDcd', 'abcd']), 1);
+check('R37 pickDecodedIndexOf：同分取更长（信息更全）/ 空数组返回 -1',
+  [pickDecodedIndexOf(['ab', 'abcd']), pickDecodedIndexOf([])].join(','), '1,-1');
+check('R37 encodingLabelOf 全六码 + 未知编码兜底',
+  [encodingLabelOf(ENC_UTF8), encodingLabelOf(ENC_UTF16LE), encodingLabelOf(ENC_UTF16BE),
+    encodingLabelOf(ENC_GB18030), encodingLabelOf(ENC_BIG5), encodingLabelOf(ENC_WIN1252),
+    encodingLabelOf('')].join('|'),
+  'UTF-8|UTF-16LE|UTF-16BE|GB18030|Big5|Windows-1252|未知');
+
+console.log('--- 第三十七轮 ③：行处理 / 大文件上限 / 原始内容保留 ---');
+check('R37 上限常量：8MB / 12 万行 / Tab4 / 行高20vp / 滚轮3行',
+  [TEXT_MAX_BYTES, TEXT_MAX_LINES, TEXT_TAB_WIDTH, TEXT_ROW_H_VP, TEXT_WHEEL_LINES].join(','),
+  '8388608,120000,4,20,3');
+check('R37 显示宽度常量：单字符 7.2vp / 内容上限 12000vp',
+  [TEXT_CHAR_W_VP, TEXT_CONTENT_MAX_VP].join(','), '7.2,12000');
+check('R37 textReadCapOf：未知 / 0 / 小于上限 / 大于上限',
+  [textReadCapOf(-1, 100), textReadCapOf(0, 100), textReadCapOf(37, 100),
+    textReadCapOf(500, 100)].join(','), '100,0,37,100');
+check('R37 textByteTruncatedOf：仅超出上限才提示截断',
+  [textByteTruncatedOf(500, 100), textByteTruncatedOf(100, 100),
+    textByteTruncatedOf(50, 100), textByteTruncatedOf(500, 0)].join(','),
+  'true,false,false,false');
+check('R37 splitTextLines 统一 CRLF / CR / LF，行内容原样保留',
+  splitTextLines('a\r\nb\rc\nd', 100).lines.join('|'), 'a|b|c|d');
+check('R37 splitTextLines 末尾换行不多出空行',
+  splitTextLines('a\nb\n', 100).lines.join('|'), 'a|b');
+check('R37 splitTextLines 保留缩进 / Tab / 特殊字符 / 空行',
+  splitTextLines('  \tX\x01!  \n\nZ', 100).lines.join('|'), '  \tX\x01!  ||Z');
+check('R37 splitTextLines 行数上限到点即停并标 truncated',
+  (() => { const r = splitTextLines('a\nb\nc', 2);
+    return r.lines.join('|') + '/' + r.truncated; })(), 'a|b/true');
+check('R37 splitTextLines cap<=0 退回 TEXT_MAX_LINES（不误当成 0 行）',
+  splitTextLines('a\nb', 0).lines.join('|'), 'a|b');
+check('R37 expandTabsOf 按制表位展开，仅显示层、不改原行',
+  [expandTabsOf('\tx', 4), expandTabsOf('a\tx', 4), expandTabsOf('abc', 4),
+    expandTabsOf('\t', 0)].join('|'), '    x|a   x|abc|    ');
+check('R37 lineNoWidthOf 按位数给足且右对齐不跳动',
+  [lineNoWidthOf(1), lineNoWidthOf(9), lineNoWidthOf(10), lineNoWidthOf(99999),
+    lineNoWidthOf(120000), lineNoWidthOf(0)].join(','), '27,27,36,63,72,27');
+check('R37 textContentWidthOf：空列表给行号栏 + 内边距',
+  textContentWidthOf([], 4, 7.2, 54, 12000), 78);
+check('R37 textContentWidthOf：Tab 按显示列计入、取最长行',
+  textContentWidthOf(['\t\tx', 'abc'], 4, 7.2, 54, 12000), 142.8);
+check('R37 textContentWidthOf：超长单行夹到上限，绝不撑爆布局',
+  textContentWidthOf(['x'.repeat(100000)], 4, 7.2, 54, 12000), 12000);
+check('R37 textContentWidthOf：脏参数（0/负/NaN）安全退化，恒返回有限正数',
+  [textContentWidthOf([''], 0, 0, 0, 0),
+    textContentWidthOf([''], -4, -1, -10, -1)].every(v => Number.isFinite(v) && v > 0), true);
+check('R37 textStatusOf 含文件名 / 语言 / 编码 / 行数，截断时给明确提示',
+  textStatusOf('a.txt', LANG_PLAIN, ENC_UTF8, 3, false).includes('文本预览 a.txt · 纯文本 · UTF-8 · 3 行') &&
+  textStatusOf('a.c', LANG_C, ENC_UTF8, 5, true).includes('已显示前 8 MB'), true);
+
+console.log('--- 第三十七轮 ④：语法高亮 tokenizer / 多行注释状态 ---');
+const Q3 = '\x22\x22\x22';
+const S3 = '\x27\x27\x27';
+check('R37 token 七类常量',
+  [TOK_PLAIN, TOK_KEYWORD, TOK_COMMENT, TOK_STRING, TOK_NUMBER, TOK_PREPROC, TOK_LABEL].join(','),
+  '0,1,2,3,4,5,6');
+check('R37 tokenColorOf 七类互不相同（纯文本底色单独一档）',
+  new Set([TOK_PLAIN, TOK_KEYWORD, TOK_COMMENT, TOK_STRING,
+    TOK_NUMBER, TOK_PREPROC, TOK_LABEL].map(k => tokenColorOf(k))).size, 7);
+check('R37 纯文本行不切 token、整行 TOK_PLAIN、原样保留',
+  (() => { const r = tokenizeLine('  plain \t text !', LANG_PLAIN, false, true);
+    return r.tokens.length === 1 && r.tokens[0].kind === TOK_PLAIN &&
+      r.tokens[0].text === expandTabsOf('  plain \t text !', 4); })(), true);
+check('R37 C：关键字 / 行注释 / 字符串 / 数字都切出来',
+  (() => { const r = tokenizeLine('int x = 0; // "hi"', LANG_C, false, true);
+    return r.tokens.some(t => t.kind === TOK_KEYWORD && t.text === 'int') &&
+      r.tokens.some(t => t.kind === TOK_COMMENT && t.text.indexOf('//') === 0) &&
+      r.tokens.some(t => t.kind === TOK_NUMBER && t.text === '0'); })(), true);
+check('R37 C：预处理整行 TOK_PREPROC',
+  tokenizeLine('#include <stdio.h>', LANG_C, false, true).tokens[0].kind, TOK_PREPROC);
+check('R37 Python：# 行注释 / @ 装饰器 / 关键字',
+  (() => { const r1 = tokenizeLine('x = 1  # note', LANG_PYTHON, false, true);
+    const r2 = tokenizeLine('@decorator', LANG_PYTHON, false, true);
+    return r1.tokens.some(t => t.kind === TOK_COMMENT && t.text === '# note') &&
+      r1.tokens.some(t => t.kind === TOK_KEYWORD && t.text === 'x') === false &&
+      r2.tokens[0].kind === TOK_PREPROC; })(), true);
+check('R37 ASM：; 行注释 / 指令关键字 / label: TOK_LABEL',
+  (() => { const r1 = tokenizeLine('    mov rax, 1  ; syscall', LANG_ASM, false, true);
+    const r2 = tokenizeLine('loop_start:', LANG_ASM, false, true);
+    return r1.tokens.some(t => t.kind === TOK_KEYWORD && t.text === 'mov') &&
+      r1.tokens.some(t => t.kind === TOK_COMMENT) &&
+      r2.tokens.some(t => t.kind === TOK_LABEL); })(), true);
+check('R37 Verilog：module 关键字 / // 行注释 / ` 指令',
+  tokenizeLine('module m(input clk);', LANG_VERILOG, false, true).tokens
+    .some(t => t.kind === TOK_KEYWORD && t.text === 'module') &&
+  tokenizeLine('`timescale 1ns/1ps', LANG_VERILOG, false, true).tokens[0].kind === TOK_PREPROC, true);
+check('R37 C 多行注释状态：开→内→内→关',
+  blockStartsOf(['/* header', ' * int x = 0;', ' */', 'int main() { return 0; }'], LANG_C).join(','),
+  'false,true,true,false');
+check('R37 Python 三引号 docstring 跨行状态',
+  blockStartsOf(['def f():', '    ' + Q3 + 'doc', '    still' + Q3, '    return 1'],
+    LANG_PYTHON).join(','), 'false,false,true,false');
+check('R37 Python 单引号三引号同样成块',
+  blockStartsOf(['s = ' + S3 + 'abc', 'def' + S3, 'x = 2'], LANG_PYTHON).join(','),
+  'false,true,false');
+check('R37 ASM / Verilog / PLAIN 无多行块，状态恒 false',
+  [blockStartsOf(['; a', '; b'], LANG_ASM).join(','),
+    blockStartsOf(['// a', '// b'], LANG_VERILOG).join(','),
+    blockStartsOf(['a', 'b', 'c'], LANG_PLAIN).join(',')].join('|'),
+  'false,false|false,false|false,false,false');
+const JOIN_LINES = [
+  'int x = 0; // hi', '  \t tabbed "str" 123', '/* open', ' * inside', ' */ and 0xFF',
+  'x = 1  # py', '    mov rax, 1 ; asm', 'module m(input clk); // vlog', 'plain \t !@#$%^&*'
+];
+check('R37 joinTokensOf 不变式：四种语言 × 十种行，token 拼回 === expandTabsOf(原行)',
+  [LANG_PLAIN, LANG_C, LANG_PYTHON, LANG_ASM, LANG_VERILOG].every(lang =>
+    JOIN_LINES.every(line => {
+      const st = blockStartsOf(JOIN_LINES, lang);
+      return JOIN_LINES.every((_, i) =>
+        joinTokensOf(tokenizeLine(JOIN_LINES[i], lang, st[i], true).tokens) ===
+        expandTabsOf(JOIN_LINES[i], 4));
+    })), true);
+check('R37 emitTokens=false 与 true 共用状态机（绝不两套逻辑分叉）',
+  [LANG_C, LANG_PYTHON, LANG_ASM, LANG_VERILOG].every(lang =>
+    blockStartsOf(JOIN_LINES, lang).every((_, i) =>
+      tokenizeLine(JOIN_LINES[i], lang, false, false).tokens.length === 0)), true);
+check('R37 joinTokensOf 空 token 列表返回空串',
+  joinTokensOf([]), '');
+
+console.log('--- 第三十七轮 ⑤：Index.ets 接线（文本行 / 真异步读取 / 互斥态）---');
+check('R37 TextDoc.ts 零 SDK import / 零 await 语句 / 零 throw 语句 / 零文件 IO',
+  // 注意：不能用 \bawait\b / \bthrow\b 这类「单词级」正则 ——
+  // 语言关键字表本身就是 '|await|' / '|throw|' 形式的字符串常量，
+  // 那是高亮规则数据，不是语句。这里按「语句形态」判定：行首 await、
+  // throw 后跟表达式、SDK import、async function、文件 IO API。
+  /^import /m.test(TEXTDOC) === false &&
+  /^\s*await\s/m.test(TEXTDOC_CODE) === false &&
+  /\bthrow\s+(new|[A-Za-z_$])/m.test(TEXTDOC_CODE) === false &&
+  /@ohos\.|fs\.|DocumentViewPicker|\basync\s+function\b/.test(TEXTDOC_CODE) === false, true);
+check('R37 TextDoc.ts 纯函数导出齐全（59 个 export）',
+  (TEXTDOC.match(/^export (const|function|interface)/gm) || []).length, 59);
+check('R37 Index import TextDoc 真值源，且构建标记升 R37',
+  INDEX.includes("from '../common/TextDoc';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';"), true);
+check('R37 新增 ROW_TEXT=4，文本行只进 rows 不进 items',
+  /const ROW_TEXT: number = 4;/.test(INDEX) &&
+  INDEX.includes('texts.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_TEXT, itemIndex: -1 });') &&
+  /for \(let i = 0; i < texts\.length; i\+\+\) \{\s*rows\.push\(texts\[i\]\);/.test(INDEX) &&
+  /const imgs: ImageItem\[\] = \[\];/.test(INDEX) &&
+  INDEX.includes('this.applyItems(imgs, dirLabel'), true);
+check('R37 openFolder 分类：isTextFileName 且 statOk 才成文本行（无授权仍按文件夹）',
+  INDEX.includes('else if (isTextFileName(raw))') &&
+  /else if \(!statOk\) \{[\s\S]{0,400}else if \(isTextFileName\(raw\)\)/.test(INDEX) &&
+  INDEX.includes('texts.sort(cmp);') && INDEX.includes('texts.reverse();'), true);
+const ROW_TEXT_BRANCH = INDEX.slice(INDEX.indexOf('if (kind === ROW_TEXT) {'),
+  INDEX.indexOf('if (kind === ROW_OTHER) {'));
+check('R37 onRowTap 文本行走 openTextFile，绝不 select(itemIndex)',
+  // 按「整个分支」判定，不赌花括号后第一行就是调用（中间允许有说明注释）；
+  // 关键是分支内必须 return，且绝不出现 this.select( —— 文本行永不进图片翻页序列。
+  ROW_TEXT_BRANCH.includes('this.openTextFile(r.uri, r.name);') &&
+  ROW_TEXT_BRANCH.includes('return;') &&
+  /this\.select\(/.test(ROW_TEXT_BRANCH) === false &&
+  INDEX.includes('this.select(idx);'), true);
+check('R37 FILE_FILTERS 保留「所有文件」为第一项，新增文本/源码格式项',
+  INDEX.includes("'所有文件(*.*)|.*',") &&
+  INDEX.includes('function textFileFilterOf(): string {') &&
+  INDEX.includes('textSuffixListOf()') && INDEX.includes('textFileFilterOf()'), true);
+check('R37 ArchiveRow 文本行有独立暖黄配色，悬停缩略图仍只对图片行开放',
+  INDEX.includes("if (this.kind === ROW_TEXT) {\n      return '#d8c78a';") &&
+  INDEX.includes('if (this.kind !== ROW_IMAGE || this.thumbDisabled)'), true);
+check('R37 TextLineSource 实现 IDataSource，reload 通知 onDataReloaded',
+  INDEX.includes('class TextLineSource implements IDataSource {') &&
+  /reload\(list: Array<string>\): void \{[\s\S]{0,250}onDataReloaded\(\)/.test(INDEX), true);
+check('R37 状态字段：textMode 默认关，大数组刻意不进 @State',
+  INDEX.includes('@State textMode: boolean = false;') &&
+  INDEX.includes('private textLines: Array<string> = [];') &&
+  INDEX.includes('private textSource: TextLineSource = new TextLineSource();') &&
+  INDEX.includes('private textScroller: Scroller = new Scroller();') &&
+  INDEX.includes('private textHScroller: Scroller = new Scroller();') &&
+  INDEX.includes('private textToken: number = 0;'), true);
+const OPEN_TEXT_FN = INDEX.slice(INDEX.indexOf('  private async openTextFile('),
+  INDEX.indexOf('  /** 当前行按语言'));
+check('R37 openTextFile 是真异步：stat/open/read/close 全 await，无一个 Sync 版本',
+  ['await fs.stat(uri)', 'await fs.open(uri', 'await fs.read(file.fd, buf)',
+    'await fs.close(file.fd)'].every(x => OPEN_TEXT_FN.includes(x)) &&
+  /fs\.(statSync|openSync|readSync|closeSync)/.test(OPEN_TEXT_FN) === false, true);
+check('R37 openTextFile 只读不写：无任何写/删/改名 API，也不 new Promise',
+  /fs\.(write|copy|move|unlink|rename|truncate)/.test(OPEN_TEXT_FN) === false &&
+  OPEN_TEXT_FN.includes('new Promise') === false &&
+  (INDEX.match(/new Promise/g) || []).length === 1, true);
+check('R37 openTextFile 编码链：BOM 剥离 + 候选解码 + 替换字符最少者胜出',
+  OPEN_TEXT_FN.includes('encodingCandidatesOf(bytes)') &&
+  OPEN_TEXT_FN.includes('textBodyOf(bytes)') &&
+  OPEN_TEXT_FN.includes('util.TextDecoder.create(encs[k])') &&
+  OPEN_TEXT_FN.includes('dec.decodeToString(body)') &&
+  OPEN_TEXT_FN.includes('pickDecodedIndexOf(decoded)'), true);
+check('R37 openTextFile 有二进制嗅探 / 字节上限 / 代号作废三道护栏',
+  OPEN_TEXT_FN.includes('if (looksBinary(bytes))') &&
+  OPEN_TEXT_FN.includes('textReadCapOf(st.size, TEXT_MAX_BYTES)') &&
+  OPEN_TEXT_FN.includes('textByteTruncatedOf(st.size, TEXT_MAX_BYTES)') &&
+  OPEN_TEXT_FN.includes('token !== this.textToken'), true);
+check('R37 applyTextDecoded 接线：切行 / 注释状态 / 行号宽 / 内容宽 / 状态文案',
+  ['splitTextLines(text, TEXT_MAX_LINES)', 'blockStartsOf(split.lines, lang)',
+    'lineNoWidthOf(split.lines.length)', 'textContentWidthOf(split.lines, TEXT_TAB_WIDTH,',
+    'textStatusOf(name, lang, encLabel, split.lines.length, truncated)',
+    'this.textSource.reload(split.lines)'].every(x => OPEN_TEXT_FN.includes(x) ||
+    INDEX.slice(INDEX.indexOf('  private applyTextDecoded('),
+      INDEX.indexOf('  /** 点左栏文本行')).includes(x)), true);
+check('R37 build() 右侧文本态与图片态互斥，原有两页预览分支一字未删',
+  /if \(this\.textMode\) \{\s*\/\/ 第三十七轮[\s\S]{0,160}this\.textPreview\(\);\s*\} else if \(this\.cur >= 0\) \{/.test(INDEX) &&
+  PREVIEW_ROW14_CODE.includes('this.previewImage(this.curItem()!.uri, this.curToken, true)') &&
+  PREVIEW_ROW14_CODE.includes('this.rightPageImage(this.items[this.spreadB].uri, true)') &&
+  PREVIEW_ROW14_CODE.includes('fullscreen') === false, true);
+check('R37 textPreview 用横向 Scroll + 纵向 List/LazyForEach 双轴虚拟化',
+  INDEX.includes('Scroll(this.textHScroller)') &&
+  INDEX.includes('List({ scroller: this.textScroller, space: 0 })') &&
+  INDEX.includes('.scrollable(ScrollDirection.Horizontal)') &&
+  INDEX.includes('LazyForEach(this.textSource, (line: string, idx: number) => {') &&
+  INDEX.includes('.cachedCount(6)'), true);
+check('R37 textRow 行号 + 等宽字体 + token 着色（Row 内 ForEach，不赌 Text 内 Span）',
+  INDEX.includes("Text((idx + 1).toString())") &&
+  INDEX.includes("ForEach(this.textTokensOf(idx), (t: TextToken, k: number) => {") &&
+  INDEX.includes("tokenColorOf(t.kind)") &&
+  (INDEX.match(/\.fontFamily\('monospace'\)/g) || []).length >= 2 &&
+  INDEX.includes('.height(TEXT_ROW_H_VP)'), true);
+check('R37 textTokensOf 按「本行是否处于多行注释」取 token，显示层不改原行',
+  INDEX.includes('private textTokensOf(idx: number): Array<TextToken> {') &&
+  INDEX.includes('tokenizeLine(this.textLines[idx], this.textLang, inBlock, true).tokens') &&
+  INDEX.includes('private textBlockStarts: Array<boolean> = [];'), true);
+check('R37 文本态不被图片交互偷偷翻页：select / go / onWheel / browseUp / applyItems 全接线',
+  SELECT13_FN.includes('if (this.textMode)') &&
+  GO13_FN.includes('this.textScroller.scrollBy(0, delta * TEXT_WHEEL_LINES * TEXT_ROW_H_VP);') &&
+  INDEX.includes('this.textScroller.scrollBy(0, dir * TEXT_WHEEL_LINES * TEXT_ROW_H_VP);') &&
+  UP_FN.includes('if (this.textMode)') &&
+  APPLY_FN.includes('if (!keepView) {\n      this.closeTextMode();'), true);
+check('R37 closeTextMode 只收自身状态 + 作废旧代号，绝不碰缓存 / 目录 / 位置',
+  (() => { const f = INDEX.slice(INDEX.indexOf('  private closeTextMode(): void {'),
+    INDEX.indexOf('  /** 解码结果落地'));
+    return f.includes('this.textMode = false;') && f.includes('this.textToken++;') &&
+      f.includes('this.textSource.reload([]);') &&
+      /clearPreviews|applyItems|markPos|browseBase|inAppUpList/.test(f) === false; })(), true);
+check('R37 文本预览不新增裸 scrollToIndex（全源码仍恰好 3 处）',
+  INDEX.split('this.scroller.scrollToIndex(').length - 1, 3);
+
+console.log('--- 第三十七轮 ⑥：既有链路零回归护栏 ---');
+check('R37 零回归：画质三处计数 / 版本 / 往上层 / 禁用 / 防冻结闸门全未动',
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  /回上层/.test(INDEX) === false &&
+  /\.enabled\(/.test(CODE_LINES) === false &&
+  (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8, true);
+check('R37 零回归：restoreBrowseContext / inAppUpList / Text(this.name) 计数型契约不变',
+  (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 3 &&
+  (INDEX.match(/this\.inAppUpList =/g) || []).length === 4 &&
+  (INDEX.match(/Text\(this\.name\)/g) || []).length === 1 &&
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 4, true);
+check('R37 零回归：往上层主链 / R36 目录态 / ESC 严格两态 / 诊断开关仍在',
+  UP_FN.includes('upLevelOf(current)') &&
+  INDEX.includes("const POS_KEY_DIRCTX: string = 'lastDirCtx';") &&
+  INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
+  INDEX.includes('escActionByState(this.fullscreen, this.pendingSystemEcho);'), true);
+check('R37 构建标记 R37，R36 及更早旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") &&
+  ['R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
+    'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+    INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
+console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
+console.log('  ⚠️ 真机步骤 A：装 R37 包 → 选含 .log/.txt/.c/.py/.asm/.v 的目录 → 点文本行 →');
+console.log('     右栏应出行号 + 等宽排版 + 对应语法着色；未知后缀文件按普通文本完整展示。');
+console.log('  ⚠️ 真机步骤 B：UTF-8 / UTF-16 BOM / GB18030 / Big5 / Windows-1252 各准备一份，');
+console.log('     抬头应显示识别出的编码；CRLF / CR / LF、缩进 / Tab / 特殊字符不得丢失或改写。');
+console.log('  ⚠️ 真机步骤 C：准备数万行大文件 → 滚动应稳定不卡；点图片行 / 滚轮 / 方向键 /');
+console.log('     「往上层」应退出文本态且图片预览、目录恢复、ESC 等既有链路完全不受影响。');
+console.log('  ⚠️ 边界：单次最多读 8MB / 12 万行，超出在抬头明确提示「已显示前 8 MB / 120000 行」；');
+console.log('     二进制内容（NUL / 高比例控制字符）按提示展示，不刷满屏乱码；全程只读不写。');
+
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

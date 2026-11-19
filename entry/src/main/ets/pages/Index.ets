@@ -125,6 +125,16 @@ import { KeyCode } from '@ohos.multimodalInput.keyCode';
 import inputConsumer from '@ohos.multimodalInput.inputConsumer';
 import { KeyEvent as InputKeyEvent } from '@ohos.multimodalInput.keyEvent';
 import { BusinessError } from '@ohos.base';
+// 第三十七轮：纯文本 / 源码文件预览的纯函数真值源（零 SDK 依赖、零文件 IO）。
+// 文件类型识别 / 语言映射 / 编码候选 / 逐行 token 化全在 TextDoc.ts，Index 只做
+// 「真异步读字节 → 解码 → 建行数据源 → 等宽行号 + token 着色渲染」，绝不修改磁盘文件。
+import { LANG_NONE, textLangOf, isTextFileName,
+  textSuffixListOf, looksBinary, textBodyOf, encodingCandidatesOf,
+  pickDecodedIndexOf, encodingLabelOf, TEXT_MAX_BYTES, TEXT_MAX_LINES,
+  TEXT_TAB_WIDTH, TEXT_ROW_H_VP, TEXT_WHEEL_LINES, TEXT_CHAR_W_VP,
+  TEXT_CONTENT_MAX_VP, textReadCapOf, textByteTruncatedOf, splitTextLines,
+  lineNoWidthOf, textStatusOf, textContentWidthOf, TextToken, TextSplit,
+  tokenColorOf, tokenizeLine, blockStartsOf } from '../common/TextDoc';
 
 const TAG = 'HeicViewer';
 const DOMAIN = 0x0000;
@@ -136,7 +146,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R36';
+const ESC_BUILD_TAG: string = 'R37';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -518,7 +528,7 @@ interface ImageItem {
   name: string;  // 显示文件名（已做乱码修复，仅显示用）
   size: number;  // 字节数（未知为 -1）
   mtime?: number;      // 修改时间（ms），左栏「日期」列用
-  kind?: number;       // 0=图片 1=上级「..」 2=子文件夹 3=不支持预览的文件
+  kind?: number;       // 0=图片 1=上级「..」 2=子文件夹 3=不支持预览的文件 4=可预览文本/源码
   itemIndex?: number;  // 图片行对应 items 的下标；非图片行 = -1
 }
 
@@ -541,6 +551,9 @@ const ROW_IMAGE: number = 0;
 const ROW_UP: number = 1;
 const ROW_FOLDER: number = 2;
 const ROW_OTHER: number = 3;
+/** 第三十七轮：可预览的纯文本 / 源码文件行。只进左栏 rows，
+ *  **绝不进 items**（图片翻页序列）—— 否则解码 / 预载链会把 .c 当图片解。 */
+const ROW_TEXT: number = 4;
 
 /** 「梅花间竹」交替色格子（2026-11-11 用户要求）：档案列表奇偶行两种底色，
  *  形成一格一格的棋盘条纹；选中行用独立高亮色，优先级最高（见 ArchiveRow.rowBgColor）。
@@ -589,9 +602,22 @@ function isImageName(name: string): boolean {
  *  ⚠️ **数组第一项就是选择器打开时默认选中的格式**，所以「所有文件(*.*)」必须排在最前 ——
  *  排到后面会让选择器默认只显示图片，想选别的格式还得手动切一次下拉。
  *  若只想要一个「所有文件」，把第二项删掉即可。 */
+/** 第三十七轮：文本 / 源码后缀的「格式」下拉项。textSuffixListOf() 返回不带点号的
+ *  后缀名，picker 过滤串要用带点号的写法，故逐项补 '.'；显示名与过滤串同源，
+ *  不会两处各写一份后缀清单而渐渐分叉。 */
+function textFileFilterOf(): string {
+  const list: Array<string> = textSuffixListOf();
+  const exts: Array<string> = [];
+  for (let i = 0; i < list.length; i++) {
+    exts.push('.' + list[i]);
+  }
+  return '文本/源码(' + exts.join(', ') + ')|' + exts.join(',');
+}
+
 const FILE_FILTERS: Array<string> = [
   '所有文件(*.*)|.*',
-  '图片(' + IMAGE_SUFFIXES.join(', ') + ')|' + IMAGE_SUFFIXES.join(',')
+  '图片(' + IMAGE_SUFFIXES.join(', ') + ')|' + IMAGE_SUFFIXES.join(','),
+  textFileFilterOf()
 ];
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -1526,6 +1552,10 @@ struct ArchiveRow {
     if (this.kind === ROW_IMAGE) {
       return this.selected ? '#e8ecf4' : '#e2a8cf';
     }
+    // 第三十七轮：文本 / 源码行用暖黄，与图片粉、目录蓝、灰行区分。
+    if (this.kind === ROW_TEXT) {
+      return this.selected ? '#e8ecf4' : '#d8c78a';
+    }
     return '#8fb8e8';
   }
 
@@ -1538,6 +1568,9 @@ struct ArchiveRow {
     }
     if (this.kind === ROW_OTHER) {
       return '#6b7280';
+    }
+    if (this.kind === ROW_TEXT) {
+      return '#d8c78a';
     }
     return '#e2a8cf';
   }
@@ -1772,6 +1805,43 @@ class GalleryDataSource implements IDataSource {
 
   reload(list: ImageItem[]): void {
     this.items = list;
+    for (let i = 0; i < this.listeners.length; i++) {
+      this.listeners[i].onDataReloaded();
+    }
+  }
+}
+
+/** 第三十七轮：文本预览的行数据源。与 GalleryDataSource 同口径 —— 十几万行文本
+ *  只把「原始行字符串」放在普通数组里，靠 LazyForEach 按需创建可见行节点；
+ *  reload() 统一通知 onDataReloaded，换文件时不会残留旧节点。 */
+class TextLineSource implements IDataSource {
+  private lines: Array<string> = [];
+  private listeners: DataChangeListener[] = [];
+
+  totalCount(): number {
+    return this.lines.length;
+  }
+
+  getData(index: number): string {
+    return this.lines[index];
+  }
+
+  registerDataChangeListener(listener: DataChangeListener): void {
+    const i: number = this.listeners.indexOf(listener);
+    if (i < 0) {
+      this.listeners.push(listener);
+    }
+  }
+
+  unregisterDataChangeListener(listener: DataChangeListener): void {
+    const i: number = this.listeners.indexOf(listener);
+    if (i >= 0) {
+      this.listeners.splice(i, 1);
+    }
+  }
+
+  reload(list: Array<string>): void {
+    this.lines = list;
     for (let i = 0; i < this.listeners.length; i++) {
       this.listeners[i].onDataReloaded();
     }
@@ -2194,6 +2264,25 @@ struct Index {
   @State blurRadius: number = 0;                      // 当前模糊半径（BLUR_MAX → 0）
   @State lowOpacity: number = 0;                      // 低清层不透明度（1 → 0）
   private focusSeq: number = 0;                       // 对焦动画代号，切图时自增使旧动画作废
+
+  // ---- 第三十七轮：纯文本 / 源码文件预览（与图片态互斥）----
+  // ⚠️ textLines / textBlockStarts **刻意不加 @State**：十几万行进状态系统会被逐层建代理，
+  //    纯属浪费；UI 只靠 textMode / textNoW / textContentW / textStatusText 这几个小状态 +
+  //    TextLineSource.reload() 通知 LazyForEach 重取，与左栏 GalleryDataSource 同一口径。
+  @State textMode: boolean = false;
+  @State textName: string = '';
+  @State textStatusText: string = '';
+  @State textNoW: number = 54;
+  @State textContentW: number = 800;
+  @State textTruncated: boolean = false;
+  private textLines: Array<string> = [];
+  private textBlockStarts: Array<boolean> = [];
+  private textLang: number = 0;
+  private textSource: TextLineSource = new TextLineSource();
+  private textScroller: Scroller = new Scroller();   // 纵向（List）滚动
+  private textHScroller: Scroller = new Scroller();  // 横向（Scroll）滚动
+  /** 每次打开 / 关闭文本都自增：迟到的异步读取回调据此作废，绝不覆盖新打开的文件。 */
+  private textToken: number = 0;
 
   aboutToAppear(): void {
     // Win64「可观测」的鸿蒙变形：启动只打一条常量环境快照，绝不读 preferences / 不枚举磁盘。
@@ -4024,6 +4113,11 @@ struct Index {
     // 只动作废代号与顺序，不 release 任何 PixelMap：目录重扫要继续复用已解码缓存。
     this.resetAllPreloadChain();
     this.items = list;
+    // 第三十七轮：换源（选文件夹 / 快照恢复 / 往上层 / 进子目录）必须收掉文本预览，
+    // 否则右栏会一直挂着上一个目录里的文件；自动重扫 keepView 保持不动。
+    if (!keepView) {
+      this.closeTextMode();
+    }
     if (rows !== undefined) {
       this.rows = rows;
     } else {
@@ -4695,7 +4789,7 @@ struct Index {
     return '第 ' + (this.cur + 1) + ' / ' + n + ' 张';
   }
 
-  /** 点左栏某一行：按行的种类分发（图片 / 上级 / 子文件夹 / 不支持预览的文件）。
+  /** 点左栏某一行：按行的种类分发（图片 / 上级 / 子文件夹 / 文本 / 不支持预览的文件）。
    *  对应 Win64 FsEntry 的 ItemIndex 单向挂钩。 */
   private onRowTap(rowIdx: number): void {
     if (rowIdx < 0 || rowIdx >= this.rows.length) {
@@ -4713,6 +4807,11 @@ struct Index {
       this.openFolder(r.uri, true, !this.inAppUpList);
       return;
     }
+    if (kind === ROW_TEXT) {
+      // 第三十七轮：文本 / 源码行走独立预览链，绝不进图片翻页序列 items。
+      this.openTextFile(r.uri, r.name);
+      return;
+    }
     if (kind === ROW_OTHER) {
       this.status = '不支持预览：' + r.name + '（只列出，不进翻页序列）';
       return;
@@ -4724,6 +4823,10 @@ struct Index {
   }
 
   private select(idx: number): void {
+    // 第三十七轮：点图片行即退出文本预览，图片态与文本态严格互斥。
+    if (this.textMode) {
+      this.closeTextMode();
+    }
     if (idx < 0 || idx >= this.items.length) {
       return;
     }
@@ -4750,6 +4853,11 @@ struct Index {
   }
 
   private go(delta: number): void {
+    // 第三十七轮：文本预览态下方向键改为滚动文本，绝不偷偷翻动图片序列。
+    if (this.textMode) {
+      this.textScroller.scrollBy(0, delta * TEXT_WHEEL_LINES * TEXT_ROW_H_VP);
+      return;
+    }
     if (this.items.length === 0) {
       return;
     }
@@ -4790,6 +4898,11 @@ struct Index {
    *  所以这里把窗口内攒下的步数**合并成一次跳转**，只渲染最终落点那一张：
    *  中间张根本不解码（这是关键收益），既不会丢滚动量，也不会出现解码跟不上导致的错位。 */
   private onWheel(dir: number): void {
+    // 第三十七轮：文本预览态下滚轮滚动文本行，不翻页、不缩放图片。
+    if (this.textMode) {
+      this.textScroller.scrollBy(0, dir * TEXT_WHEEL_LINES * TEXT_ROW_H_VP);
+      return;
+    }
     const now: number = Date.now();
     // 翻页用的滚轮一动就把画布拉回正中：万一此前被「伪拖拽」带偏了，立刻纠正，不必等 go()。
     // Ctrl + 滚轮是缩放，不复位 —— 那时平移量是要保留的锚点。
@@ -6399,6 +6512,7 @@ struct Index {
         ' | base=' + ellipsizeMiddle(base, 42) + ' | hv=3';
       const imgs: ImageItem[] = [];
       const dirs: ImageItem[] = [];
+      const texts: ImageItem[] = [];
       const others: ImageItem[] = [];
       for (let i = 0; i < names.length; i++) {
         const raw: string = names[i];
@@ -6430,6 +6544,10 @@ struct Index {
           // 「编号202601 模特 猫」这类子文件夹全落在这里。按文件夹列出，
           // 目录表才不会变成一排点不进去的灰行（点名称即可继续进入）。
           dirs.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_FOLDER, itemIndex: -1 });
+        } else if (isTextFileName(raw)) {
+          // 第三十七轮：纯文本 / 源码文件单独成行，只进 rows，**绝不进 items**。
+          // 后缀白名单由 TextDoc.textLangOf() 判定；读到字节后还有 looksBinary 兜底。
+          texts.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_TEXT, itemIndex: -1 });
         } else {
           others.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_OTHER, itemIndex: -1 });
         }
@@ -6437,10 +6555,12 @@ struct Index {
       const cmp = (a: ImageItem, b: ImageItem): number => naturalCompare(a.name, b.name);
       dirs.sort(cmp);
       imgs.sort(cmp);
+      texts.sort(cmp);
       others.sort(cmp);
       if (!this.sortAsc) {
         dirs.reverse();
         imgs.reverse();
+        texts.reverse();
         others.reverse();
       }
       const rows: ImageItem[] = [];
@@ -6455,6 +6575,9 @@ struct Index {
       for (let i = 0; i < imgs.length; i++) {
         imgs[i].itemIndex = i;
         rows.push(imgs[i]);
+      }
+      for (let i = 0; i < texts.length; i++) {
+        rows.push(texts[i]);
       }
       for (let i = 0; i < others.length; i++) {
         rows.push(others[i]);
@@ -6503,9 +6626,12 @@ struct Index {
       if (imgs.length === 0) {
         // 全是子文件夹、本层零图片（例如「人像」）：目录表照常列出，
         // 左栏再加一条提示条，别让用户以为又白屏了。
-        this.dirHint = '本层没有图片 · ' + dirs.length + ' 个子文件夹（点名称进入）';
+        this.dirHint = '本层没有图片 · ' + dirs.length + ' 个子文件夹（点名称进入）' +
+          (texts.length > 0 ? ' · ' + texts.length + ' 个文本文件（点名称预览）' : '');
         this.status = '目录 ' + dirLabel + '：本层没有图片 · ' + dirs.length +
-          ' 个子文件夹（点文件夹进入）· 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
+          ' 个子文件夹（点文件夹进入）' +
+          (texts.length > 0 ? ' · ' + texts.length + ' 个文本文件' : '') +
+          ' · 支持后缀 ' + IMAGE_SUFFIXES.join(' ');
         hilog.warn(DOMAIN, TAG, 'openFolder: 0 images among %{public}d entries, rows=%{public}d',
           names.length, rows.length);
       } else if (!childReadable) {
@@ -6881,6 +7007,10 @@ struct Index {
    *    · 成功后 openFolder → applyItems 统一刷新当前路径 / 目录展示 / 按钮状态，
    *      并清掉 pickRootUri 这个与层级无关的旧锚点，三者不可能各说各话。 */
   private async browseUp(): Promise<void> {
+    // 第三十七轮：往上层是目录导航，先把文本预览态收掉，别让右栏挂着旧文件。
+    if (this.textMode) {
+      this.closeTextMode();
+    }
     if (this.folderBusy) {
       this.status = '往上层：上一批目录还在列，稍候再点';
       return;
@@ -8478,7 +8608,10 @@ struct Index {
 
         // ---------- 右侧：大图预览（GPU 合成渲染）----------
         Stack({ alignContent: Alignment.Center }) {
-          if (this.cur >= 0) {
+          if (this.textMode) {
+            // 第三十七轮：文本 / 源码预览与图片预览互斥，走独立的行数据源。
+            this.textPreview();
+          } else if (this.cur >= 0) {
             // 外层 Column：拖拽 + 旋转；内层 Image：缩放 + 镜像。
             // 对开时两页各占一半宽、等高并排（Win64 6347756）；翻页步长仍恒为一格。
             Column() {
@@ -8972,5 +9105,244 @@ struct Index {
       this.armResizeReload();
     })
     .onMouse((event: MouseEvent) => this.onRootMouse(event))
+  }
+
+  // ==================================================================
+  // 第三十七轮：纯文本 / 源码文件预览
+  // 真值源在 common/TextDoc.ts；本段只做「真异步读字节 → 解码 → 建行数据源 → 渲染」。
+  // 放在 build() 之后：既有静态契约的切片全部以方法签名为锚点，落在这里不会
+  // 把新方法混进 previewImage / rightPageImage / topBar / applyItems 等切片。
+  // ==================================================================
+
+  /** 收掉文本预览态并作废旧读取代号。绝不碰图片缓存 / 目录状态 / 位置记忆。 */
+  private closeTextMode(): void {
+    this.textMode = false;
+    this.textToken++;
+    this.textLines = [];
+    this.textBlockStarts = [];
+    this.textSource.reload([]);
+    this.textName = '';
+    this.textStatusText = '';
+    this.textTruncated = false;
+  }
+
+  /** 解码结果落地：切行 / 算行号栏宽 / 算横向滚动宽 / 通知 LazyForEach 重取。
+   *  token 不符（用户已切到别的文件或退回图片态）直接丢弃迟到结果。 */
+  private applyTextDecoded(name: string, lang: number, text: string, encLabel: string,
+    truncatedBytes: boolean, token: number): void {
+    if (token !== this.textToken || !this.textMode) {
+      return;
+    }
+    const split: TextSplit = splitTextLines(text, TEXT_MAX_LINES);
+    const truncated: boolean = split.truncated || truncatedBytes;
+    this.textLines = split.lines;
+    this.textBlockStarts = blockStartsOf(split.lines, lang);
+    this.textNoW = lineNoWidthOf(split.lines.length);
+    this.textContentW = textContentWidthOf(split.lines, TEXT_TAB_WIDTH,
+      TEXT_CHAR_W_VP, this.textNoW, TEXT_CONTENT_MAX_VP);
+    this.textTruncated = truncated;
+    this.textStatusText = textStatusOf(name, lang, encLabel, split.lines.length, truncated);
+    this.status = this.textStatusText;
+    this.textSource.reload(split.lines);
+    this.textScroller.scrollToIndex(0, false);
+    this.textHScroller.scrollTo({ xOffset: 0, yOffset: 0 });
+    hilog.info(DOMAIN, TAG,
+      'text open name=%{public}s lang=%{public}d enc=%{public}s lines=%{public}d trunc=%{public}d',
+      name, lang, encLabel, split.lines.length, truncated ? 1 : 0);
+  }
+
+  /** 点左栏文本行后的完整读取链。
+   *  · fs.stat / fs.open / fs.read / fs.close 全用 Promise 版并 await —— R27 教训：
+   *    `Promise.resolve(同步读)` 是伪异步，同步跨进程 IO 会触发 THREAD_BLOCK_6S；
+   *  · 只读不写，绝不修改磁盘文件；字节上限 8MB / 行数上限 12 万，超出明确提示；
+   *  · 编码候选由 TextDoc.encodingCandidatesOf 给（BOM / 严格 UTF-8 / GB18030 / Big5 /
+   *    Windows-1252），逐个用 util.TextDecoder 试，再由 pickDecodedIndexOf 选替换字符最少的；
+   *  · 二进位文件（NUL / 高比例控制字符）按提示展示，不刷满屏乱码。 */
+  private async openTextFile(uri: string, name: string): Promise<void> {
+    const token: number = ++this.textToken;
+    const lang: number = textLangOf(name);
+    if (lang === LANG_NONE) {
+      this.status = '不是可预览的文本文件：' + name;
+      return;
+    }
+    this.textMode = true;
+    this.textName = name;
+    this.textLang = lang;
+    this.textTruncated = false;
+    this.textStatusText = '正在读取文本…';
+    this.status = '正在读取文本：' + name;
+    this.textLines = [];
+    this.textBlockStarts = [];
+    this.textSource.reload([]);
+    let file: fs.File | undefined = undefined;
+    try {
+      const st: fs.Stat = await fs.stat(uri);
+      const cap: number = textReadCapOf(st.size, TEXT_MAX_BYTES);
+      const truncatedBytes: boolean = textByteTruncatedOf(st.size, TEXT_MAX_BYTES);
+      if (cap <= 0) {
+        this.applyTextDecoded(name, lang, '', encodingLabelOf('utf-8'), truncatedBytes, token);
+        return;
+      }
+      file = await fs.open(uri, fs.OpenMode.READ_ONLY);
+      const buf: ArrayBuffer = new ArrayBuffer(cap);
+      // 两参重载：刚 open 时文件指针在 0，一次读满；刻意不传 options 避开各 SDK
+      // 版本 ReadOptions.offset 语义差异（与 RawStore.read 同一口径）。
+      const got: number = await fs.read(file.fd, buf);
+      if (token !== this.textToken || !this.textMode) {
+        return;
+      }
+      const view: Uint8Array = new Uint8Array(buf);
+      const use: number = got > 0 ? (got < cap ? got : cap) : 0;
+      const bytes: Uint8Array = new Uint8Array(use);
+      for (let i = 0; i < use; i++) {
+        bytes[i] = view[i];
+      }
+      if (use === 0) {
+        this.applyTextDecoded(name, lang, '', encodingLabelOf('utf-8'), truncatedBytes, token);
+        return;
+      }
+      if (looksBinary(bytes)) {
+        const hint: Array<string> = ['（二进制内容，不按文本显示）'];
+        this.textLines = hint;
+        this.textBlockStarts = blockStartsOf(hint, lang);
+        this.textNoW = lineNoWidthOf(hint.length);
+        this.textContentW = textContentWidthOf(hint, TEXT_TAB_WIDTH,
+          TEXT_CHAR_W_VP, this.textNoW, TEXT_CONTENT_MAX_VP);
+        this.textStatusText = '二进制内容，不按文本显示：' + name;
+        this.status = this.textStatusText;
+        this.textSource.reload(hint);
+        return;
+      }
+      // BOM 由 encodingCandidatesOf 识别、由 textBodyOf 自行剥掉，
+      // 避免 util.TextDecoder 把 U+FEFF 留在正文第一行。
+      const encs: Array<string> = encodingCandidatesOf(bytes);
+      const body: Uint8Array = textBodyOf(bytes);
+      const decoded: Array<string> = [];
+      const usedEncs: Array<string> = [];
+      for (let k = 0; k < encs.length; k++) {
+        try {
+          const dec: util.TextDecoder = util.TextDecoder.create(encs[k]);
+          decoded.push(dec.decodeToString(body));
+          usedEncs.push(encs[k]);
+        } catch (e) {
+          // 平台不认识该编码：跳过，其余候选照常参与挑选
+        }
+      }
+      if (decoded.length === 0) {
+        this.textStatusText = '没有可用的文本编码：' + name;
+        this.status = this.textStatusText;
+        return;
+      }
+      const pick: number = pickDecodedIndexOf(decoded);
+      this.applyTextDecoded(name, lang, decoded[pick], encodingLabelOf(usedEncs[pick]),
+        truncatedBytes, token);
+    } catch (e) {
+      if (token === this.textToken) {
+        this.textStatusText = '读取文本失败：' + name + ' · ' + JSON.stringify(e);
+        this.status = this.textStatusText;
+        hilog.warn(DOMAIN, TAG, 'text read FAIL name=%{public}s err=%{public}s',
+          name, JSON.stringify(e));
+      }
+    } finally {
+      if (file !== undefined) {
+        try {
+          await fs.close(file.fd);
+        } catch (e2) {
+          // 关闭失败不影响已读到的内容
+        }
+      }
+    }
+  }
+
+  /** 当前行按语言 + 多行注释起始状态切出的 token 列表（显示层只读，不改原行）。 */
+  private textTokensOf(idx: number): Array<TextToken> {
+    if (idx < 0 || idx >= this.textLines.length) {
+      return [];
+    }
+    const inBlock: boolean = idx < this.textBlockStarts.length ? this.textBlockStarts[idx] : false;
+    return tokenizeLine(this.textLines[idx], this.textLang, inBlock, true).tokens;
+  }
+
+  /** 一行：行号栏 + 等宽 token 片段。@Builder 里不声明局部变量，
+   *  随窗口 / 文件变化的尺寸一律直接读 @State（第五轮 ArkUI 按值参数不刷新的教训）。
+   *  每个 token 一个 Text（Row 内 ForEach）—— 规避 ArkUI `Text()` 内不能动态生成 Span
+   *  的限制；token 文本拼回去恒等于 expandTabsOf(原行)，不丢缩进 / 特殊字符。 */
+  @Builder
+  textRow(line: string, idx: number) {
+    Row() {
+      Text((idx + 1).toString())
+        .fontSize(12)
+        .fontFamily('monospace')
+        .fontColor('#5b6478')
+        .width(this.textNoW)
+        .textAlign(TextAlign.End)
+        .maxLines(1)
+      Row() {
+        ForEach(this.textTokensOf(idx), (t: TextToken, k: number) => {
+          Text(t.text)
+            .fontSize(12)
+            .fontFamily('monospace')
+            .fontColor(tokenColorOf(t.kind))
+            .maxLines(1)
+        }, (t: TextToken, k: number) => idx.toString() + ':' + k.toString())
+      }
+      .margin({ left: 8 })
+    }
+    .width(this.textContentW)
+    .height(TEXT_ROW_H_VP)
+    .alignItems(VerticalAlign.Center)
+  }
+
+  /** 文本预览整块：抬头（文件名 / 语言 / 编码 / 行数 / 截断提示）+ 可滚动行表。
+   *  外层 Scroll 负责横向（长行不裁切、不换行、不丢内容），内层 List + LazyForEach
+   *  负责纵向虚拟化（十几万行也只创建可见节点）。两者滚动轴不同，互不抢手势。 */
+  @Builder
+  textPreview() {
+    Column() {
+      Row() {
+        Text(this.textName)
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#e8ecf4')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: 320 })
+        Text(this.textStatusText)
+          .fontSize(11)
+          .fontColor('#8b95a8')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+          .margin({ left: 12 })
+      }
+      .width(this.textContentW)
+      .height(32)
+      .padding({ left: 12, right: 12 })
+      .alignItems(VerticalAlign.Center)
+      .backgroundColor('#1a1d23')
+
+      Scroll(this.textHScroller) {
+        List({ scroller: this.textScroller, space: 0 }) {
+          LazyForEach(this.textSource, (line: string, idx: number) => {
+            ListItem() {
+              this.textRow(line, idx)
+            }
+          }, (line: string, idx: number) => idx.toString() + ':' + line)
+        }
+        .width(this.textContentW)
+        .height('100%')
+        .scrollBar(BarState.Auto)
+        .cachedCount(6)
+        .backgroundColor('#12161c')
+      }
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Auto)
+      .layoutWeight(1)
+      .width('100%')
+      .align(Alignment.TopStart)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#12161c')
   }
 }

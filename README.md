@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R36` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R37` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -27,6 +27,7 @@
 | 能力 | 说明 |
 |---|---|
 | 格式 | HEIC / HEIF / JPG / JPEG / PNG / WEBP / BMP / GIF，走鸿蒙系统解码器 |
+| 纯文本 / 源码预览 | **11-19 起**：左栏直接列出 `.log` / `.txt` / `.c` / `.py` / `.asm` / `.v` 等 **111 种**文本 / 源码后缀；自动识别语言，C-like / Python / ASM / Verilog 启用语法高亮，**未命中高亮规则的文件仍按普通文本完整展示**；只读不写、保留原始换行 / 缩进 / 特殊字符；行号 + 等宽字体；UTF-8 / UTF-16 BOM / GB18030 / Big5 / Windows-1252 兼容；横向滚动不裁长行、纵向 `LazyForEach` 虚拟化可稳定显示十几万行（见第三十七轮章节） |
 | 挑图入口 | 仅 `选择文件夹`（`DocumentSelectMode.FOLDER`）；**`打开图库`（v1.0.6）、`选择图片` 与 `回到上次`（11-10）三个按钮均已取消**，界面上不再出现（见「按钮区精简」章节） |
 | 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `往上层` / `退格` 按**目录层级**进入直接父目录（**不按浏览历史回退**，连续点击逐级到卷 / 硬盘逻辑最上层后停止）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
 | 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` **恒亮恒可点，永不 grey out / 永不禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
@@ -533,6 +534,72 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 1 条 `ohos.permission.READ_IMAGEVIDEO` 受限权限、1 条 `setWindowSystemBarEnable` 对 2in1 不可用），
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
+
+## 第三十七轮：纯文本 / 源码文件预览（2026-11-19，R37）
+
+**用户需求**：为应用增加纯文本文件预览功能，支持 `.log`、`.txt`、`.c`、`.asm` 等常见纯文本及源码文件；自动识别文件类型，对 C、Python、ASM、Verilog 等语言启用对应的代码语法高亮，未匹配到高亮规则的文件仍按普通文本完整展示。预览需保留原始内容、换行、缩进和特殊字符，不修改文件，提供行号与等宽字体排版以保持清晰易读，并兼容常见文本编码，能稳定显示行数较多的文件。
+
+### 设计：真值源 / IO / 渲染三层分开
+
+沿袭 `DirName.ts` / `ResumePlan.ts` 的既有口径，把**所有可判定逻辑放进纯函数真值源**，IO 与 UI 只做接线：
+
+| 层 | 位置 | 约束 |
+|---|---|---|
+| 真值源 | `entry/src/main/ets/common/TextDoc.ts`（新建，877 行 / 59 个 export） | 零 SDK import、零文件 IO、零 `await` / `throw` 语句、零全局可变状态；输入仅 `string` / `number` / `Uint8Array` / `Array`，可被 `tests/dirname.test.mjs` 直接加载回归 |
+| 异步 IO | `Index.ets` 的 `openTextFile()` | `fs.stat/open/read/close` **全用 Promise 版并 await**（R27 `THREAD_BLOCK_6S` 教训：`Promise.resolve(同步读)` 是伪异步）；全程 `READ_ONLY`，绝不写 / 删 / 改名 |
+| 渲染 | `TextLineSource` + `textPreview()` / `textRow()` | 大数组刻意不进 `@State`；`LazyForEach` 纵向虚拟化 + 外层 `Scroll` 横向滚动；`textToken` 作废迟到的异步结果 |
+
+**与图片态严格互斥**：文本行只进左栏 `rows`（`ROW_TEXT = 4`），**绝不进 `items`** —— 否则解码 / 预载链会把 `.c` 当图片解。右栏 `if (this.textMode) { textPreview() } else if (this.cur >= 0) { …原有两页预览分支一字未删… }`；点图片行、换源、往上层、方向键、滚轮都会按各自语义收掉 / 绕开文本态。
+
+### 改动（3 个文件）
+
+| 文件 | 内容 |
+|---|---|
+| `entry/src/main/ets/common/TextDoc.ts`（新增） | ① 后缀 / 语言：`TEXT_SUFFIX_PLAIN`（37）/ `TEXT_SUFFIX_C`（C-like 55）/ `TEXT_SUFFIX_PYTHON`（5）/ `TEXT_SUFFIX_ASM`（6）/ `TEXT_SUFFIX_VERILOG`（8）合计 **111 项**；`textExtOf()` / `textLangOf()` / `isTextFileName()` / `textSuffixListOf()` / `textLangLabelOf()` / `highlightWanted()` —— 只有 `LANG_PLAIN` 不着色、其余按语言着色，`LANG_NONE` 直接不进文本预览；② 编码：`textBomEncodingOf()` / `textBomSkipOf()` / `isValidUtf8()` / `looksBinary()` / `textBodyOf()` / `encodingCandidatesOf()` / `pickDecodedIndexOf()` / `encodingLabelOf()` —— BOM 剥离 + 严格 UTF-8 校验 + GB18030 / Big5 / Windows-1252 回退候选，逐个 `util.TextDecoder` 试解后选**替换字符最少**者；③ 行处理：`textReadCapOf()` / `textByteTruncatedOf()` / `splitTextLines()` / `expandTabsOf()` / `lineNoWidthOf()` / `textContentWidthOf()` / `textStatusOf()` —— CRLF / CR / LF 统一切行、Tab 只在显示层按制表位展开、8MB / 12 万行上限与截断提示、按最长行算横向内容宽并夹到 12000vp；④ 高亮：`TOK_PLAIN`…`TOK_LABEL` 七类 token + `tokenColorOf()` / `tokenizeLine()` / `blockStartsOf()` / `joinTokensOf()` —— 逐行 tokenizer 携多行注释 / Python 三引号跨行状态，`emitTokens=false` 与 `true` 共用同一状态机；不变式 `joinTokensOf(tokens) === expandTabsOf(原行)` 保证**原始内容零改写** |
+| `entry/src/main/ets/pages/Index.ets` | ① `ESC_BUILD_TAG → R37`；② `ROW_TEXT = 4`；`FILE_FILTERS` 保留「所有文件」为第一项并新增 `textFileFilterOf()`（与 `textSuffixListOf()` 同源，杜绝两份后缀清单分叉）；③ `openFolder()` 分类：`isDir → 图片 → !statOk 按文件夹兜底 → isTextFileName → 其他`，文本行单独 `texts` 组、自然序排序、只 `rows.push`；④ `ArchiveRow` 文本行独立暖黄配色、hover 缩略图仍只对图片行开放；⑤ `onRowTap()` 文本行走 `openTextFile()` 且 `return`，**绝不 `select(itemIndex)`**；⑥ 新增 `TextLineSource implements IDataSource`（`reload()` 通知 `onDataReloaded`）；⑦ 新增 `openTextFile()` / `applyTextDecoded()` / `closeTextMode()` / `textTokensOf()` / `textRow()` / `textPreview()`；⑧ 互斥护栏：`select()`、`applyItems(!keepView)`、`browseUp()` 收文本态，`go()` / `onWheel()` 文本态下滚动文本行而非翻图片；⑨ 右栏 `textMode` 分支与图片分支互斥，原有 `previewImage` / `rightPageImage` 两页预览分支一字未删 |
+| `tests/dirname.test.mjs` | 构建标记 `R36 → R37`、旧包排除补 `R36`；新增 **85 条** R37 断言（① 类型 12 / ② 编码 16 / ③ 行处理 16 / ④ 高亮 15 / ⑤ 接线 22 / ⑥ 零回归 4）；其中「零 await / 零 throw」按**语句形态**判定（关键字表 `'|await|'` / `'|throw|'` 是高亮规则数据，不是语句），`onRowTap` 按**整段分支**判定（分支内必须 `openTextFile` + `return`，且绝不出现 `this.select(`） |
+
+### 三类证据（严格分开）
+
+| 类别 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw --mode module -p product=default assembleHap --no-daemon` → **BUILD SUCCESSFUL in 15 s 92 ms**（33 tasks：18 executed / 15 up-to-date），日志出现 `Finished :entry:default@CompileArkTS... after 8 s 635 ms`（**真实编译，非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（8 条 `preferences` 可能抛异常、1 条 `READ_IMAGEVIDEO` 受限权限、8 条 2in1 系统栏 API），与 R36 基线完全一致且**全部落在 R37 未改动区域**；签名 HAP **1,093,949 bytes**（R36 为 996,788），未签名 1,057,642 bytes |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 HAP 内 `ets/modules.abc`（均 **620,068 bytes**，R36 为 561,580）检出 **`R37=1 / R36=0 / R35=0 / R34=0`**；`APP_VERSION = '1.0.7'`（`1.0.6=0`）、`module.json` 的 `versionCode 7 / versionName 1.0.7`；`textContentWidthOf` / `tokenizeLine` / `textSuffixListOf` / `textStatusOf` / `openTextFile` / `TextLineSource` / `isTextFileName` / `textBomEncodingOf` / `splitTextLines` / `blockStartsOf` / `applyTextDecoded` / `textFileFilterOf` / `textPreview` / `textRow` / `closeTextMode` **各 2 处**进入产物，`ROW_TEXT=1` |
+| **静态契约 + 纯函数** | **ALL PASS 1747 passed, 0 failed**（R36 为 1662，新增 85 条 R37 断言）；`node --experimental-strip-types`、`node --check`、`git diff --check` 通过；源码相对 HEAD：`Index.ets +379/-7`、`tests/dirname.test.mjs +424/-47`，新增 `TextDoc.ts` 877 行 |
+
+> ⚠️ **`node --experimental-strip-types` 只剥离 TS 类型、不做完整类型检查；静态契约不能
+> 代替真实 ArkTS 编译，编译校验更不能代替真机验证。** 真机 DevEco / 设备安装 / `hdc` /
+> `hilog` 侧验证由用户完成。
+
+### 覆盖的验证场景（请在装有 `R37` 新包的机器上执行）
+
+| # | 场景 | 期望 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R37`（仍是 `R36` 及更早说明装的是旧包） |
+| 2 | 打开含 `.log` / `.txt` 的目录，点文本行 | 左栏文本行暖黄显示；右栏出抬头（文件名 / 语言 / 编码 / 行数）+ 行号 + 等宽正文，与图片预览互斥 |
+| 3 | `.c` / `.py` / `.asm` / `.v` 源码 | 关键字 / 注释 / 字符串 / 数字 / 预处理 / 标签按各自规则着色；C 多行注释、Python 三引号跨行状态连贯 |
+| 4 | 未命中高亮规则的文件（`.md` / `.json` / 无后缀文本） | **仍按普通文本完整展示**，不着色、不丢内容 |
+| 5 | CRLF / CR / LF 混排、Tab 缩进、行尾空格、特殊字符 | 换行 / 缩进 / 特殊字符原样保留，长行可横向滚动且不裁切、不自动换行 |
+| 6 | UTF-8 / UTF-16LE BOM / UTF-16BE BOM / GB18030 / Big5 / Windows-1252 文件 | 各自正确解码、BOM 不出现在首行、中文不乱码；候选解码挑替换字符最少者 |
+| 7 | 数万行大文件 | 滚动稳定不卡、行号不跳动；超过 8MB / 12 万行时抬头明确提示「已显示前 8 MB / 120000 行」 |
+| 8 | 二进制 / 伪装成 `.txt` 的文件 | 显示「二进制内容，不按文本显示」，不刷满屏乱码；全程只读、文件校验和不变 |
+| 9 | 点图片行 / 滚轮 / 方向键 / 「往上层」/ 选文件夹 | 退出文本态且图片预览、目录恢复、ESC 等既有链路完全不受影响 |
+| 10 | 快速连续点两个文本行 | `textToken` 作废迟到结果，右栏恒定显示最后点的那个文件，不会串台 |
+
+### 边界（刻意保留）
+
+- **文本行不进图片翻页序列 `items`**：滚轮 / 方向键在文本态下只滚文本行，不翻图片；要看图先点图片行。
+- **只读不写**：`fs.OpenMode.READ_ONLY`，无写 / 删 / 改名 / 截断任何源文件；编码与 Tab 处理只在内存显示层。
+- **8MB / 12 万行上限**：超出按字节 / 行数截断并在抬头明确提示，不把整个 NAS 文件读进内存
+  （R27 `THREAD_BLOCK_6S` 教训）；二进制内容按提示展示，不刷乱码。
+- **高亮是轻量 tokenizer，不是语言服务器**：C-like 共用一套规则、无嵌套语法树；
+  未命中规则与 `LANG_PLAIN` 一律原样完整展示，绝不因为「不认识」就吞内容。
+- **ArkUI 取舍**：`textRow()` 用 `Row()` 内 `ForEach` 逐 token 生成 `Text()`，而不是
+  在 `Text()` 内动态生成 `Span`（ArkUI 不支持）；外层 `Scroll` 横向 + 内层 `List/LazyForEach`
+  纵向，两轴不同不抢手势。
+- **版本恒为 `1.0.7 / versionCode 7`**；未 `push`、未跑 `build.sh`、未把 HAP 放桌面。
+
+---
 
 ## 第三十六轮：空目录 / 无图片目录退出恢复 + 「往上层」真实列出该层全部资料夹（2026-11-19，R36）
 
