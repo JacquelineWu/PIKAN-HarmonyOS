@@ -1561,3 +1561,69 @@ export function exploreBaseOf(forms: Array<string>,
   }
   return best >= 0 ? forms[best] : '';
 }
+
+// --------------------------------------------------------------------
+// 第三十六轮（2026-11-19）：用户主动「返回上层」的真实全量列举决策（R36）
+// --------------------------------------------------------------------
+// R35 把单个 openFolder() 内多个 URI 写法的 listFile 结果合并了，但仍留两处
+// 「局部结果」来源：
+//   ① openFolder() 里 probeChild() 命中即 break，后续 URI 写法不再探索；
+//   ② browseUp() 对多个 parent 候选逐个 openFolder()，首个成功就 return，
+//      其余候选真实列出来的兄弟目录全被丢掉；
+//      showUpListInApp() 又是零 IO 兜底，只靠会话缓存反推。
+// R36 用户要求「任何层级、任何时间点击返回上层，都必须真实列出该上层目录下
+// 全部资料夹目录」。修复：用户主动导航时，对**所有**同层候选的每个 URI 写法
+// 都做真实 fs.listFile（真异步，防冻结），收集全部结果再合并；自动重扫（每 1.5s）
+// 仍走 R35 早停，绝不放大 NAS IO。下面三个纯函数只做决策 / 去重 / 夹界，零 IO。
+
+/** 是否启用「全量真实列举」（不因首个候选 / 首个 probeChild 命中就停）。
+ *  · isUserNav=true（用户主动点往上层）→ true：跨所有同层候选真列、合并；
+ *  · isRescan=true（startDirPoll 自动重扫）→ false：保留 R35 早停，防 NAS 放大 IO；
+ *  · 其余（选文件夹首次进入）→ false：保持既有行为，零回归。
+ *  用户主动导航是唯一允许真实全量 IO 的入口，绝不落在启动恢复期。 */
+export function upFullExploreWanted(isUserNav: boolean, isRescan: boolean): boolean {
+  if (!isUserNav || isRescan) {
+    return false;
+  }
+  return true;
+}
+
+/** 把「多个同层 parent 候选」展开后的 URI 写法去重成一个有序清单，供逐个 listFile。
+ *  · 逐组按原顺序收纳、按原字符串精确去重（绝不 trim / 改名）；
+ *  · 空串一律丢弃；顺序稳定，首个候选（优先父级）排最前；
+ *  · 纯字符串、零 IO、零抛出；不改入参数组。 */
+export function upExploreFormsOf(groups: Array<Array<string>>): Array<string> {
+  const out: Array<string> = [];
+  const seen: Set<string> = new Set<string>();
+  for (let g = 0; g < groups.length; g++) {
+    const list: Array<string> = groups[g];
+    for (let i = 0; i < list.length; i++) {
+      const s: string = list[i];
+      if (s.length === 0 || seen.has(s)) {
+        continue;
+      }
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+/** 全量探索的候选写法夹界：NAS 上候选形态可能很多，绝不无界放大 IO。
+ *  · cap<=0 或输入为空 → 0（一次都不列）；
+ *  · 输入数 <= cap 原样返回；超过则截前 cap 个（首个 / 优先父级优先）。
+ *  纯数值、零抛出。 */
+export function upExploreCapOf(formCount: number, cap: number): number {
+  if (cap <= 0 || formCount <= 0) {
+    return 0;
+  }
+  return formCount < cap ? formCount : cap;
+}
+
+/** 全量探索后是否仍需要「零 IO APP 内清单」兜底。
+ *  · 真实列举到的有效名字数为 0（父层完全无 URI 授权）→ true，交给缓存兜底；
+ *  · 只要真实列到 >=1 个 → false，绝不拿缓存覆盖真实结果。
+ *  纯决策、零 IO。 */
+export function upExploreNeedFallback(realNameCount: number): boolean {
+  return realNameCount <= 0;
+}

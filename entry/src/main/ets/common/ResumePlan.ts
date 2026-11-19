@@ -222,3 +222,66 @@ export function restoreUpEnabled(mode: number, dirUri: string): boolean {
 export function restoreUpHint(dirName: string, tag: string): string {
   return '已恢复上次目录「' + dirName + '」· 可继续往上层 · ' + tag;
 }
+
+// ---------------------------------------------------------------------------
+// 第三十六轮（2026-11-19）：目录上下文与「有没有图片位置」彻底解耦（R36）
+// ---------------------------------------------------------------------------
+// 用户报障：退出前停留在任一目录（空目录 / 无图片目录 / 只有子文件夹的目录），
+// 重开却回到默认目录。根因是整条持久化 + 恢复链都以「有图片位置」为前提：
+//   · applyItems 在零图片时把 cur 置 -1，markPos() 直接 return，既不生成 LastPos
+//     也不 scheduleFlush() —— 空目录那次 openFolder 设好的 browseBase 从不落盘；
+//   · flushPos() / flushPosSync() 依赖 posPending / lastPos，退出走 FLUSH_SKIP，
+//     连 POS_KEY_BROWSE（实际浏览层级）都不写；
+//   · showLastOnStart() 用 resumeAction 判恢复，空目录没有 savedUri / okUri →
+//     RESUME_SKIP，enterSettledOk(itemCount=0) 恒 false，只读 / 空快照 / 单张兜底
+//     一律 giveUpNow 弹选择器 —— 把「正常的无图片目录」当成恢复失败。
+// R36：目录位置是独立于图片的纯字符串信息，落盘与恢复都不该挂靠 LastPos。
+
+/** 「仅目录上下文恢复」动作（用数值常量，ArkTS 最稳）。 */
+export const DIR_RESUME_NONE: number = 0;     // 走原图片恢复链
+export const DIR_RESUME_CONTEXT: number = 1;  // 走零 IO 目录上下文恢复
+/** 目录态持久化标记值：'1' = 退出前停在「目录浏览态且本层零图片」。
+ *  只用一个字符，绝不引入 XML 非法控制字符（R31 教训）。 */
+export const DIRCTX_EMPTY: string = '1';
+
+/** 计算目录态持久化标记：只有「在目录浏览态」且「本层零图片」才是空目录态。
+ *  · 空目录 / 无图片目录 / 只有子文件夹的目录 → '1'（R36 要走目录上下文恢复）；
+ *  · 有图片的目录 → ''（交回原图片恢复链，R30 的 restoreBrowseContext 会回填目录，
+ *    R36 绝不破坏「退出重开直接出图」这一历史能力）；
+ *  · 图片列表态 / 多选 / 图库（browseBase 为空）→ ''。
+ *  落盘与恢复共用这一个判据，纯决策、零 IO、零抛出。 */
+export function dirContextFlagOf(browseBase: string, itemCount: number): string {
+  if (browseBase.length > 0 && itemCount === 0) {
+    return DIRCTX_EMPTY;
+  }
+  return '';
+}
+
+/** 无图片位置时，是否仍要把「目录上下文」独立落盘。
+ *  · hasPosition=true（有图片位置）：flushPos 主体已写 POS_KEY_BROWSE，无需独立；
+ *  · hasPosition=false 且是空目录态：必须独立落盘，否则退出重开回默认目录。
+ *  纯决策、零 IO。 */
+export function dirContextSaveWanted(browseBase: string, itemCount: number,
+  hasPosition: boolean): boolean {
+  if (hasPosition) {
+    return false;
+  }
+  return dirContextFlagOf(browseBase, itemCount) === DIRCTX_EMPTY;
+}
+
+/** 启动恢复是否走「仅目录上下文恢复」（零 IO、不弹选择器、不回默认目录）。
+ *  · dirCtx==='1'（上次退出停在无图片目录）→ 目录上下文恢复**优先于**图片恢复，
+ *    忽略残留的旧图片 uri / 快照：用户退出前看的本来就是目录，不是图；
+ *  · autoEnabled / userActed / alreadyDone：与 resumeAction 同款让路护栏，
+ *    用户已自己动手 / 本轮已恢复过，绝不抢视图。
+ *  返回 DIR_RESUME_CONTEXT / DIR_RESUME_NONE，纯决策、零 IO、零抛出。 */
+export function dirOnlyResumeWanted(dirCtx: string, autoEnabled: boolean,
+  userActed: boolean, alreadyDone: boolean): number {
+  if (!autoEnabled || userActed || alreadyDone) {
+    return DIR_RESUME_NONE;
+  }
+  if (dirCtx !== DIRCTX_EMPTY) {
+    return DIR_RESUME_NONE;
+  }
+  return DIR_RESUME_CONTEXT;
+}

@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染），左上角信息浮层；右下角角标显示
   **缩放百分比**（100% = 原图像素 1:1）；估算占用 / 上限 / 目录诊断串一律不画
   （11-11 起，见「预览右下角角标精简」章节）。**11-16 起 ESC 排查诊断收成默认关闭的
-  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R35` 构建标记、
+  诊断层**，正式版右下角只有缩放百分比；按 `Ctrl+D` 或单击该百分比即展开 `R36` 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -534,6 +534,95 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 均已在代码里 try/catch 或申请权限，不影响功能。产物：
 `entry/build/default/outputs/default/entry-default-signed.hap`。
 
+## 第三十六轮：空目录 / 无图片目录退出恢复 + 「往上层」真实列出该层全部资料夹（2026-11-19，R36）
+
+**用户报障**：① APP 退出前若停留在任一目录，无论该目录是否为空、是否包含图片，
+再次打开都必须恢复到退出前停留的目录位置，**不得回到默认目录，也不得因目录内没有图片而
+丢失该状态**；② 在任何层级、任何时间点击「往上层」时，都必须**真实列出该上层目录下的
+全部资料夹目录**，而不是只显示其中一个资料夹或局部结果；③ 空目录、无图片目录、多层目录
+连续返回及反复进入子目录后，目录恢复与上层列表仍要正确。
+
+### 根因 A：整条持久化 + 恢复链都以「有图片位置」为前提
+
+先按状态传递核对 `applyItems() → markPos() → flushPos()/flushPosSync() → preferences →
+readLastPos() → scheduleShowLast() → beginRestore() → showLastOnStart()`：
+
+| 环节 | 旧行为 | 后果 |
+|---|---|---|
+| `applyItems()` | 零图片时 `cur = -1`，末尾仍调 `markPos()` | 目录表（`rows`）照常渲染，但「位置」不存在 |
+| `markPos()` | `cur < 0 \|\| cur >= items.length` 直接 `return` | 不生成 `LastPos`、不排 `scheduleFlush()`；空目录那次 `openFolder()` 设好的 `browseBase` **从不落盘** |
+| `flushPos()` | 依赖 `posPending`；无位置直接 `return` | 增强 key（`POS_KEY_BROWSE` / `POS_KEY_UPCACHE`）一个都不写 |
+| `flushPosSync()` | `exitFlushAction(p !== undefined, …)` → `FLUSH_SKIP` | 切后台 / ESC 退出也全跳过，连授权根 `POS_KEY_DIR` 都不补 |
+| `readLastPos()` | `hasRestoreMemory` 只看 idx / uri / ok / savedDirUri | 空目录会话可能连看门狗都不挂 |
+| `showLastOnStart()` | `resumeAction()` 无 `savedUri`/`okUri` → `RESUME_SKIP`；`enterSettledOk(itemCount=0)` 恒 false；只读 / 空快照 / 单张兜底一律 `giveUpNow()` | 把**正常的无图片目录**当成恢复失败 → 回默认目录 + 弹选择器 |
+| `restoreFromSnapshot()` | `uris.length === 0` 返回 false；`restoreBrowseContext()` 只在图片快照或单张兜底后调用 | 没有「仅目录态、无图片」的启动恢复路径 |
+
+一句话：**目录位置是独立于图片的纯字符串信息，却硬挂靠 `LastPos`**。空目录、无图片目录、
+只有子文件夹的目录三种形态都会踩中。
+
+### 根因 B：R35 只合并了「一个 `openFolder()` 内」的结果，跨候选仍是局部
+
+R35 修好了 `openFolder()` 里多个 URI 写法 `fs.listFile()` 结果被覆盖式 `names = n` 丢弃的
+问题，但用户明确要求「任何层级、任何时间真实列出全部资料夹」，R35 刻意保留的两处边界
+就不再成立：
+
+1. `browseUp()` 对 `upParentCandidates()` 给出的**多个同层 `parent` 候选**逐个
+   `openFolder(parent, false, false)`，**首个成功就 `return`** —— 其余候选真实列出来的
+   兄弟资料夹全被丢掉。这正是「只显示一个资料夹」的剩余根因。
+2. `openFolder()` 里 `probeChild()` 命中即 `break`，后续 URI 写法不再探索。
+3. `showUpListInApp()` 是零 IO 兜底，只靠 `upDirCache` / `lastUpNames` / 当前目录名反推，
+   不满足「真实列出」。
+
+### 改动（4 个文件）
+
+| 文件 | 内容 |
+|---|---|
+| `entry/src/main/ets/common/ResumePlan.ts` | 新增 `DIR_RESUME_NONE`/`DIR_RESUME_CONTEXT`/`DIRCTX_EMPTY` 与三个纯函数：`dirContextFlagOf()`（只有「目录浏览态 + 本层零图片」才给 `'1'`）、`dirContextSaveWanted()`（无图片位置时是否独立落盘）、`dirOnlyResumeWanted()`（目录态恢复**优先于**残留旧图片 uri / 快照，纯判据只看目录态标记）。全部零 IO、零抛出、单字符标记（绝不引入 R31 踩过的 XML 非法控制字符） |
+| `entry/src/main/ets/common/DirName.ts` | 新增四个纯函数：`upFullExploreWanted(isUserNav, isRescan)`（**只有用户主动导航**开全量；自动重扫 / 选文件夹 / 点子目录一律关，防 NAS 放大 IO）、`upExploreFormsOf(groups)`（跨所有同层候选把 URI 写法按原名精确去重、优先父级排最前）、`upExploreCapOf()`（夹界）、`upExploreNeedFallback()`（真实列举 0 项才允许零 IO 兜底） |
+| `entry/src/main/ets/pages/Index.ets` | ① 新增 `POS_KEY_DIRCTX`（`lastDirCtx`）、`UP_EXPLORE_MAX_FORMS=64`、`savedDirCtx`、`lastUpExploreNames`；② `readBrowseExtras()` 读回目录态标记、`hasRestoreMemory` 把目录态也算有会话记忆；③ `markPos()` 无图片时仍排写盘；`flushPos()` 无 `LastPos` 改走 `flushDirContext()`；`flushPosSync()` 的 `FLUSH_SKIP` 分支改走 `flushDirContextSync()`；两处增强 key 都与位置同批写 `POS_KEY_DIRCTX`（有图片时写 `''` 清旧标记）；④ 新增 `restoreDirContextOnly()`：**零 IO** 用 `restoreBrowseContext()` 回填 `browseBase`/`browseDir`/`pickRootUri`/`titlePath`/`canGoUp`/多层 `upDirCache`，用同层快照画一份纯清单，撤掉看门狗，绝不弹选择器、绝不回默认目录；⑤ `showLastOnStart()` 在图片恢复链**之前**判 `dirOnlyResumeWanted()`；⑥ `openFolder()` 增加 `extraForms` / `fullExplore` 两个可选参数，把跨候选写法并入候选集、按 cap 夹界，**`probeChild` 命中不再裸 `break`**（改 `if (!wantFull) break`），仍只有 1 处真实 `fs.listFile`；⑦ `browseUp()` 收集所有 `parent` 的 `dirCandidates()` → `upExploreFormsOf()` → 一次 `openFolder(landUri, …, allForms, wantFull)` 真实全量列举并合并落地，两处 `showUpListInApp()` 都受 `upExploreNeedFallback()` 夹住；⑧ `readLastPos()` 的死路径记忆、`finishPersistActivate()` 的授权激活失败两处 `giveUpNow()` 早退点加 `!dirOnly` 护栏（目录态恢复零 IO、不依赖 URI 授权，绝不被弹选择器踢回默认目录）；⑨ `ESC_BUILD_TAG` → `R36` |
+| `tests/dirname.test.mjs` | 引入 7 个新纯函数；构建标记 `R35 → R36`、旧包排除补 `R35`；`restoreBrowseContext()` 调用数 `2 → 3`、`inAppUpList` 维护点 `3 → 4`；改写 1 条 R34 「首个 parent 成功即 return」旧接线断言为 R36 全量探索断言；新增 R36 **60 条**断言（纯函数 38 / 静态接线·根因护栏·零回归 22） |
+
+### 三类证据（严格分开）
+
+| 类别 | 结果 |
+|---|---|
+| **真实 ArkTS 编译** | `hvigorw --mode module -p product=default assembleHap --no-daemon` → **BUILD SUCCESSFUL in 13 s 67 ms**（33 tasks：17 executed / 16 up-to-date），日志出现 `Finished :entry:default@CompileArkTS... after 7 s 577 ms`（**真实编译，非 UP-TO-DATE**），**0 ERROR / 17 WARN**（`preferences` 抛异常、`READ_IMAGEVIDEO` 受限权限、2in1 系统栏 API，与 R35 基线完全一致，全在本轮未改动区域）；签名 HAP **996,788 bytes**（R35 为 971,749），未签名 957,633 bytes |
+| **产物字节码** | `loader_out/default/ets/modules.abc` 与 HAP 内 `ets/modules.abc`（均 **561,580 bytes**，R35 为 549,756）检出 **`R36=1 / R35=0 / R34=0`**；`lastDirCtx=1`、`UP_EXPLORE_MAX_FORMS=1`；7 个新纯函数各 2 处进入产物；`flushDirContextSync=3`、`restoreDirContextOnly=2`、`dirOnly=3`（三处恢复入口护栏）、`up FULL=1`、`dironly=1=1`；**覆盖式 `names = n` = 0**、`names = mergeExploreNames(exploreGroups)` 合并仍在 |
+| **静态契约 + 纯函数** | **ALL PASS 1662 passed, 0 failed**（R35 为 1602；新增 60 条 R36 断言）；`node --experimental-strip-types`、`node --check`、`git diff --check` 通过；源码相对 HEAD 花括号 / 圆括号 / 方括号净增量各自平衡 |
+
+> ⚠️ **`node --experimental-strip-types` 只剥离 TS 类型、不做完整类型检查；静态契约不能
+> 代替真实 ArkTS 编译，编译校验更不能代替真机验证。** 真机 DevEco / 设备安装 / `hdc` /
+> `hilog` 侧验证由用户完成。
+
+### 覆盖的验证场景（请在装有 `R36` 新包的机器上执行）
+
+| # | 场景 | 期望 |
+|---|---|---|
+| 1 | `Ctrl+D` 展开诊断层 | 右下角出现 `R36`（仍是 `R35` 及更早说明装的是旧包） |
+| 2 | 进入**空目录**（无任何条目）→ 退出 APP → 重开 | 直接停在该空目录，不回默认目录、不弹选择器 |
+| 3 | 进入**无图片目录**（只有文档 / 非图片文件）→ 退出 → 重开 | 同上，目录态不因零图片丢失 |
+| 4 | 进入**只有子文件夹**的目录（如「人像」）→ 退出 → 重开 | 同上，左栏仍列出该层子文件夹（点名称可重新真实列举） |
+| 5 | 在有图片的目录看图 → 退出 → 重开 | **零回归**：直接恢复原图片档案，`POS_KEY_DIRCTX` 被写成 `''`，不误进目录态 |
+| 6 | 从深层目录点「往上层」 | 真实列出该父层**全部**资料夹目录（含非当前目录的兄弟目录），不是只显示一个 |
+| 7 | 多层 `L0 → L1 → L2 → L3` 连续点「往上层」 | 逐级 `L3→L2→L1→L0`，每次都完整列举，不越级不绕圈 |
+| 8 | 反复进入子目录 → 再点「往上层」 | 每次都重新真实列举，目录名 / 层级 / 清单与当前层一致，无残留上一个目录的局部结果 |
+| 9 | 恢复后的目录里点 `往上层` / 点某个文件夹行 | 层级链与目录表都正常，不因「启动期零 IO」锁死 |
+| 10 | 1.5s 自动重扫 / R32 FOLDER picker 选文件夹 / 只读名单态 | 与 R35 完全一致，零回归、无闪烁、无 appfreeze |
+
+### 边界（刻意保留）
+
+- **用户主动导航是唯一允许真实全量 IO 的入口**。`upFullExploreWanted()` 在自动重扫
+  （`startDirPoll()` 每 1.5s）、选文件夹首次进入、点子目录时恒为 `false`，保留 R35 早停，
+  绝不把 NAS `listFile` 放大到每轮 5~7 次（R27 `THREAD_BLOCK_6S` 教训）。
+- **启动恢复期仍零文件 IO**。`restoreDirContextOnly()` 只读 `preferences` 里的小 key 与
+  会话内已还原的 `upDirCache` 快照，纯字符串；真正重新真实列举发生在用户第一次点击时。
+- **真实列举一无所获才退回零 IO 清单**。父层完全无 URI 授权、所有形态 `listFile` 都失败时，
+  `upExploreNeedFallback(0)` 才允许 `showUpListInApp()`；绝不拿缓存覆盖真实结果，也绝不
+  凭空编造目录名凑数。
+- **版本恒为 `1.0.7 / versionCode 7`**；未 `push`、未跑 `build.sh`、未把 HAP 放桌面。
+
+---
+
 ## 第三十五轮：「往上层」后只显示一个目录 —— 完整探索并列举父层全部目录（2026-11-19，R35）
 
 **用户报障**：按「往上层」之后只显示一个目录，没有探索这一层的其它目录；要求进入父层后
@@ -629,6 +718,11 @@ APP 内清单态是同一问题的另一半：`upListNamesOf(target)` 只会收�
 > 真实痕迹时，清单仍只能列出当前目录。此时唯一能拿到完整兄弟目录的办法是重新用
 > 「选择文件夹」授权父层；APP **绝不凭空编造目录名**来凑数。
 > ③ 真机上的目录可达性仍取决于 picker 逐 URI 授权，编译与静态契约都无法替代实机验证。
+>
+> ⚠️ **第三十六轮（R36）已收紧本节 ① ②**：用户要求「任何层级、任何时间」都要真实列出
+> 父层全部资料夹，故 R36 在**用户主动点「往上层」时**去掉早停、跨所有同层候选合并真实列举；
+> 自动重扫 / 选文件夹 / 点子目录与启动恢复期仍严格保留本节 ① ② 的零放大 / 零 IO 边界。
+> 详见本章之前的「第三十六轮」章节。
 
 ## 第三十四轮：「往上层」无响应修复 —— 缓存索引从唯一闸门降级为优先候选（2026-11-19，R34）
 

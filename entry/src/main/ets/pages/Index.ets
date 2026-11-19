@@ -69,6 +69,9 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   UpParentIndex, cachedUpIndexOf, cachedUpLandsAt,
   cachedUpPreferredParentOf, cachedUpPreferredCandidates,
   mergeExploreNames, exploreBaseOf, exploreSiblingNamesOf } from '../common/DirName';
+// 第三十六轮：用户主动「往上层」的真实全量列举决策（跨同层候选、不 early break）。
+import { upFullExploreWanted, upExploreFormsOf, upExploreCapOf,
+  upExploreNeedFallback } from '../common/DirName';
 import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
@@ -78,6 +81,9 @@ import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed, restoreProbeUris,
   readonlyHint, readonlyTapHint, readonlyUpHint, restoreUpEnabled, restoreUpHint } from '../common/ResumePlan';
+// 第三十六轮：目录上下文与「有没有图片位置」解耦，空 / 无图片目录也能退出重开恢复。
+import { DIR_RESUME_CONTEXT, DIRCTX_EMPTY,
+  dirContextFlagOf, dirContextSaveWanted, dirOnlyResumeWanted } from '../common/ResumePlan';
 import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { ExifTransform, Size2, exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
@@ -130,7 +136,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R35';
+const ESC_BUILD_TAG: string = 'R36';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -903,6 +909,14 @@ const POS_KEY_BROWSE: string = 'lastBrowseBase';
 /** 第三十轮：多层目录清单快照（R29 upDirCache 的持久化形态，行式文本）。
  *  重启后父目录仍列不出来时，APP 内清单能还原上次见过的全部兄弟目录。 */
 const POS_KEY_UPCACHE: string = 'lastUpCache';
+/** 第三十六轮：上次退出是否停在「目录浏览态且本层零图片」。
+ *  只存一个字符 '1' / ''，绝不引入 XML 非法控制字符（R31 教训）。
+ *  目录位置是独立于图片的纯字符串信息：整条落盘 / 恢复链都不该挂靠 LastPos。 */
+const POS_KEY_DIRCTX: string = 'lastDirCtx';
+/** 用户主动「往上层」时最多真实列举多少个同层 URI 写法。
+ *  dirCandidates 每个父级约 6 种写法、同层候选通常数个，64 已远超实际规模；
+ *  这里只是 NAS 上的无界放大护栏，绝不截掉真实存在的兄弟目录。 */
+const UP_EXPLORE_MAX_FORMS: number = 64;
 /** 快照持久化封顶：preferences 是轻量 KV，层 / 条目 / 总长都设上限，
  *  绝不把启动读 prefs 再拖出一次 appfreeze（历史教训：600 条 uri 就够卡 8 秒）。 */
 const UP_CACHE_SAVE_LEVELS: number = 12;
@@ -2085,6 +2099,12 @@ struct Index {
   private savedBrowseBase: string = '';
   /** 第三十轮：持久化的多层清单快照原文（行式文本，恢复时解码 + 校验）。 */
   private savedUpCacheRaw: string = '';
+  /** 第三十六轮：读回的「上次退出停在无图片目录」标记（'1' = 是）。
+   *  与图片 uri / 快照完全独立：空目录、无图片目录、只有子文件夹的目录都靠它恢复。 */
+  private savedDirCtx: string = '';
+  /** 第三十六轮：最近一次 openFolder 真实列举合并后的有效名字数。
+   *  供 browseUp 判断「真实列举是否一无所获」，只有为 0 才允许零 IO 清单兜底。 */
+  private lastUpExploreNames: number = 0;
   /** 第三十轮：upDirCache 有更新、尚未写进 preferences。
    *  flushPosSync（切后台 / 退出）只在脏时才同步写这个 key，毫秒级必达。 */
   private upCacheDirty: boolean = false;
@@ -2311,7 +2331,7 @@ struct Index {
       await this.readBrowseExtras(p);
       // 有「上次会话」记忆才给恢复链挂 3 秒看门狗；首次启动没有任何记忆，绝不弹选择器。
       this.hasRestoreMemory = idx >= 0 || uri.length > 0 || ok.length > 0 ||
-        this.savedDirUri.length > 0;
+        this.savedDirUri.length > 0 || this.savedDirCtx === DIRCTX_EMPTY;
       // 2026-11-12 第六轮：会话界面状态（窗口大小位置 / 左栏收起态）。
       // 都是小 key，和上面 4 个一起在首帧之后异步读，绝不碰大快照、绝不重扫。
       const rawRect = await p.get(WIN_KEY_RECT, '');
@@ -2325,7 +2345,12 @@ struct Index {
       this.scheduleRestoreWindowRect();
       // 第十轮 ff1：上次就栽在同一个死路径上 —— 连 900ms 恢复定时器和 3 秒看门狗都不排，
       // 更不预热 / 不探测 / 不 openSync，零 IO 零等待直接把控制权交回「选择文件夹」。
-      if (failFastAction(
+      // 第三十六轮：仅目录上下文恢复是零 IO 的纯字符串路径，不依赖 URI 授权。
+      // 上一次图片会话留下的死路径记忆不该把「正常的空 / 无图片目录」判成失败，
+      // 更不该弹选择器把用户踢回默认目录；交给 showLastOnStart 的目录态分支。
+      const dirOnly: boolean = dirOnlyResumeWanted(this.savedDirCtx,
+        AUTO_SHOW_LAST_ON_START, this.userActed, this.resumeDone) === DIR_RESUME_CONTEXT;
+      if (!dirOnly && failFastAction(
           deadMemoryMatches(this.deadMemory, this.savedDirUri, ok),
           this.hasRestoreMemory, this.userActed, this.restoreSettled) === FF_GIVEUP) {
         this.giveUpNow('same dead dir as last time', 0);
@@ -2392,11 +2417,14 @@ struct Index {
   private async readBrowseExtras(p: preferences.Preferences): Promise<void> {
     this.savedBrowseBase = '';
     this.savedUpCacheRaw = '';
+    this.savedDirCtx = '';
     try {
       const rawBrowse = await p.get(POS_KEY_BROWSE, '');
       const rawUpCache = await p.get(POS_KEY_UPCACHE, '');
+      const rawDirCtx = await p.get(POS_KEY_DIRCTX, '');
       this.savedBrowseBase = typeof rawBrowse === 'string' ? rawBrowse : '';
       this.savedUpCacheRaw = typeof rawUpCache === 'string' ? rawUpCache : '';
+      this.savedDirCtx = typeof rawDirCtx === 'string' ? rawDirCtx : '';
       if (typeof rawUpCache === 'string' && prefsIsLegacyBadCache(rawUpCache)) {
         // R30 直接把含 U+0001/U+0002 的行式文本写进 preferences：这份数据
         // 既不能安全解码，也可能已经污染了上一次的恢复尝试。丢弃它，并
@@ -2410,6 +2438,7 @@ struct Index {
     } catch (e) {
       this.savedBrowseBase = '';
       this.savedUpCacheRaw = '';
+      this.savedDirCtx = '';
       hilog.warn(DOMAIN, TAG, 'read browse extras failed (ignored): %{public}s', JSON.stringify(e));
     }
   }
@@ -2678,7 +2707,11 @@ struct Index {
     hilog.info(DOMAIN, TAG, 'persist: activate=%{public}d tag=%{public}s', ok ? 1 : 0, PERSIST_TAG);
     // 第十轮 ff1：授权激活失败 / 超时是明确的「问题信号」—— 不再往下读快照、不再等
     // 3 秒看门狗，立即停止尝试并打开选择文件夹。
-    if (!ok && failFastAction(true, this.hasRestoreMemory, this.userActed,
+    // 第三十六轮：目录态恢复零 IO，不需要 URI 授权；激活失败不该弹选择器 /
+    // 写死路径标记把用户踢回默认目录。照常进入 showLastOnStart 的目录态分支。
+    const dirOnly: boolean = dirOnlyResumeWanted(this.savedDirCtx,
+      AUTO_SHOW_LAST_ON_START, this.userActed, this.resumeDone) === DIR_RESUME_CONTEXT;
+    if (!ok && !dirOnly && failFastAction(true, this.hasRestoreMemory, this.userActed,
         this.restoreSettled || this.giveUpDone) === FF_GIVEUP) {
       this.giveUpNow('persist auth lost', elapsedSince(this.restoreStartedAt, Date.now()));
       return;
@@ -2907,6 +2940,89 @@ struct Index {
     }
   }
 
+  /** 第三十六轮：零 IO 恢复「仅目录上下文」—— 退出前停在空 / 无图片目录时，
+   *  重开必须落在那个目录，而不是回默认目录、也不是弹选择器。
+   *
+   *  纯字符串：只用 readBrowseExtras 读回的 savedBrowseBase / savedDirUri /
+   *  savedUpCacheRaw，绝不列目录 / stat / 解码 / 弹选择器（启动期零 IO 防线保留）。
+   *  restoreBrowseContext() 回填 browseBase / browseDir / pickRootUri / titlePath /
+   *  canGoUp 与多层 upDirCache；随后「往上层」、点目录名进子目录都照常可用。
+   *  左栏用同一层的 upDirCache 快照画一份纯清单，让用户看得见「回到的是哪个目录」；
+   *  真正重新真实列举发生在用户第一次点击时（用户主动路径允许 IO）。 */
+  private restoreDirContextOnly(): void {
+    this.resumeDone = true;
+    // 极端旧数据：只存过 browseBase 没存过授权根时，也绝不退回默认目录。
+    if (this.savedDirUri.length === 0 && this.savedBrowseBase.length > 0) {
+      this.savedDirUri = this.savedBrowseBase;
+    }
+    this.restoreBrowseContext();
+    if (this.browseBase.length === 0) {
+      this.browseBase = this.savedBrowseBase;
+      this.browseDir = this.savedBrowseBase;
+      this.pickRootUri = '';
+      this.titlePath = this.savedBrowseBase;
+      this.canGoUp = canGoUpFrom(this.savedBrowseBase);
+      this.restoreUpCache(this.savedBrowseBase);
+    }
+    const base: string = this.browseBase;
+    const label: string = baseName(base);
+    const rows: ImageItem[] = [];
+    rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+    for (let i = 0; i < this.upDirCache.length; i++) {
+      const snap: UpDirSnapshot = this.upDirCache[i];
+      if (!sameDirPath(snap.path, base)) {
+        continue;
+      }
+      for (let j = 0; j < snap.names.length; j++) {
+        const nm: string = snap.names[j];
+        if (nm.length === 0 || isUpListPseudoName(nm)) {
+          continue;
+        }
+        const rowUri: string = j < snap.uris.length && snap.uris[j].length > 0
+          ? snap.uris[j] : stripTrailingSlash(base) + '/' + nm;
+        const rowKind: number = this.upListKindOf(base, nm,
+          (isImageName(nm) || nm.indexOf('.') > 0) ? ROW_OTHER : ROW_FOLDER);
+        rows.push({ uri: rowUri, name: nm, size: -1, mtime: 0,
+          kind: rowKind, itemIndex: -1 });
+      }
+    }
+    rows.push({ uri: '', name: '— 已恢复上次目录（APP 内）· ' + UP_LIST_TAG + ' —',
+      size: -1, mtime: 0, kind: ROW_OTHER, itemIndex: -1 });
+    this.items = [];
+    this.rows = rows;
+    this.source = label;
+    this.itemCount = 0;
+    this.rowCount = rows.length;
+    const rowNames: string[] = [];
+    for (let r = 0; r < rows.length; r++) {
+      rowNames.push(rows[r].name);
+    }
+    this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
+    this.dataSource.reload(this.rows);
+    this.titlePath = base;
+    this.canGoUp = canGoUpFrom(base);
+    this.cur = -1;
+    this.resetView();
+    this.inAppUpList = true;
+    this.dirHint = inAppUpListHint(label, rows.length - 2, UP_LIST_TAG);
+    if (this.dirPollTimer !== -1) {
+      clearInterval(this.dirPollTimer);
+      this.dirPollTimer = -1;
+    }
+    if (this.rescanTimer !== -1) {
+      clearTimeout(this.rescanTimer);
+      this.rescanTimer = -1;
+    }
+    this.status = '已恢复上次目录「' + label + '」· 本层没有图片 · ' +
+      (rows.length - 2) + ' 个条目（点名称重新真实列举）· ' + ESC_BUILD_TAG;
+    this.diagLine = 'up CTX | ' + UP_CTX_TAG + ' | dironly=1 | L' + dirLevelOf(base) +
+      ' | rows=' + rows.length + ' | no-picker | v' + APP_VERSION;
+    this.markRestoreEntered();
+    hilog.info(DOMAIN, TAG,
+      'restore: dir context only L%{public}d rows=%{public}d base=%{public}s',
+      dirLevelOf(base), rows.length, base);
+  }
+
   /** 排一次「首帧后显示上次相片」。只排一个定时器，重复调用无副作用。
    *  ⚠️ 绝不在这里读 preferences / 读快照 / 建列表：这里还在启动调用栈上。 */
   private scheduleShowLast(): void {
@@ -3079,13 +3195,21 @@ struct Index {
     if (this.resumeDone || this.restoreCancelled) {
       return;
     }
+    const userActed: boolean = this.userActed || this.items.length > 0 ||
+      this.pickerBusy || this.folderBusy;
+    // 第三十六轮：退出前停在「目录浏览态且本层零图片」→ 目录上下文恢复**优先**
+    // 于图片恢复。目录位置是独立于相片的纯字符串信息，绝不能因为没有图片 uri /
+    // 空快照就被 RESUME_SKIP、enterSettledOk(0) 或 giveUpNow 当成「恢复失败」。
+    // 该分支零 IO、不弹选择器、不回默认目录，也不碰残留的旧图片快照。
+    if (dirOnlyResumeWanted(this.savedDirCtx, AUTO_SHOW_LAST_ON_START,
+        userActed, this.resumeDone) === DIR_RESUME_CONTEXT) {
+      this.restoreDirContextOnly();
+      return;
+    }
     this.resumeDone = true; // 只跑一次：无论成功、失败还是用户已抢先操作
     const saved: LastPos | undefined = this.lastPos;
     const savedUri: string = saved !== undefined ? saved.uri : '';
     const single: string = resumeSingleUri(savedUri, this.okUri);
-    // 用户在这 900ms 里已经自己选了文件夹 / 图片，或列表已经有内容 → 立刻让路。
-    const userActed: boolean = this.userActed || this.items.length > 0 ||
-      this.pickerBusy || this.folderBusy;
     let snapCount: number = 0;
     try {
       const store: preferences.Preferences | undefined = await this.posStore();
@@ -3279,6 +3403,13 @@ struct Index {
   /** 记住当前位置（防抖写盘）。切图很频繁（滚轮连翻），没必要每张都落一次盘。 */
   private markPos(): void {
     if (this.cur < 0 || this.cur >= this.items.length) {
+      // 第三十六轮：没有「图片位置」不等于没有「目录位置」。
+      // applyItems 在零图片时把 cur 置 -1；旧实现直接 return，既不生成 LastPos
+      // 也不排写盘，空目录那次 openFolder 设好的 browseBase 从不落盘 ——
+      // 退出重开就回默认目录。这里仍排一次防抖，由 flushPos 走独立落盘。
+      if (dirContextSaveWanted(this.browseBase, this.items.length, false)) {
+        this.scheduleFlush();
+      }
       return;
     }
     const it: ImageItem = this.items[this.cur];
@@ -3309,6 +3440,10 @@ struct Index {
   private async flushPos(): Promise<void> {
     const p: LastPos | undefined = this.posPending;
     if (p === undefined) {
+      // 第三十六轮：空 / 无图片目录没有 LastPos，但目录上下文必须独立落盘。
+      if (dirContextSaveWanted(this.browseBase, this.items.length, false)) {
+        await this.flushDirContext();
+      }
       return;
     }
     this.posPending = undefined;
@@ -3339,6 +3474,8 @@ struct Index {
       // encodeUpCacheForSave 已把控制字符编码掉，这一步正常情况下不会再抛。
       try {
         await store.put(POS_KEY_BROWSE, this.browseBase);
+        // 第三十六轮：目录态标记与位置同批落盘；有图片时写 '' 清掉旧目录态。
+        await store.put(POS_KEY_DIRCTX, dirContextFlagOf(this.browseBase, this.items.length));
         if (this.upCacheDirty) {
           await store.put(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
           this.upCacheDirty = false;
@@ -3369,6 +3506,8 @@ struct Index {
     const store: preferences.Preferences | undefined = this.prefs;
     const act: number = exitFlushAction(p !== undefined, store !== undefined);
     if (act === FLUSH_SKIP) {
+      // 第三十六轮：没有图片位置 ≠ 没有目录位置，独立同步落盘后照常返回。
+      this.flushDirContextSync(store);
       return;
     }
     if (act === FLUSH_ASYNC || store === undefined || p === undefined) {
@@ -3393,6 +3532,8 @@ struct Index {
       // 绝不回卷已落盘的核心数据、绝不触发外层 catch 的异步兜底。
       try {
         store.putSync(POS_KEY_BROWSE, this.browseBase);
+        // 第三十六轮：目录态标记与位置同批同步落盘；有图片时写 '' 清掉旧目录态。
+        store.putSync(POS_KEY_DIRCTX, dirContextFlagOf(this.browseBase, this.items.length));
         if (this.upCacheDirty) {
           store.putSync(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
           this.upCacheDirty = false;
@@ -3406,6 +3547,56 @@ struct Index {
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'flushPosSync failed: %{public}s', JSON.stringify(e));
       this.flushPos();
+    }
+  }
+
+  /** 第三十六轮：目录上下文独立异步落盘 —— 完全不依赖 LastPos / posPending。
+   *  空目录、无图片目录、只有子文件夹的目录都会走这里（markPos 排的防抖）。
+   *  只写 4 个小 key + 可选清单快照，绝不写大图片快照、绝不碰解码。 */
+  private async flushDirContext(): Promise<void> {
+    try {
+      const store: preferences.Preferences | undefined = await this.posStore();
+      if (store === undefined) {
+        return;
+      }
+      await store.put(POS_KEY_DIR, this.savedDirUri);
+      await store.put(POS_KEY_BROWSE, this.browseBase);
+      await store.put(POS_KEY_DIRCTX, dirContextFlagOf(this.browseBase, this.items.length));
+      if (this.upCacheDirty) {
+        await store.put(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
+        this.upCacheDirty = false;
+      }
+      await store.flush();
+      hilog.info(DOMAIN, TAG, 'flushDirContext: base=%{public}s items=%{public}d',
+        this.browseBase.length > 0 ? 'yes' : 'no', this.items.length);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'save dir context failed (ignored): %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 第三十六轮：切后台 / ESC 退出时的同步版目录上下文落盘（毫秒级必达）。
+   *  prefs 还没建好就退回异步尽力而为；非目录态直接让路，零回归。 */
+  private flushDirContextSync(store: preferences.Preferences | undefined): void {
+    if (!dirContextSaveWanted(this.browseBase, this.items.length, false)) {
+      return;
+    }
+    if (store === undefined) {
+      this.flushDirContext();
+      return;
+    }
+    try {
+      store.putSync(POS_KEY_DIR, this.savedDirUri);
+      store.putSync(POS_KEY_BROWSE, this.browseBase);
+      store.putSync(POS_KEY_DIRCTX, DIRCTX_EMPTY);
+      if (this.upCacheDirty) {
+        store.putSync(POS_KEY_UPCACHE, this.encodeUpCacheForSave());
+        this.upCacheDirty = false;
+      }
+      store.flushSync();
+      hilog.info(DOMAIN, TAG, 'flushDirContextSync: dir only saved');
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'save dir context sync failed (ignored): %{public}s',
+        JSON.stringify(e));
     }
   }
 
@@ -6097,7 +6288,7 @@ struct Index {
   /** allowFileFallback：目录能列但子文件读不了时，是否弹「目录内多选」选择器。
    *  「往上层」传 false —— 那种兜底会调 setItems 把目录态清掉，反而让往上层白做。 */
   private async openFolder(dirUri: string, resetView: boolean, allowFileFallback?: boolean,
-    isRescan?: boolean): Promise<boolean> {
+    isRescan?: boolean, extraForms?: string[], fullExplore?: boolean): Promise<boolean> {
     if (this.folderBusy) {
       return false; // 上一批还在列，别叠
     }
@@ -6106,9 +6297,19 @@ struct Index {
     try {
       // picker 的 FOLDER 模式返回的 uri 形态不统一，且 URI 授权是**逐项**的：
       // 能 listFile 不代表能读子文件。逐个候选试，优先挑「子文件真能 open」的那个 base。
-      const candidates: string[] = dirCandidates(dirUri);
-      hilog.info(DOMAIN, TAG, 'openFolder raw=%{public}s candidates=%{public}d',
-        dirUri, candidates.length);
+      let candidates: string[] = dirCandidates(dirUri);
+      // 第三十六轮：用户主动「往上层」时把所有同层 parent 候选的 URI 写法
+      // 一起并入探索集（upExploreFormsOf 按原名精确去重、首个优先父级排最前）。
+      // 这样一次遍历就能拿到这一层全部资料夹目录；自动重扫 / 选文件夹 /
+      // 点子目录都不传 extraForms，保持 R35 行为零回归。
+      const wantFull: boolean = upFullExploreWanted(fullExplore === true, isRescan === true);
+      if (extraForms !== undefined && extraForms.length > 0) {
+        candidates = upExploreFormsOf([candidates, extraForms]);
+      }
+      const cap: number = wantFull
+        ? upExploreCapOf(candidates.length, UP_EXPLORE_MAX_FORMS) : candidates.length;
+      hilog.info(DOMAIN, TAG, 'openFolder raw=%{public}s candidates=%{public}d full=%{public}d',
+        dirUri, candidates.length, wantFull ? 1 : 0);
       let base: string = '';
       let names: string[] = [];
       let childReadable: boolean = false;
@@ -6121,7 +6322,7 @@ struct Index {
       // 这些 listFile 本来就会跑），再挑「看得最全」的写法做子项 URI 拼接基准。
       const exploreForms: Array<string> = [];
       const exploreGroups: Array<Array<string>> = [];
-      for (let c = 0; c < candidates.length; c++) {
+      for (let c = 0; c < cap; c++) {
         const cand: string = candidates[c];
         try {
           const n: string[] = await fs.listFile(cand, { recursion: false, listNum: 0 });
@@ -6136,7 +6337,11 @@ struct Index {
             base = cand;
             childReadable = true;
             hilog.info(DOMAIN, TAG, 'openFolder using candidate [%{public}d] %{public}s', c, cand);
-            break;
+            // 第三十六轮：用户主动导航绝不 early break —— 后面的 URI 写法
+            // 往往还能看到别的兄弟资料夹。自动重扫保留早停，防止 NAS 放大 IO。
+            if (!wantFull) {
+              break;
+            }
           }
         } catch (e) {
           lastErr = JSON.stringify(e);
@@ -6146,6 +6351,9 @@ struct Index {
       }
       // 合并所有真实列举结果：兄弟目录一个不漏，伪行 / 隐藏点文件由纯函数过滤。
       names = mergeExploreNames(exploreGroups);
+      // 第三十六轮：供 browseUp 判断「真实列举是否一无所获」，
+      // 只有 0 项才允许零 IO 的 APP 内清单兜底，绝不拿缓存覆盖真实结果。
+      this.lastUpExploreNames = names.length;
       if (base.length === 0) {
         // 没有「子文件可读」的命中形态：用列得最全的形态拼子项 URI，命中率最高。
         const best: string = exploreBaseOf(exploreForms, exploreGroups);
@@ -6784,48 +6992,63 @@ struct Index {
     this.diagLine = 'up | ' + UP_NAV_TAG + ' | L' + level + '→L' + dirLevelOf(target) +
       ' | ' + parents.length + ' 同层候选 | target=' + targetName +
       ' | root=' + ellipsizeMiddle(root, 24) + ' | v' + APP_VERSION;
+    // 第三十六轮：所有同层 parent 候选都参与**真实**列举，一次合并出该层
+    // 全部资料夹目录。R35 只修了单次 openFolder 内多个 URI 写法的合并，但这里
+    // 仍是「首个 parent 成功即 return」，其余候选真实列出来的兄弟目录全被丢掉 ——
+    // 这正是「往上层只显示一个资料夹、没列出其它目录」的剩余根因。
+    // 每个形态都在 openFolder 里真异步 listFile（绝不早停），再统一落地一次；
+    // 自动重扫（每 1.5s）不传 fullExplore，保留 R35 早停，绝不放大 NAS IO。
+    const formGroups: Array<Array<string>> = [];
     for (let i = 0; i < parents.length; i++) {
-      const parent: string = parents[i];
-      hilog.info(DOMAIN, TAG, 'browseUp L%{public}d→L%{public}d try %{public}s (cand %{public}d/%{public}d)',
-        level, dirLevelOf(target), parent, i + 1, parents.length);
-      this.status = '往上层 ' + (i + 1) + '/' + parents.length + ' → ' + targetName;
-      this.diagLine = 'up ' + (i + 1) + '/' + parents.length + ' | ' + UP_NAV_TAG +
-        ' | try=' + ellipsizeMiddle(parent, 46) + ' | 失败原因见状态栏';
-      // 第三参 false：不再弹「目录内多选」，否则 setItems 会把刚进去的目录态清掉
-      const ok: boolean = await this.openFolder(parent, false, false);
-      if (ok) {
-        // 旧「最初选择」锚点作废：它指向好几层之前，留着会让下一次往上层越级。
-        this.pickRootUri = '';
-        // 第三十四轮：缓存父子关系在此只作**落地一致性诊断**，不再是闸门。
-        // 命中缓存父级时核对实际 browseBase 是否落在同一规范层级键，结果写进
-        // 诊断串；一致与否都不回滚、不误跳，也不影响上移结果。
-        const cacheConsistent: boolean = preferred.length > 0 &&
-          cachedUpLandsAt(preferred, current, this.browseBase);
-        // applyItems 已把 browseBase / browseDir / source / titlePath / canGoUp 一起刷新到父层。
-        this.status = '往上层 → ' + baseName(this.browseBase) +
-          '（L' + dirLevelOf(this.browseBase) + '）· ' +
-          (this.canGoUp ? '还能继续往上层' : '已到卷 / 硬盘的逻辑最上层');
-        this.diagLine = 'up OK | ' + UP_NAV_TAG + ' | L' + dirLevelOf(this.browseBase) +
-          ' | can=' + (this.canGoUp ? '1' : '0') +
-          ' | cache=' + (preferred.length > 0 ? (cacheConsistent ? '1' : '0') : '-') +
-          ' | v' + APP_VERSION;
-        hilog.info(DOMAIN, TAG, 'browseUp OK → %{public}s L%{public}d',
-          this.browseBase, dirLevelOf(this.browseBase));
-        return;
-      }
+      formGroups.push(dirCandidates(parents[i]));
     }
-    hilog.warn(DOMAIN, TAG, 'browseUp all same-level cands failed, current=%{public}s', current);
+    const allForms: Array<string> = upExploreFormsOf(formGroups);
+    const wantFull: boolean = upFullExploreWanted(true, false);
+    const landUri: string = parents.length > 0 ? parents[0] : target;
+    this.status = '往上层 全量探索 ' + allForms.length + ' 个同层写法 → ' + targetName;
+    this.diagLine = 'up FULL | ' + UP_NAV_TAG + ' | L' + level + '→L' +
+      dirLevelOf(target) + ' | forms=' + allForms.length +
+      ' | target=' + targetName + ' | v' + APP_VERSION;
+    // 第三参 false：不再弹「目录内多选」，否则 setItems 会把刚进去的目录态清掉
+    const ok: boolean = await this.openFolder(landUri, false, false, false,
+      allForms, wantFull);
+    if (ok) {
+      // 旧「最初选择」锚点作废：它指向好几层之前，留着会让下一次往上层越级。
+      this.pickRootUri = '';
+      // 第三十四轮：缓存父子关系在此只作**落地一致性诊断**，不再是闸门。
+      // 命中缓存父级时核对实际 browseBase 是否落在同一规范层级键，结果写进
+      // 诊断串；一致与否都不回滚、不误跳，也不影响上移结果。
+      const cacheConsistent: boolean = preferred.length > 0 &&
+        cachedUpLandsAt(preferred, current, this.browseBase);
+      // applyItems 已把 browseBase / browseDir / source / titlePath / canGoUp 一起刷新到父层。
+      this.status = '往上层 → ' + baseName(this.browseBase) +
+        '（L' + dirLevelOf(this.browseBase) + '）· 真实列举 ' +
+        this.lastUpExploreNames + ' 项 · ' +
+        (this.canGoUp ? '还能继续往上层' : '已到卷 / 硬盘的逻辑最上层');
+      this.diagLine = 'up OK | ' + UP_NAV_TAG + ' | L' + dirLevelOf(this.browseBase) +
+        ' | can=' + (this.canGoUp ? '1' : '0') +
+        ' | cache=' + (preferred.length > 0 ? (cacheConsistent ? '1' : '0') : '-') +
+        ' | full=' + allForms.length +
+        ' | v' + APP_VERSION;
+      hilog.info(DOMAIN, TAG, 'browseUp OK → %{public}s L%{public}d',
+        this.browseBase, dirLevelOf(this.browseBase));
+      return;
+    }
+    hilog.warn(DOMAIN, TAG, 'browseUp full explore failed, current=%{public}s', current);
     if (loose) {
       // UNKNOWN 态（目录标识层级不可解析）：同样**不弹系统选择器**。
-      // 用宽松父级在 APP 内出一份清单（pathChainOf 可能为空，但至少列出当前目录 +
-      // 说明行），保证按钮点了有可见反馈，而不是给一句让用户自己重选的死提示。
-      this.showUpListInApp(target, targetName, current, parents, state, level);
+      // 真实列举一个名字都没拿到 → 才允许零 IO 的 APP 内清单兜底，
+      // 保证按钮点了有可见反馈，而不是给一句让用户自己重选的死提示。
+      if (upExploreNeedFallback(this.lastUpExploreNames)) {
+        this.showUpListInApp(target, targetName, current, parents, state, level);
+      }
       return;
     }
     // 2026-11-11 第四次实机反馈：上级目录没授权时**绝不弹系统选择目录 dialog**。
-    // 用户原意是「在 APP 内显示上层档案目录或档案清单」—— 改成 APP 内自建清单视图：
-    // 已知层级 + 会话内记下的真实条目名，全是纯字符串，零 IO、零选择器。
-    this.showUpListInApp(target, targetName, current, parents, state, level);
+    // 只有真实全量列举一无所获才退回 APP 内清单，绝不拿缓存覆盖真实结果。
+    if (upExploreNeedFallback(this.lastUpExploreNames)) {
+      this.showUpListInApp(target, targetName, current, parents, state, level);
+    }
   }
 
   /** 上级目录没有 URI 授权、openFolder 列不出来时：**绝不弹系统选择目录 dialog**，
