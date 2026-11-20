@@ -263,8 +263,26 @@ check('绝不返回未授权的父目录', pickerStartOf(RAW_DIR, '') === PARENT
 // 「全是子文件夹、零图片的目录（人像）不能显示空白」是 UI 分支决定的，
 // 编译不了 HAP 时至少要保证这段分支不被改回去。
 console.log('--- 源码静态契约：零图片目录仍要列出目录表 ---');
-const INDEX = readFileSync(new URL('../entry/src/main/ets/pages/Index.ets', import.meta.url), 'utf8');
-check('空态判断用 rowCount（左栏实际行数）', /if \(this\.rowCount === 0\)/.test(INDEX), true);
+// R39 Phase 0（Index.ets 拆分）：静态契约锚点与文件解耦 —— 断言按「逻辑所在文件」
+// 取源码，不再绑死单一文件。当前所有锚点仍指向 pages/Index.ets，行为零变化；
+// 后续轮次把组件 / 解码服务迁出时，只需在 SRC_FILES 登记新文件并改锚点指向。
+const SRC_FILES = {
+  'pages/Index.ets': '../entry/src/main/ets/pages/Index.ets',
+  'components/ArchiveRow.ets': '../entry/src/main/ets/components/ArchiveRow.ets',
+  'model/Preview.ets': '../entry/src/main/ets/model/Preview.ets',
+  'components/SidebarView.ets': '../entry/src/main/ets/components/SidebarView.ets',
+  'components/ToolButton.ets': '../entry/src/main/ets/components/ToolButton.ets',
+};
+const src = (name) => readFileSync(new URL(SRC_FILES[name], import.meta.url), 'utf8');
+const INDEX = src('pages/Index.ets');
+// R39 Phase 1：ArchiveRow 行组件迁 components/、解码链迁 model/ —— 锚点按逻辑所在文件取源码；
+// 跨文件计数型断言（new Promise / fmtBytes / Text(this.name)）用拼接源码保持原语义。
+const ARCHIVE = src('components/ArchiveRow.ets');
+const MODEL = src('model/Preview.ets');
+// R40 Phase 3：左栏迁 components/SidebarView.ets、工具按钮迁 components/ToolButton.ets。
+const SIDEBAR = src('components/SidebarView.ets');
+const TOOLBTN = src('components/ToolButton.ets');
+check('空态判断用 rowCount（左栏实际行数）', /if \(this\.rowCount === 0\)/.test(SIDEBAR), true);
 check('不再用 itemCount 判空态（itemCount 只算图片）', /if \(this\.itemCount === 0\)/.test(INDEX), false);
 check('applyItems 同步 rowCount', /this\.rowCount = this\.rows\.length/.test(INDEX), true);
 check('零图片目录设置 dirHint 提示条', /this\.dirHint = '本层没有图片/.test(INDEX), true);
@@ -291,29 +309,29 @@ check('宽度恒在下限与上限之间', (() => {
 })(), true);
 
 console.log('--- 源码静态契约：按钮区与档案列表布局 ---');
-check('不再有「选择图片」toolBtn', /toolBtn\('选择图片'/.test(INDEX), false);
-check('不再有「回到上次」toolBtn', /toolBtn\('回到上次'/.test(INDEX), false);
+check('不再有「选择图片」toolBtn', /toolBtn\('选择图片'/.test(INDEX + SIDEBAR), false);
+check('不再有「回到上次」toolBtn', /toolBtn\('回到上次'/.test(INDEX + SIDEBAR), false);
 check('doAction 无 files 分支', /case 'files':/.test(INDEX), false);
 check('doAction 无 resume 分支', /case 'resume':/.test(INDEX), false);
 check('三个按钮合并在同一行，且「往上层」恒亮恒可点',
-  /toolBtn\('往上层', 'up', true\)[\s\S]{0,220}toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), true);
+  /ToolButton\(\{ label: '往上层', act: 'up', flex: true[\s\S]{0,220}ToolButton\(\{ label: '选择文件夹', act: 'folder', flex: true/.test(SIDEBAR), true);
 check('按钮区不再有原来的第二行',
-  /bottom: 4 \}\)\s*Row\(\) \{\s*this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), false);
+  /bottom: 4 \}\)\s*Row\(\) \{\s*ToolButton\(\{ label: '选择文件夹'/.test(SIDEBAR), false);
 check('左栏宽度改用自适应 listW',
-  /\.width\(this\.listCollapsed \? LIST_COLLAPSED_W : this\.listW\)/.test(INDEX), true);
+  /\.width\(this\.listCollapsed \? LIST_COLLAPSED_W : this\.listW\)/.test(SIDEBAR), true);
 check('applyItems 重算 listW', /this\.listW = listWidthForNames\(/.test(INDEX), true);
-check('档案名列有 minWidth 兜底', /constraintSize\(\{ minWidth: textWidthVp/.test(INDEX), true);
-check('行首图标高度压到 26', /\.height\(26\)/.test(INDEX), true);
-check('行上下 padding 继续压到 1（配合 List 缝约 1mm）', /top: 1, bottom: 1/.test(INDEX), true);
+check('档案名列有 minWidth 兜底', /constraintSize\(\{ minWidth: textWidthVp/.test(ARCHIVE), true);
+check('行首图标高度压到 26', /\.height\(26\)/.test(ARCHIVE), true);
+check('行上下 padding 继续压到 1（配合 List 缝约 1mm）', /top: 1, bottom: 1/.test(ARCHIVE), true);
 check('List 行间距改用 LIST_ROW_GAP_VP 常量且为 1',
-  /space: LIST_ROW_GAP_VP/.test(INDEX) &&
-  /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX), true);
+  /space: LIST_ROW_GAP_VP/.test(SIDEBAR) &&
+  /const LIST_ROW_GAP_VP: number = 1;/.test(SIDEBAR), true);
 check('档案列表「梅花间竹」交替色格子：奇偶两色 + 选中色优先',
-  /const ROW_STRIPE_EVEN: string = '#1e242e';/.test(INDEX) &&
-  /const ROW_STRIPE_ODD: string = '#161a21';/.test(INDEX) &&
-  /const ROW_SELECTED_BG: string = '#1f2730';/.test(INDEX) &&
-  /private rowBgColor\(\): string \{[\s\S]{0,160}if \(this\.selected\)[\s\S]{0,160}return ROW_SELECTED_BG;[\s\S]{0,160}\(this\.idx % 2\) === 0 \? ROW_STRIPE_EVEN : ROW_STRIPE_ODD/.test(INDEX) &&
-  /\.backgroundColor\(this\.rowBgColor\(\)\)/.test(INDEX), true);
+  /const ROW_STRIPE_EVEN: string = '#1e242e';/.test(ARCHIVE) &&
+  /const ROW_STRIPE_ODD: string = '#161a21';/.test(ARCHIVE) &&
+  /const ROW_SELECTED_BG: string = '#1f2730';/.test(ARCHIVE) &&
+  /private rowBgColor\(\): string \{[\s\S]{0,160}if \(this\.selected\)[\s\S]{0,160}return ROW_SELECTED_BG;[\s\S]{0,160}\(this\.idx % 2\) === 0 \? ROW_STRIPE_EVEN : ROW_STRIPE_ODD/.test(ARCHIVE) &&
+  /\.backgroundColor\(this\.rowBgColor\(\)\)/.test(ARCHIVE), true);
 
 console.log('--- sameEntryNames(): 重扫时判断目录内容是否真的变了 ---');
 check('空目录一致', sameEntryNames([], []), true);
@@ -325,38 +343,38 @@ check('中文 + 空格现场路径一致',
   sameEntryNames(['编号202601 模特 猫', '人像'], ['人像', '编号202601 模特 猫']), true);
 
 console.log('--- 源码静态契约：hover 缩略图纯预览、退出不切回上次 ---');
-const HOVER_FN = INDEX.slice(INDEX.indexOf('private onHoverChange('), INDEX.indexOf('hoverThumb()'));
-const HOVER_THUMB_START = INDEX.indexOf('hoverThumb()');
-const HOVER_THUMB_FN = INDEX.slice(HOVER_THUMB_START, INDEX.indexOf('  build() {', HOVER_THUMB_START));
+const HOVER_FN = ARCHIVE.slice(ARCHIVE.indexOf('private onHoverChange('), ARCHIVE.indexOf('hoverThumb()'));
+const HOVER_THUMB_START = ARCHIVE.indexOf('hoverThumb()');
+const HOVER_THUMB_FN = ARCHIVE.slice(HOVER_THUMB_START, ARCHIVE.indexOf('  build() {', HOVER_THUMB_START));
 const APPLY_FN = INDEX.slice(INDEX.indexOf('private applyItems('), INDEX.indexOf('后台分批补测体积'));
 // 第十一轮：hover 小图预览改为「零延迟、零动画」，旧的去抖常量 / 计时器 / 代号断言
 // 全部按新语义同步更新（不删断言）。
 check('第十一轮：不再有 hover 关闭去抖常量',
-  /const HOVER_CLOSE_DELAY_MS/.test(INDEX), false);
+  /const HOVER_CLOSE_DELAY_MS/.test(ARCHIVE), false);
 check('第十一轮：onHover(false) 同步立即隐藏、无去抖代号',
   /this\.showHover = false;/.test(HOVER_FN) &&
   /\+\+this\.hoverSeq/.test(HOVER_FN) === false, true);
 check('第十一轮：不再有 hoverCloseTimer 延迟计时器',
-  /clearTimeout\(this\.hoverCloseTimer\)/.test(INDEX), false);
+  /clearTimeout\(this\.hoverCloseTimer\)/.test(ARCHIVE), false);
 check('第十一轮：hover 回来不做计时器复位（无 cancelCloseTimer）',
   /cancelCloseTimer/.test(HOVER_FN) === false &&
   /if \(this\.showHover\) \{[\s\S]{0,120}return;/.test(HOVER_FN), true);
 check('onMouse(Move) 不再无条件自动打开（原自激闪烁源）',
-  /MouseAction\.Move && !this\.showHover/.test(INDEX), false);
+  /MouseAction\.Move && !this\.showHover/.test(ARCHIVE), false);
 check('hover 回调不触碰选中态 / 列表 / 目录',
   /this\.onTap\(|applyItems\(|openFolder\(|this\.cur =/.test(HOVER_FN), false);
 check('第十一轮：aboutToDisappear 同步立即收起浮层、无计时器',
-  /aboutToDisappear\(\): void \{[\s\S]{0,300}this\.showHover = false;/.test(INDEX) &&
-  /aboutToDisappear\(\): void \{[\s\S]{0,300}cancelCloseTimer/.test(INDEX) === false, true);
+  /aboutToDisappear\(\): void \{[\s\S]{0,300}this\.showHover = false;/.test(ARCHIVE) &&
+  /aboutToDisappear\(\): void \{[\s\S]{0,300}cancelCloseTimer/.test(ARCHIVE) === false, true);
 check('第十一轮：点击行时立即收起浮层、无去抖代号',
-  /\.onClick\(\(\) => \{[\s\S]{0,220}this\.showHover = false;/.test(INDEX) &&
-  /\.onClick\(\(\) => \{[\s\S]{0,220}this\.hoverSeq\+\+/.test(INDEX) === false, true);
+  /\.onClick\(\(\) => \{[\s\S]{0,220}this\.showHover = false;/.test(ARCHIVE) &&
+  /\.onClick\(\(\) => \{[\s\S]{0,220}this\.hoverSeq\+\+/.test(ARCHIVE) === false, true);
 check('hover 缩略图浮层只放相片、不显示档案名（2026-11-11）',
   /Image\(this\.hoverPx!\)/.test(HOVER_THUMB_FN) &&
   !/Text\(this\.name\)/.test(HOVER_THUMB_FN), true);
 
 check('openFolder 支持 isRescan', /isRescan\?: boolean/.test(INDEX), true);
-check('重扫内容未变则跳过列表重建', /isRescan === true && this\.sameDirEntries\(names\)/.test(INDEX), true);
+check('重扫内容未变则跳过列表重建（R42 起缓存先渲染的后台核对也走同一短路）', /\(isRescan === true \|\| fromCache\) && this\.sameDirEntries\(names\)/.test(INDEX), true);
 check('startDirPoll 用 isRescan=true / 不弹多选',
   /this\.openFolder\(this\.browseBase, false, false, true\)/.test(INDEX), true);
 check('重扫传给 applyItems 的 preserveView', /rows, isRescan === true/.test(INDEX), true);
@@ -400,26 +418,26 @@ g.take('A', () => { closes++; });
 check('重新 take 同一行不触发旧 close', closes, 0);
 
 console.log('--- 源码静态契约：bindPopup 默认值导致的「不停闪」 ---');
-const POPUP_START = INDEX.indexOf('.bindPopup(this.showHover');
-const POPUP = INDEX.slice(POPUP_START, INDEX.indexOf('.gesture(', POPUP_START));
+const POPUP_START = ARCHIVE.indexOf('.bindPopup(this.showHover');
+const POPUP = ARCHIVE.slice(POPUP_START, ARCHIVE.indexOf('.gesture(', POPUP_START));
 check('mask:false 关掉吞鼠标事件的透明遮罩（根因①）', /mask: false/.test(POPUP), true);
 check('autoCancel:false 禁止系统自行收起 popup（根因②）', /autoCancel: false/.test(POPUP), true);
 check('enableArrow:false 减少弹出位置抖动', /enableArrow: false/.test(POPUP), true);
-check('onHover 回调里标记 hoverSupported', /HoverGuard\.shared\(\)\.noteHover\(\)/.test(INDEX), true);
+check('onHover 回调里标记 hoverSupported', /HoverGuard\.shared\(\)\.noteHover\(\)/.test(ARCHIVE), true);
 check('onMouse 兜底受 hoverSupported 门控',
-  /if \(!HoverGuard\.shared\(\)\.hoverSupported\)/.test(INDEX), true);
+  /if \(!HoverGuard\.shared\(\)\.hoverSupported\)/.test(ARCHIVE), true);
 check('第十一轮：onMouse 在浮层展开时直接返回、不打开（无计时器可续命）',
-  /if \(this\.showHover\) \{[\s\S]{0,160}return;/.test(INDEX) &&
-  /this\.cancelCloseTimer\(\)/.test(INDEX) === false, true);
+  /if \(this\.showHover\) \{[\s\S]{0,160}return;/.test(ARCHIVE) &&
+  /this\.cancelCloseTimer\(\)/.test(ARCHIVE) === false, true);
 check('打开浮层前 take 同步收起上一行',
   /HoverGuard\.shared\(\)\.take\(key, \(\) => this\.forceHide\(\)\)/.test(HOVER_FN), true);
 check('forceHide 同步收起、不走延迟',
-  /private forceHide\(\)[\s\S]{0,220}this\.showHover = false;/.test(INDEX), true);
+  /private forceHide\(\)[\s\S]{0,220}this\.showHover = false;/.test(ARCHIVE), true);
 check('第十一轮：同步立即隐藏时释放持有者', /HoverGuard\.shared\(\)\.release\(key\)/.test(HOVER_FN), true);
 check('aboutToDisappear 释放持有者',
-  /HoverGuard\.shared\(\)\.release\(this\.rowKey\(\)\)/.test(INDEX), true);
+  /HoverGuard\.shared\(\)\.release\(this\.rowKey\(\)\)/.test(ARCHIVE), true);
 check('点击行时释放持有者',
-  /\.onClick\(\(\) => \{[\s\S]{0,320}HoverGuard\.shared\(\)\.release/.test(INDEX), true);
+  /\.onClick\(\(\) => \{[\s\S]{0,320}HoverGuard\.shared\(\)\.release/.test(ARCHIVE), true);
 check('hover 回调仍不触碰选中态 / 列表 / 目录',
   /this\.onTap\(|applyItems\(|openFolder\(|this\.cur =/.test(HOVER_FN), false);
 
@@ -533,13 +551,13 @@ check('卷根一律拒绝', isUpTargetOf(TARGET, VOLROOT), false);
 check('空选中拒绝', isUpTargetOf('', DEEP), false);
 
 console.log('--- 源码静态契约：「往上层」目录层级语义（2026-11-10） ---');
-check('按钮文案统一为「往上层」', /toolBtn\('往上层', 'up',/.test(INDEX), true);
+check('按钮文案统一为「往上层」', /ToolButton\(\{ label: '往上层', act: 'up',/.test(SIDEBAR), true);
 check('源码不再出现「回上层」', /回上层/.test(INDEX), false);
-const TOOLBTN_FN = INDEX.slice(INDEX.indexOf('  toolBtn(label:'), INDEX.indexOf('/** 主视图：'));
-const CODE_LINES = INDEX.split('\n').filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
-check('往上层按钮恒亮恒可点（不再传 canGoUp）', /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX), true);
+const TOOLBTN_FN = TOOLBTN.split('\n').filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');  // R40：toolBtn 迁出为 components/ToolButton.ets（去注释行后即按钮实现）
+const CODE_LINES = (INDEX + ARCHIVE + MODEL + SIDEBAR + TOOLBTN).split('\n').filter(x => !/^\s*(\*|\/\/|\/\*)/.test(x)).join('\n');
+check('往上层按钮恒亮恒可点（不再传 canGoUp）', /ToolButton\(\{ label: '往上层', act: 'up', flex: true/.test(SIDEBAR), true);
 check('toolBtn 三参签名，不接受 enabled 入参',
-  /toolBtn\(label: string, act: string, flex: boolean\)/.test(INDEX), true);
+  TOOLBTN.includes('@Prop label: string') && TOOLBTN.includes('@Prop act: string') && TOOLBTN.includes('@Prop flex: boolean') && /@Prop enabled/.test(TOOLBTN) === false, true);
 check('toolBtn 函数体无 .enabled / 条件颜色 / 条件 opacity',
   /\.enabled\(/.test(TOOLBTN_FN) === false &&
   /fontColor\(enabled \?/.test(TOOLBTN_FN) === false &&
@@ -775,11 +793,11 @@ check('源码（非注释）不再有禁用属性 / 条件置灰',
   /opacity\(enabled \?/.test(CODE_LINES) === false &&
   /fontColor\(enabled \?/.test(CODE_LINES) === false, true);
 check('往上层按钮不再绑定 canGoUp',
-  /this\.toolBtn\('往上层', 'up', true, this\.canGoUp\)/.test(INDEX) === false &&
-  /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX), true);
+  /ToolButton\(\{ label: '往上层'[\s\S]{0,160}canGoUp/.test(SIDEBAR) === false &&
+  /ToolButton\(\{ label: '往上层', act: 'up', flex: true/.test(SIDEBAR), true);
 check('三个按钮都是三参调用（不存在 enabled 实参）',
-  /this\.toolBtn\('全屏', 'full', false\)/.test(INDEX) &&
-  /this\.toolBtn\('选择文件夹', 'folder', true\)/.test(INDEX), true);
+  /ToolButton\(\{ label: '全屏', act: 'full', flex: false/.test(INDEX) &&
+  /ToolButton\(\{ label: '选择文件夹', act: 'folder', flex: true/.test(SIDEBAR), true);
 check('applyItems 不再用 upEnabledAfterResume 把按钮收口',
   /upEnabledAfterResume/.test(INDEX) === false, true);
 check('canGoUp 仍是纯信息状态（状态栏 / 诊断串）',
@@ -905,9 +923,9 @@ check('只读态提示卡落在预览区，带「选择文件夹」可点按钮'
 check('提示卡外层不吞滚轮 / 拖拽事件',
   /\.hitTestBehavior\(HitTestMode\.Transparent\)/.test(INDEX), true);
 check('只读态行组件不发起 hover 缩略图解码',
-  /@Prop thumbDisabled: boolean = false;/.test(INDEX) &&
-  /if \(this\.kind !== ROW_IMAGE \|\| this\.thumbDisabled\)/.test(INDEX) &&
-  /thumbDisabled: this\.restoreMode === RESTORE_READONLY,/.test(INDEX), true);
+  /@Prop thumbDisabled: boolean = false;/.test(ARCHIVE) &&
+  /if \(this\.kind !== ROW_IMAGE \|\| this\.thumbDisabled\)/.test(ARCHIVE) &&
+  /restoreReadonly: \(\): boolean => this\.restoreMode === RESTORE_READONLY,/.test(INDEX) && /thumbDisabled: this\.restoreReadonly\(\),/.test(SIDEBAR), true);
 check('正常换源（pending=false）自动回到完整模式，行为不变',
   /this\.pendingRestoreReadonly = false;\s*\n\s*this\.pendingRestoreCount = 0;/.test(INDEX), true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
@@ -993,12 +1011,12 @@ check('一次只带 1 个 policy、超时 1500ms 且不超过 3000ms 硬上限',
   persistTimeoutSafe(1500, 3000), true);
 check('只有「选择文件夹」持久化 picker 原始 URI（往上层不再弹选择器）',
   (INDEX.match(/this\.persistFolderUri\(picked\);/g) || []).length, 1);
-check('persistPermission / activatePermission 各一次，且只用 READ_MODE',
+check('persistPermission 一次 / activatePermission 两次（启动激活 + R44 NAS 重试静默重推），且只用 READ_MODE',
   (INDEX.match(/fileShare\.persistPermission\(policies\)/g) || []).length === 1 &&
-  (INDEX.match(/fileShare\.activatePermission\(policies\)/g) || []).length === 1 &&
-  (INDEX.match(/fileShare\.OperationMode\.READ_MODE/g) || []).length === 2, true);
+  (INDEX.match(/fileShare\.activatePermission\(policies\)/g) || []).length === 2 &&
+  (INDEX.match(/fileShare\.OperationMode\.READ_MODE/g) || []).length === 3, true);
 check('PolicyInfo 显式类型、SDK 调用都包在 try/catch 内',
-  (INDEX.match(/Array<fileShare\.PolicyInfo>/g) || []).length === 2 &&
+  (INDEX.match(/Array<fileShare\.PolicyInfo>/g) || []).length === 3 &&
   /try \{\s*\n\s*await fileShare\.activatePermission\(policies\);/.test(PERSIST_FNS) &&
   /try \{\s*\n\s*await fileShare\.persistPermission\(policies\);/.test(PERSIST_FNS), true);
 check('activate 异常一律降级、绝不抛出',
@@ -1057,10 +1075,10 @@ check('showLastOnStart 仍不含选择器 / 权限 / 全量重扫',
 // 故把这条护栏从「全源码」收紧为「showLastOnStart 启动关键路径」，并另加一条总数判据。
 check('启动关键路径仍无 new Promise / Promise.race（不引入同步等待）',
   /new Promise|Promise\.race/.test(RESUME_FN), false);
-check('R27 唯一 new Promise = RawStore.readGuarded 超时闸门（不在启动恢复路径 / 非同步等待）',
-  (INDEX.match(/new Promise/g) || []).length === 1 &&
-  /Promise\.race/.test(INDEX) === false &&
-  /private readGuarded\(uri: string, gen: number\): Promise<ArrayBuffer \| undefined> \{[\s\S]{0,900}new Promise<ArrayBuffer \| undefined>\(/.test(INDEX), true);
+check('R27 new Promise 仅两处：RawStore.readGuarded 超时闸门 + R44 nasRetryWait 重试等待（均不在启动恢复路径 / 非同步等待）',
+  ((INDEX + ARCHIVE + MODEL).match(/new Promise/g) || []).length === 2 &&
+  ((INDEX + ARCHIVE + MODEL).match(/Promise\.race/g) || []).length === 1 &&  // R46：仅 mtime 异步 stat 的 3s 超时 race
+  /private readGuarded\(uri: string, gen: number\): Promise<ArrayBuffer \| undefined> \{[\s\S]{0,900}new Promise<ArrayBuffer \| undefined>\(/.test(MODEL), true);
 check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
 
 // ===========================================================================
@@ -1258,8 +1276,8 @@ check('showUpListInApp 回填 browseBase / titlePath / canGoUp 并停掉目录�
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE) &&
   /clearInterval\(this\.dirPollTimer\)/.test(UPLIST_CODE), true);
-check('清单态标记 inAppUpList 只在三处维护',
-  (INDEX.match(/this\.inAppUpList =/g) || []).length, 4);
+check('清单态标记 inAppUpList 只在四处维护（R42 缓存渲染新增一处 false）',
+  (INDEX.match(/this\.inAppUpList =/g) || []).length, 5);
 check('清单行点击禁掉「目录内多选」兜底选择器',
   /this\.openFolder\(r\.uri, true, !this\.inAppUpList\);/.test(INDEX), true);
 check('R29 openFolder 用本次真实 rows 建多层目录快照（不再读 this.rows 以免混入伪清单）',
@@ -1287,7 +1305,7 @@ check('版本号未因本次修改升级', /const APP_VERSION: string = '1\.0\.7
 
 console.log('--- 源码静态契约：预览右下角只显示「缩放百分比」（第七轮移除缓存 N 张）---');
 // 结束锚点用代码（onAreaChange），不用注释文字 —— 注释改文案不该让契约失效。
-const BADGE = INDEX.slice(INDEX.indexOf('// 右下角角标：只显示'),
+const BADGE = INDEX.slice(INDEX.indexOf('// 右下角角标：正式版不画'),
   INDEX.indexOf('.onAreaChange((oldV: Area, newV: Area)'));
 const BADGE_ALWAYS = BADGE.slice(BADGE.indexOf('// 「缓存 N 张」文案'));
 const BADGE_CODE = BADGE_ALWAYS.split('\n')
@@ -1297,27 +1315,27 @@ check('SHOW_DIAG_BADGE 默认 false（目录诊断串不画在右下角）',
 check('诊断行的渲染被开关包住，diagLine 赋值点一个没删',
   /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(BADGE) &&
   (INDEX.match(/this\.diagLine =/g) || []).length >= 10, true);
-check('右下角：正式版只显示缩放百分比；诊断层展开时显示全部排查项（两分支共 4 个 Text）',
-  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 4 &&
+check('右下角：正式版不画任何常显项（R55 取消百分比方块）；诊断层展开时显示全部排查项（共 3 个 Text）',
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 3 &&
   /Text\('退出 APP'\)/.test(BADGE_CODE) &&
   /if \(this\.escDiag\.length > 0 \|\| this\.keySeen === 0\)/.test(BADGE_CODE) &&
   /Text\(\(this\.escDiag\.length > 0/.test(BADGE_CODE) &&
   /if \(this\.diagOverlayOn\) \{/.test(BADGE_CODE) &&
-  /Text\(this\.zoomPercentText\(\)\)/.test(BADGE_CODE) &&
+  /Text\(this\.zoomPercentText\(\)\)/.test(BADGE_CODE) === false &&
   /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
   /缓存 N 张/.test(BADGE_CODE) === false, true);
 check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
-check('缩放百分比恒在右下角；R38 构建标记与 keys=N 仅在诊断层展开时可见，100% 口径未改',
+check('缩放百分比只在诊断层角标显示（R55 起正式版右下角无常显项）；构建标记与 keys=N 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
   /Text\('预载 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) &&
   /fmtBytes\(this\.cacheBytes\)/.test(INDEX) === false, true);
-check('fmtBytes 未被误删（左栏字节列 + 左上角信息浮层仍在用）',
-  (INDEX.match(/fmtBytes\(/g) || []).length >= 3, true);
+check('fmtBytes 未被误删（左栏字节列仍在用；左上角信息浮层已随 R55 取消）',
+  (ARCHIVE.match(/fmtBytes\(/g) || []).length >= 2, true);
 check('预载预算常量与 syncCacheStat 保持原样（只改显示，不改逻辑）',
   /const PRELOAD_COUNT: number = 216;/.test(INDEX) &&
   /const PRELOAD_MAX_BYTES: number = 1024 \* 1024 \* 1024;/.test(INDEX) &&
@@ -1433,21 +1451,21 @@ check('第七轮：预载解码档位抬到可直接显示（decodeEdgeOf + 内�
   /const cap: number = this\.fullscreen \? FULLSCREEN_PRELOAD_MAX_EDGE : PRELOAD_DECODE_MAX_EDGE;/.test(INDEX) &&
   /return decodeEdgeOf\(base, this\.displayEdge\(0\), cap\);/.test(INDEX), true);
 check('decodePx 读 EXIF Orientation 并在解码阶段旋转 / 镜像',
-  /src\.getImageProperty\(image\.PropertyKey\.ORIENTATION\)/.test(INDEX) &&
-  /opts\.rotate = exif\.degrees;/.test(INDEX) &&
-  /await px\.rotate\(exif\.degrees\)/.test(INDEX) &&
-  /await px\.flip\(exif\.flipH, exif\.flipV\)/.test(INDEX), true);
+  /src\.getImageProperty\(image\.PropertyKey\.ORIENTATION\)/.test(MODEL) &&
+  /opts\.rotate = exif\.degrees;/.test(MODEL) &&
+  /await px\.rotate\(exif\.degrees\)/.test(MODEL) &&
+  /await px\.flip\(exif\.flipH, exif\.flipV\)/.test(MODEL), true);
 check('EXIF 元数据有缓存（避免 201 张预载逐张跨进程读）',
-  /const EXIF_CACHE: Map<string, ExifTransform> = new Map\(\)/.test(INDEX) &&
-  /const cached: ExifTransform \| undefined = EXIF_CACHE\.get\(uri\)/.test(INDEX), true);
+  /const EXIF_CACHE: Map<string, ExifTransform> = new Map\(\)/.test(MODEL) &&
+  /const cached: ExifTransform \| undefined = EXIF_CACHE\.get\(uri\)/.test(MODEL), true);
 check('HDR：解码 AUTO + 显示端 HIGH / STANDARD 按图切换（主视图 / 兜底 / 右页三处）',
-  /opts\.desiredDynamicRange = image\.DecodingDynamicRange\.AUTO;/.test(INDEX) &&
+  /opts\.desiredDynamicRange = image\.DecodingDynamicRange\.AUTO;/.test(MODEL) &&
   (INDEX.match(/\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/g) || []).length === 3, true);
 check('色彩：保留内嵌 ICC 或转换到 sRGB / Display P3，并读回 PixelMap 色彩空间',
-  /const COLOR_MANAGE_MODE: number = 0;/.test(INDEX) &&
-  /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.SRGB\)/.test(INDEX) &&
-  /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.DISPLAY_P3\)/.test(INDEX) &&
-  /px\.getColorSpace\(\)\.getColorSpaceName\(\)/.test(INDEX), true);
+  /const COLOR_MANAGE_MODE: number = 0;/.test(MODEL) &&
+  /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.SRGB\)/.test(MODEL) &&
+  /opts\.desiredColorSpace = colorSpaceManager\.create\(colorSpaceManager\.ColorSpace\.DISPLAY_P3\)/.test(MODEL) &&
+  /px\.getColorSpace\(\)\.getColorSpaceName\(\)/.test(MODEL), true);
 check('最高画质 resample：主视图 / 兜底 / 并排右页均 Cubic(High) + autoResize(false)',
   (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
   (INDEX.match(/\.interpolation\(ImageInterpolation\.High\)/g) || []).length >= 3, true);
@@ -1519,11 +1537,11 @@ check('③ 并排右页与左页同画质：displayEdge 档位 + 解码数据复
   /\.autoResize\(false\)/.test(RIGHT_IMAGE_FN) &&
   /\.dynamicRangeMode\(this\.viewHdrWanted \? DynamicRangeMode\.HIGH : DynamicRangeMode\.STANDARD\)/.test(RIGHT_IMAGE_FN), true);
 check('④ hover 浮层已无档案名 Text（全文件只剩左栏那一处）',
-  (INDEX.match(/Text\(this\.name\)/g) || []).length === 1, true);
+  ((INDEX + ARCHIVE).match(/Text\(this\.name\)/g) || []).length === 1, true);
 check('⑤ 列表两行缝压到 1vp + 交替色格子（回归护栏）',
-  /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX) &&
-  /top: 1, bottom: 1/.test(INDEX) &&
-  /\.backgroundColor\(this\.rowBgColor\(\)\)/.test(INDEX), true);
+  /const LIST_ROW_GAP_VP: number = 1;/.test(SIDEBAR) &&
+  /top: 1, bottom: 1/.test(ARCHIVE) &&
+  /\.backgroundColor\(this\.rowBgColor\(\)\)/.test(ARCHIVE), true);
 
 console.log('--- 源码静态契约：左右页统一最高画质（第三轮：左边比右边差）---');
 check('displayEdgeOf 已 import，Index 有统一 displayEdge() 包装与 headroom 常量',
@@ -1836,8 +1854,8 @@ check('① 快照恢复读 meta 并注入，单张兜底按 uri 找日期',
   /this\.setItems\(\[single\], src, \[oneMeta\]\);/.test(INDEX) &&
   /return metaForUri\(uris, metas, uri\);/.test(INDEX), true);
 check('① 左栏日期列本身没被改掉（回归护栏）',
-  /Text\(this\.mtime > 0 \? fmtDate\(this\.mtime\) : '--'\)/.test(INDEX) &&
-  /mtime: item\.mtime \?\? 0,/.test(INDEX), true);
+  /Text\(this\.mtime > 0 \? fmtDate\(this\.mtime\) : '--'\)/.test(ARCHIVE) &&
+  /mtime: item\.mtime \?\? 0,/.test(SIDEBAR), true);
 check('② readLastPos 读回窗口 rect 与收起态，且在提前 return 之前排程',
   /const rawRect = await p\.get\(WIN_KEY_RECT, ''\);/.test(INDEX) &&
   /const rawCollapsed = await p\.get\(WIN_KEY_COLLAPSED, 0\);/.test(INDEX) &&
@@ -1869,7 +1887,7 @@ check('② 三处收起态切换点 + 根容器 resize 都触发防抖写盘',
 check('② 回归护栏：既有档案列表 / 窗口交互常量未动',
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
   (INDEX.match(/\.autoResize\(false\)/g) || []).length === 3 &&
-  /const LIST_ROW_GAP_VP: number = 1;/.test(INDEX) &&
+  /const LIST_ROW_GAP_VP: number = 1;/.test(SIDEBAR) &&
   /win\.maximize\(window\.MaximizePresentation\.ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER\)/.test(INDEX), true);
 
 console.log('--- SessionState 纯函数：窗口形态（第七轮：最大化重启保持）---');
@@ -1954,12 +1972,12 @@ check('② 解码全部在载入时的后台全量预载链启动，warm 强制�
   /this\.decodeTo\(uri, this\.preloadEdge\(\), false\)/.test(INDEX) &&
   /滚轮 \/ 翻页切图只做/.test(INDEX), true);
 check('③ 档案行最左侧圆点已移除（上层 / 目录符号保留，列宽不变）',
-  /Text\(this\.kind === ROW_UP \? '↑' : \(this\.kind === ROW_FOLDER \? '▣' : ''\)\)/.test(INDEX) &&
-  /ROW_FOLDER \? '▣' : '·'/.test(INDEX) === false &&
-  /\.width\(18\)/.test(INDEX), true);
+  /Text\(this\.kind === ROW_UP \? '↑' : \(this\.kind === ROW_FOLDER \? '▣' : ''\)\)/.test(ARCHIVE) &&
+  /ROW_FOLDER \? '▣' : '·'/.test(ARCHIVE) === false &&
+  /\.width\(18\)/.test(ARCHIVE), true);
 check('④ 右下角百分比上方「缓存 N 张」文案 / 控件已移除（第二十一轮角标改为带构建标记）',
   /Text\('缓存 ' \+ this\.cacheCount \+ ' 张'\)/.test(INDEX) === false &&
-  /右下角角标：只显示「缩放百分比」一项/.test(INDEX) &&
+  /右下角角标：正式版不画任何常显项/.test(INDEX) &&
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(INDEX), true);
 check('⑤ 左键单击不再放大，双击仍切全屏（TapGesture count 2）',
   /this\.zoomAt\(ZOOM_LEFT, event\.x, event\.y\);/.test(INDEX) === false &&
@@ -2071,26 +2089,26 @@ console.log('--- 源码静态契约：第八轮（原始档案数据内存缓存
 const RAW_SRC = readFileSync(new URL('../entry/src/main/ets/common/RawCache.ts', import.meta.url), 'utf8');
 check('RawCache.ts 是纯函数模块（不 import 鸿蒙 SDK）', /@ohos\./.test(RAW_SRC), false);
 check('RawStore：ArrayBuffer LRU + 在途合并 + 换源 gen + 单例',
-  /class RawStore \{/.test(INDEX) &&
-  /private data: Map<string, ArrayBuffer> = new Map\(\);/.test(INDEX) &&
-  /private inflight: Map<string, Promise<ArrayBuffer \| undefined>> = new Map\(\);/.test(INDEX) &&
-  /private gen: number = 0;/.test(INDEX) &&
-  /const rawStore: RawStore = new RawStore\(\);/.test(INDEX), true);
+  /class RawStore \{/.test(MODEL) &&
+  /private data: Map<string, ArrayBuffer> = new Map\(\);/.test(MODEL) &&
+  /private inflight: Map<string, Promise<ArrayBuffer \| undefined>> = new Map\(\);/.test(MODEL) &&
+  /private gen: number = 0;/.test(MODEL) &&
+  /const rawStore: RawStore = new RawStore\(\);/.test(MODEL), true);
 check('原始档案数据预算与 PixelMap 缓存分开计（防 OOM）',
-  /const RAW_CACHE_MAX_BYTES: number = 768 \* 1024 \* 1024;/.test(INDEX) &&
-  /const RAW_SINGLE_MAX_BYTES: number = 64 \* 1024 \* 1024;/.test(INDEX) &&
-  /const RAW_CACHE_MAX_COUNT: number = 20000;/.test(INDEX) &&
+  /const RAW_CACHE_MAX_BYTES: number = 768 \* 1024 \* 1024;/.test(MODEL) &&
+  /const RAW_SINGLE_MAX_BYTES: number = 64 \* 1024 \* 1024;/.test(MODEL) &&
+  /const RAW_CACHE_MAX_COUNT: number = 20000;/.test(MODEL) &&
   /const PRELOAD_MAX_BYTES: number = 1024 \* 1024 \* 1024;/.test(INDEX), true);
 check('decodePx 优先从内存 ArrayBuffer 建 ImageSource，失败降级 fd',
-  /const raw: ArrayBuffer \| undefined = await rawStore\.ensure\(uri\);/.test(INDEX) &&
-  /src = image\.createImageSource\(raw\);/.test(INDEX) &&
-  /file = await fs\.open\(uri, fs\.OpenMode\.READ_ONLY\);/.test(INDEX) &&
-  /src = image\.createImageSource\(file\.fd\);/.test(INDEX), true);
+  /const raw: ArrayBuffer \| undefined = await rawStore\.ensure\(uri\);/.test(MODEL) &&
+  /src = image\.createImageSource\(raw\);/.test(MODEL) &&
+  /file = await fs\.open\(uri, fs\.OpenMode\.READ_ONLY\);/.test(MODEL) &&
+  /src = image\.createImageSource\(file\.fd\);/.test(MODEL), true);
 check('RawStore.read 一次读满并校验完整性 + LRU 准入',
-  /const got: number = await fs\.read\(file\.fd, buf\);/.test(INDEX) &&
-  /if \(!rawReadComplete\(got, size\)\)/.test(INDEX) &&
-  /const fit: RawFit = rawFitOf\(this\.sizesOf\(\), size,/.test(INDEX) &&
-  /for \(let i = 0; i < fit\.evict; i\+\+\)/.test(INDEX), true);
+  /const got: number = await fs\.read\(file\.fd, buf\);/.test(MODEL) &&
+  /if \(!rawReadComplete\(got, size\)\)/.test(MODEL) &&
+  /const fit: RawFit = rawFitOf\(this\.sizesOf\(\), size,/.test(MODEL) &&
+  /for \(let i = 0; i < fit\.evict; i\+\+\)/.test(MODEL), true);
 check('载入时同批「读进内存 → 立即解码」，不等滚轮切换',
   /private preloadOne\(seq: number, idx: number, uri: string, edge: number,/.test(INDEX) &&
   /const wantRaw: boolean = rawPrefetchWanted\(bulkIoAllowed\(this\.restoreMode\),/.test(INDEX) &&
@@ -2464,7 +2482,7 @@ check('① 第二栏（左栏抬头）不再重复显示版本号',
 check('① 全源码里版本号只在最顶部标题栏的 Text 出现一次',
   (INDEX.match(/Text\([^\n]*APP_VERSION/g) || []).length, 1);
 check('① 左栏抬头改为只显示档案张数',
-  /Text\(this\.itemCount > 0 \? this\.itemCount \+ ' 张' : ''\)/.test(INDEX), true);
+  /Text\(this\.itemCount > 0 \? this\.itemCount \+ ' 张' : ''\)/.test(SIDEBAR), true);
 
 // ② 第二栏（全屏 / 幻灯片按钮组）默认隐藏、悬停顶部立即显隐
 check('② 新增 @State topToolsVisible 默认 false（默认隐藏）',
@@ -2481,9 +2499,9 @@ check('② 根容器按 y 坐标兜底驱动显隐（部分 2in1 只派发 Move�
   /yTop >= 0 && yTop <= TOPBAR_H/.test(ROOTMOUSE_FN) &&
   /this\.topToolsVisible = inTop;/.test(ROOTMOUSE_FN), true);
 check('② 显示时保持该栏原有样式与按钮功能（全屏 / 幻灯片原样）',
-  /this\.toolBtn\('全屏', 'full', false\)/.test(TOPBAR_FN) &&
+  /ToolButton\(\{ label: '全屏', act: 'full', flex: false/.test(TOPBAR_FN) &&
   /\.onClick\(\(\) => this\.doAction\('play'\)\)/.test(TOPBAR_FN) &&
-  /Row\(\) \{[\s\S]{0,700}this\.toolBtn\('全屏'/.test(TOPBAR_FN), true);
+  /Row\(\) \{[\s\S]{0,700}ToolButton\(\{ label: '全屏'/.test(TOPBAR_FN), true);
 
 // ③ hover 小图预览：事件触发立即显示、移出立即隐藏、无动画无延迟
 check('③ bindPopup 用 TransitionEffect.IDENTITY 关掉默认淡入淡出',
@@ -2491,7 +2509,7 @@ check('③ bindPopup 用 TransitionEffect.IDENTITY 关掉默认淡入淡出',
 check('③ popup 选项里无 opacity / duration / animateTo 动效（代码行）',
   /\.opacity\(|duration:|animateTo/.test(POPUP_CODE) === false, true);
 check('③ 源码全局已无 hover 延迟机制（常量 / 计时器 / 代号 / 复位方法）',
-  /HOVER_CLOSE_DELAY_MS|hoverCloseTimer|hoverSeq|cancelCloseTimer/.test(INDEX) === false, true);
+  /HOVER_CLOSE_DELAY_MS|hoverCloseTimer|hoverSeq|cancelCloseTimer/.test(ARCHIVE) === false, true);
 check('③ onHover(false) 同步立即隐藏且释放持有者',
   /if \(!on\) \{[\s\S]{0,400}this\.showHover = false;[\s\S]{0,160}HoverGuard\.shared\(\)\.release\(key\);/.test(HOVER_FN) &&
   /setTimeout/.test(HOVER_FN) === false, true);
@@ -2516,7 +2534,7 @@ check('④ 全屏分支里绝不调用 quitApp（不与全屏还原冲突）',
 check('第十一轮回归护栏：版本未升 / 往上层恒亮 / 不禁用 / 不弹 picker / 全量预载',
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
   /\.enabled\(/.test(CODE_LINES) === false &&
-  /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX) &&
+  /ToolButton\(\{ label: '往上层', act: 'up', flex: true/.test(SIDEBAR) &&
   /chooseFolderAt/.test(INDEX) === false &&
   /const PRELOAD_ALL: boolean = true;/.test(INDEX), true);
 
@@ -2603,7 +2621,7 @@ check('⑬ 窗口回退链空列表早退（wrapIndex 不再产生 NaN 下标读
 check('第十二轮回归护栏：版本未升 / 全量预载仍在 / 往上层恒亮 / 不禁用 / 不弹 picker / 重扫仍不清缓存',
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
   /const PRELOAD_ALL: boolean = true;/.test(INDEX) &&
-  /this\.toolBtn\('往上层', 'up', true\)/.test(INDEX) &&
+  /ToolButton\(\{ label: '往上层', act: 'up', flex: true/.test(SIDEBAR) &&
   /\.enabled\(/.test(CODE_LINES) === false &&
   /chooseFolderAt/.test(INDEX) === false &&
   /回上层/.test(INDEX) === false &&
@@ -2763,7 +2781,7 @@ check('②-a 翻页判定走 stepScrollAction + SCROLL_NONE（可见范围内不
   STEP13_CODE.includes('stepScrollAction(row, this.listFirstRow, this.listLastRow)') &&
   STEP13_CODE.includes('action !== SCROLL_NONE'), true);
 check('②-a List 用 onScrollIndex 记录可见范围',
-  INDEX.includes('.onScrollIndex((first: number, last: number, center: number) => {') &&
+  SIDEBAR.includes('.onScrollIndex((first: number, last: number, center: number) => {') &&
   INDEX.includes('this.listFirstRow = first;') &&
   INDEX.includes('this.listLastRow = last;'), true);
 check('②-a applyItems 换源后重置可见范围（不拿旧范围误判）',
@@ -2829,7 +2847,7 @@ check('②-c 放大镜不破坏主画质三处 autoResize(false) 契约',
 check('第十三轮回归护栏：版本未升 / 往上层恒亮 / 不禁用 / 不弹 picker / 全量预载 / 主画质三处 / 第十一轮 hover 与 ESC 未动',
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
   CODE_LINES.includes('.enabled(') === false &&
-  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  SIDEBAR.includes("ToolButton({ label: '往上层', act: 'up', flex: true") &&
   INDEX.includes('chooseFolderAt') === false &&
   INDEX.includes('回上层') === false &&
   INDEX.includes('const PRELOAD_ALL: boolean = true;') &&
@@ -3011,7 +3029,7 @@ check('② 第十四轮回归护栏：既有画质 / 顶栏 / ESC / 版本 / 往
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
   INDEX.includes('回上层') === false &&
   CODE_LINES.includes('.enabled(') === false &&
-  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  SIDEBAR.includes("ToolButton({ label: '往上层', act: 'up', flex: true") &&
   INDEX.includes('const PRELOAD_ALL: boolean = true;') &&
   TOPBAR_FN.includes('.visibility(this.topToolsVisible ? Visibility.Visible : Visibility.Hidden)') &&
   QUIT_FN.includes('ability.terminateSelf()') &&
@@ -3313,7 +3331,7 @@ check('② 第十六轮回归护栏：三处画质计数 / 版本 / 往上层 / 
   INDEX.includes('回上层') === false &&
   INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
   INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
-  INDEX.includes('this.toolBtn(\'往上层\', \'up\', true)') &&
+  SIDEBAR.includes('ToolButton({ label: \'往上层\', act: \'up\', flex: true') &&
   INDEX.includes('@State topBarPeek: boolean = false;') &&
   INDEX.includes('quitApp()') && INDEX.includes('ability.terminateSelf()'), true);
 
@@ -3439,7 +3457,7 @@ check('② 第十七轮回归护栏：三处画质计数 / 版本 / 右键 toggl
   INDEX.includes('回上层') === false &&
   INDEX.includes('@State loupeEnabled: boolean = LOUPE_DEFAULT_ENABLED;') &&
   INDEX.includes('this.applyLoupeToggle(event.button === MouseButton.Right);') &&
-  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  SIDEBAR.includes("ToolButton({ label: '往上层', act: 'up', flex: true") &&
   INDEX.includes('@State topBarPeek: boolean = false;') &&
   INDEX.includes('shouldCaptureWindowRect(prevFull, nextFull, floating)') &&
   INDEX.includes('escActionByState(this.fullscreen,') &&
@@ -3790,7 +3808,7 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
 check('③ 诊断层展开时可见 R38 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3878,7 +3896,7 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
 check('④ R38 构建标记已升级（R33 / R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -3979,7 +3997,7 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
 check('⑤ R38 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4058,7 +4076,7 @@ check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
 check('④ R38 构建标记且 R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4096,10 +4114,10 @@ check('① DIAG_OVERLAY_DEFAULT=false + @State diagOverlayOn（运行时可切�
   INDEX.includes('@State diagOverlayOn: boolean = DIAG_OVERLAY_DEFAULT;') &&
   INDEX.includes('private toggleDiagOverlay(): void {') &&
   INDEX.includes('this.diagOverlayOn = !this.diagOverlayOn;'), true);
-check('① 关闭时黄色诊断行 / 退出按钮 / 全字段角标全部收起，else 分支只画缩放百分比',
+check('① 关闭时黄色诊断行 / 退出按钮 / 全字段角标全部收起，R55 起无常显百分比分支',
   /if \(this\.diagOverlayOn\) \{\s*if \(this\.escDiag\.length > 0 \|\| this\.keySeen === 0\)/.test(INDEX) &&
   DIAG_EXIT_SLICE.includes('if (this.diagOverlayOn) {') &&
-  /\} else \{[\s\S]{0,250}Text\(this\.zoomPercentText\(\)\)/.test(INDEX), true);
+  /Text\(this\.zoomPercentText\(\)\)/.test(INDEX) === false, true);
 check('① 状态栏的 ESC# 诊断串也随诊断层开关，正式版状态栏不带排查文本',
   INDEX.includes("this.status + (this.diagOverlayOn && this.escDiag.length > 0 ? '  ·  ' + this.escDiag : '')"), true);
 
@@ -4107,14 +4125,13 @@ console.log('--- 第二十五轮 ②：两个可开关入口（键盘 + 鼠标�
 check('② Ctrl+D 切换诊断层（KEYCODE_D=2020，不占任何 UI 空间）',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_D) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_D\) \{\s*this\.toggleDiagOverlay\(\);\s*return;/.test(INDEX), true);
-check('② 单击右下角缩放百分比也能切换（开 / 关两个分支都绑了 onClick）',
-  /Text\(this\.zoomPercentText\(\)\)[\s\S]{0,300}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
+check('② 诊断层切换入口：Ctrl+D + 展开时点全字段角标收起（R55 起无常显百分比可点）',
   /' · ' \+ this\.winFocusDiag\)[\s\S]{0,400}this\.toggleDiagOverlay\(\);/.test(INDEX) &&
-  (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 3, true);
+  (INDEX.match(/this\.toggleDiagOverlay\(\);/g) || []).length >= 2, true);
 
 console.log('--- 第二十五轮 ③：R38 构建标记 + 既有链路零回归 ---');
 check('③ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4198,8 +4215,8 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
 
 console.log('--- 第二十六轮 ④：R38 构建标记 + 既有链路零回归 ---');
 check('④ ESC_BUILD_TAG=R35，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4252,11 +4269,11 @@ check('② 换数据源绝不拉黑：同一个 uri 在新图库里仍可正常�
 check('② 无失败无超时不拉黑', rawDenyAfterFailure(false, false, false), false);
 
 console.log('--- 第二十七轮 ③：RawStore.read 真异步（4 个 fs.* 全 await，零 *Sync）---');
-const READ27_START = INDEX.indexOf('  private async read(uri: string, gen: number)');
-const RAW27_READ = stripComments(INDEX.slice(READ27_START,
-  INDEX.indexOf('  /** 队头→队尾各条字节数', READ27_START)));
+const READ27_START = MODEL.indexOf('  private async read(uri: string, gen: number)');
+const RAW27_READ = stripComments(MODEL.slice(READ27_START,
+  MODEL.indexOf('  /** 队头→队尾各条字节数', READ27_START)));
 check('③ read() 是 async 且返回 Promise<ArrayBuffer | undefined>',
-  /private async read\(uri: string, gen: number\): Promise<ArrayBuffer \| undefined> \{/.test(INDEX) &&
+  /private async read\(uri: string, gen: number\): Promise<ArrayBuffer \| undefined> \{/.test(MODEL) &&
   READ27_START > 0, true);
 check('③ stat / open / read / close 全部是 Promise 版 await',
   /const st: fs\.Stat = await fs\.stat\(uri\);/.test(RAW27_READ) &&
@@ -4272,11 +4289,11 @@ check('③ 预算计算与 LRU 插入仍是同一段同步代码（await 只在 
   /if \(gen !== this\.gen \|\| this\.denied\.has\(uri\)\)/.test(RAW27_READ), true);
 
 console.log('--- 第二十七轮 ④：ensure() 超时闸门 + 伪异步已废除 ---');
-const RAW27_ENSURE = stripComments(INDEX.slice(
-  INDEX.indexOf('  ensure(uri: string): Promise<ArrayBuffer | undefined>'),
-  INDEX.indexOf('  /** 第二十七轮：真异步读取 + 超时放弃闸门')));
+const RAW27_ENSURE = stripComments(MODEL.slice(
+  MODEL.indexOf('  ensure(uri: string): Promise<ArrayBuffer | undefined>'),
+  MODEL.indexOf('  /** 第二十七轮：真异步读取 + 超时放弃闸门')));
 check('④ 旧的 Promise.resolve(this.read(...)) 伪异步写法已彻底移除',
-  /Promise\.resolve<ArrayBuffer \| undefined>\(this\.read\(uri, gen\)\)/.test(INDEX), false);
+  /Promise\.resolve<ArrayBuffer \| undefined>\(this\.read\(uri, gen\)\)/.test(MODEL), false);
 check('④ ensure() 改走 readGuarded，在途合并 / denied 短路 / inflight 清理都保留',
   /const job: Promise<ArrayBuffer \| undefined> = this\.readGuarded\(uri, gen\)/.test(RAW27_ENSURE) &&
   /this\.inflight\.delete\(uri\);/.test(RAW27_ENSURE) &&
@@ -4284,17 +4301,17 @@ check('④ ensure() 改走 readGuarded，在途合并 / denied 短路 / inflight
   /if \(this\.denied\.has\(uri\)\)/.test(RAW27_ENSURE) &&
   /const running: Promise<ArrayBuffer \| undefined> \| undefined = this\.inflight\.get\(uri\);/.test(RAW27_ENSURE), true);
 check('④ readGuarded 用 rawIoTimeoutMs 算上限 + setTimeout + settled 单闸',
-  /const limitMs: number = rawIoTimeoutMs\(RAW_SINGLE_MAX_BYTES,/.test(INDEX) &&
-  /let settled: boolean = false;/.test(INDEX) &&
-  /timer = setTimeout\(\(\): void => \{/.test(INDEX) &&
-  /clearTimeout\(timer\);/.test(INDEX) &&
-  /new Promise<ArrayBuffer \| undefined>\(/.test(INDEX), true);
+  /const limitMs: number = rawIoTimeoutMs\(RAW_SINGLE_MAX_BYTES,/.test(MODEL) &&
+  /let settled: boolean = false;/.test(MODEL) &&
+  /timer = setTimeout\(\(\): void => \{/.test(MODEL) &&
+  /clearTimeout\(timer\);/.test(MODEL) &&
+  /new Promise<ArrayBuffer \| undefined>\(/.test(MODEL), true);
 check('④ 超时 / IO 失败按 rawDenyAfterFailure 判据记 denied（换源不误杀）',
-  (INDEX.match(/rawDenyAfterFailure\(gen !== this\.gen,/g) || []).length === 2 &&
-  /const RAW_IO_BASE_MS: number = 400;/.test(INDEX) &&
-  /const RAW_IO_PER_MB_MS: number = 120;/.test(INDEX) &&
-  /const RAW_IO_CAP_MS: number = 8000;/.test(INDEX) &&
-  /rawIoTimeoutMs, rawDenyAfterFailure/.test(INDEX), true);
+  (MODEL.match(/rawDenyAfterFailure\(gen !== this\.gen,/g) || []).length === 2 &&
+  /const RAW_IO_BASE_MS: number = 400;/.test(MODEL) &&
+  /const RAW_IO_PER_MB_MS: number = 120;/.test(MODEL) &&
+  /const RAW_IO_CAP_MS: number = 8000;/.test(MODEL) &&
+  /rawIoTimeoutMs, rawDenyAfterFailure/.test(MODEL), true);
 check('④ RawCache.ts 两个纯函数已导出且模块仍是零 SDK 依赖',
   /export function rawIoTimeoutMs\(/.test(RAW_SRC) &&
   /export function rawDenyAfterFailure\(/.test(RAW_SRC) &&
@@ -4302,9 +4319,9 @@ check('④ RawCache.ts 两个纯函数已导出且模块仍是零 SDK 依赖',
 
 console.log('--- 第二十七轮 ⑤：decodePx fd 兜底也异步 + 既有链路零回归 ---');
 check('⑤ fd 兜底 open / close 改 await（缓存未命中也不再同步跨进程）',
-  /file = await fs\.open\(uri, fs\.OpenMode\.READ_ONLY\);/.test(INDEX) &&
-  /await fs\.close\(file\);/.test(INDEX) &&
-  /fs\.openSync\(uri, fs\.OpenMode\.READ_ONLY\)/.test(INDEX) === false, true);
+  /file = await fs\.open\(uri, fs\.OpenMode\.READ_ONLY\);/.test(MODEL) &&
+  /await fs\.close\(file\);/.test(MODEL) &&
+  /fs\.openSync\(uri, fs\.OpenMode\.READ_ONLY\)/.test(MODEL) === false, true);
 check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
   escActionByState(false, false) === ESC_ACT_QUIT_APP &&
@@ -4314,8 +4331,8 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 check('⑤ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
 console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
@@ -4438,8 +4455,8 @@ check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
 check('R38 构建标记，R33 及更早旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX) &&
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十八轮 ⑥：其它导航 / 历史修复零回归 ---');
@@ -4457,7 +4474,7 @@ check('R29 零回归：第八轮 NAS 逻辑形态卷根不变', volumeRootOf(NAS
 check('R29 零回归：第八轮 NAS 父候选仍含 scheme 形态',
   upParentCandidates(NAS_BASE, NAS_RAW).some(u => u.indexOf('file://' + M_HOST + '/') === 0), true);
 check('R29 零回归：R27 readGuarded 真异步仍在',
-  /private readGuarded\(/.test(INDEX) && /await fs\.read\(file\.fd, buf\)/.test(INDEX), true);
+  /private readGuarded\(/.test(MODEL) && /await fs\.read\(file\.fd, buf\)/.test(MODEL), true);
 check('R29 零回归：R26 上下键翻页仍在',
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
 check('R29 零回归：版本守卫 1.0.7', /const APP_VERSION: string = '1\.0\.7'/.test(INDEX), true);
@@ -4606,7 +4623,7 @@ check('R29 showUpListInApp 逐条渲染聚合结果（当前目录用真实路�
 check('R29 快照带真实行种类：带点的兄弟目录名仍可点进入（ROW_OTHER 不可点）',
   /kinds: Array<number>;/.test(INDEX) &&
   /kinds\.push\(rn\.kind \?\? ROW_IMAGE\)/.test(INDEX) &&
-  /private upListKindOf\(target: string, name: string, fallback: number\)/.test(INDEX) &&
+  /private upListKindOf\(target: string, name: string, fallback: number,/.test(INDEX) &&
   /snap\.kinds\[j\] === ROW_FOLDER \? ROW_FOLDER : ROW_OTHER/.test(INDEX), true);
 check('R29 showUpListInApp 不再有「只按单槽 exists 去重」的旧逻辑',
   /let exists: boolean = false;/.test(UPLIST_CODE) === false, true);
@@ -4635,8 +4652,8 @@ check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧�
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
   /this\.pickRootUri = '';/.test(UP_FN), true);
 check('R38 构建标记且 R33 及更早旧包全部可从截图排除',
-  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX) &&
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十九轮 ⑥：目录结构 / 命名 / 导航行为零回归 ---');
@@ -4658,7 +4675,7 @@ check('R29 零回归：非 NAS 卷根 / 文档 URI / 版本守卫 / R27 真异�
   volumeRootOf('/a/b/c') === '/' &&
   realPathOf('file://docs/storage/Users/100/a') === '/storage/Users/100/a' &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
-  /private readGuarded\(/.test(INDEX) &&
+  /private readGuarded\(/.test(MODEL) &&
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 往上层验证。');
 console.log('  ⚠️ 真机步骤：装 R38 包 → 打开复现路径 → 点「往上层」→ 左栏应列出该层全部子目录（含所有非 2026 目录）。');
@@ -4832,11 +4849,11 @@ check('R30 零回归：upDirCache 上限 / 单槽兼容 / 伪行过滤未动',
 check('R30 零回归：快照 / 单张两条恢复路径仍在 setItems 后回填（各 1 次）',
   (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 3, true);
 check('R30 零回归：R27 真异步 / R26 翻页 / R25 诊断开关 / 版本守卫全未动',
-  /private readGuarded\(/.test(INDEX) &&
+  /private readGuarded\(/.test(MODEL) &&
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX) &&
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机重启验证。');
 console.log('  ⚠️ 真机步骤：装 R38 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
 
@@ -4894,7 +4911,7 @@ console.log('--- 第三十一轮 ②：Index.ets 静态接线（隔离 / 编码 
 check('R31 接线：DirName import 三个新函数',
   /prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache/.test(INDEX), true);
 check('R35 接线：ESC_BUILD_TAG 升 R38 且源码不再有 R34 定义',
-  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX) &&
   /const ESC_BUILD_TAG: string = 'R35';/.test(INDEX) === false &&
   /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) === false, true);
 check('R31 接线：readLastPos 主 try 只 await readBrowseExtras（增强 key 不再内联）',
@@ -5225,8 +5242,8 @@ check('R36 调用关系：不再「首个 parent 成功即 return」—— 所�
 check('R34 落地一致性：cachedUpLandsAt 只作成功后的诊断（cache= 字段），不再是闸门',
   /const cacheConsistent: boolean = preferred\.length > 0 &&[\s\S]{0,120}cachedUpLandsAt\(preferred, current, this\.browseBase\);/.test(UP_FN) &&
   /' \| cache=' \+/.test(UP_FN) && /up OK \|/.test(UP_FN), true);
-check('R34 零回归：folderBusy / READONLY 早退 / pickRootUri 清理 / 严格父级校验全未动',
-  /if \(this\.folderBusy\)/.test(UP_FN) &&
+check('R34 零回归：folderBusy / READONLY 早退 / pickRootUri 清理 / 严格父级校验全未动（R43 起 browseUp 不再因 busy 早退，改由 openFolder 抢占）',
+  /openFolder 会抢占在途列举/.test(UP_FN) &&
   /this\.status = readonlyUpHint\(\);/.test(UP_FN) &&
   /this\.pickRootUri = '';/.test(UP_FN) &&
   /isStrictParentOf\(target, current\)/.test(UP_FN), true);
@@ -5385,8 +5402,8 @@ const R35_DIR_CODE = stripComments(DIRNAME_SRC.slice(DIRNAME_SRC.indexOf('第三
 check('R35 接线：Index 引入 mergeExploreNames / exploreBaseOf / exploreSiblingNamesOf 三个纯函数',
   /mergeExploreNames, exploreBaseOf, exploreSiblingNamesOf \} from '\.\.\/common\/DirName'/.test(INDEX), true);
 check('R35 接线：openFolder 收集每一次成功 listFile 的形态与条目名（零新增 IO，这些调用本来就会跑）',
-  /const exploreForms: Array<string> = \[\];/.test(R35_OPEN_CODE) &&
-  /const exploreGroups: Array<Array<string>> = \[\];/.test(R35_OPEN_CODE) &&
+  /let exploreForms: Array<string> = \[\];/.test(R35_OPEN_CODE) &&
+  /let exploreGroups: Array<Array<string>> = \[\];/.test(R35_OPEN_CODE) &&
   /exploreForms\.push\(cand\);/.test(R35_OPEN_CODE) &&
   /exploreGroups\.push\(n\);/.test(R35_OPEN_CODE) &&
   (R35_OPEN_CODE.match(/await fs\.listFile\(/g) || []).length === 1, true);
@@ -5436,8 +5453,8 @@ check('R35 零回归：版本 1.0.7 / 诊断默认关闭 / 往上层恒亮不禁
   /\.enabled\(/.test(CODE_LINES) === false &&
   /isStrictParentOf\(target, current\)/.test(UP_FN), true);
 check('R38 构建标记升 R38，R34 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX) &&
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
 console.log('  ⚠️ 真机步骤：装 R38 包 → 进入深层目录 → 点「往上层」→ 应列出该层全部子目录（含非当前目录的兄弟目录）。');
@@ -5556,8 +5573,8 @@ check('R36 接线：目录态持久化 key + 全量探索夹界常量',
   /const POS_KEY_DIRCTX: string = 'lastDirCtx';/.test(INDEX) &&
   /const UP_EXPLORE_MAX_FORMS: number = 64;/.test(INDEX), true);
 check('R38 构建标记升 R38，R35 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R38';/.test(INDEX) &&
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX) &&
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('R36 根因护栏 A：markPos 无图片时不再直接 return，仍排一次写盘',
   /private markPos\(\): void \{[\s\S]{0,700}dirContextSaveWanted\(this\.browseBase, this\.items\.length, false\)[\s\S]{0,160}this\.scheduleFlush\(\);/.test(INDEX), true);
@@ -5588,7 +5605,7 @@ check('R36 接线 A：restoreDirContextOnly 回填层级 + 画纯清单 + 撤看
   /this\.restoreBrowseContext\(\);/.test(R36_DIRCTX) &&
   /this\.inAppUpList = true;/.test(R36_DIRCTX) &&
   /this\.markRestoreEntered\(\);/.test(R36_DIRCTX) &&
-  /this\.status = '已恢复上次目录/.test(R36_DIRCTX), true);
+  /this\.status = '「' \+ label \+ '」· 本层没有图片/.test(R36_DIRCTX), true);
 check('R36 接线 A：死路径记忆 / 授权激活失败都不再抢走零 IO 目录态恢复',
   (INDEX.match(/dirOnlyResumeWanted\(this\.savedDirCtx,/g) || []).length === 3 &&
   /if \(!dirOnly && failFastAction\(/.test(INDEX) &&
@@ -5874,9 +5891,9 @@ check('R37 TextDoc.ts 纯函数导出齐全（59 个 export）',
   (TEXTDOC.match(/^export (const|function|interface)/gm) || []).length, 59);
 check('R38 Index import TextDoc 真值源，且构建标记升 R38',
   INDEX.includes("from '../common/TextDoc';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';"), true);
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';"), true);
 check('R37 新增 ROW_TEXT=4，文本行只进 rows 不进 items',
-  /const ROW_TEXT: number = 4;/.test(INDEX) &&
+  /const ROW_TEXT: number = 4;/.test(ARCHIVE) &&
   INDEX.includes('texts.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_TEXT, itemIndex: -1 });') &&
   /for \(let i = 0; i < texts\.length; i\+\+\) \{\s*rows\.push\(texts\[i\]\);/.test(INDEX) &&
   /const imgs: ImageItem\[\] = \[\];/.test(INDEX) &&
@@ -5899,8 +5916,8 @@ check('R37 FILE_FILTERS 保留「所有文件」为第一项，新增文本/源�
   INDEX.includes('function textFileFilterOf(): string {') &&
   INDEX.includes('textSuffixListOf()') && INDEX.includes('textFileFilterOf()'), true);
 check('R37 ArchiveRow 文本行有独立暖黄配色，悬停缩略图仍只对图片行开放',
-  INDEX.includes("if (this.kind === ROW_TEXT) {\n      return '#d8c78a';") &&
-  INDEX.includes('if (this.kind !== ROW_IMAGE || this.thumbDisabled)'), true);
+  ARCHIVE.includes("if (this.kind === ROW_TEXT) {\n      return '#d8c78a';") &&
+  ARCHIVE.includes('if (this.kind !== ROW_IMAGE || this.thumbDisabled)'), true);
 check('R37 TextLineSource 实现 IDataSource，reload 通知 onDataReloaded',
   INDEX.includes('class TextLineSource implements IDataSource {') &&
   /reload\(list: Array<string>\): void \{[\s\S]{0,250}onDataReloaded\(\)/.test(INDEX), true);
@@ -5920,7 +5937,7 @@ check('R37 openTextFile 是真异步：stat/open/read/close 全 await，无一�
 check('R37 openTextFile 只读不写：无任何写/删/改名 API，也不 new Promise',
   /fs\.(write|copy|move|unlink|rename|truncate)/.test(OPEN_TEXT_FN) === false &&
   OPEN_TEXT_FN.includes('new Promise') === false &&
-  (INDEX.match(/new Promise/g) || []).length === 1, true);
+  ((INDEX + ARCHIVE + MODEL).match(/new Promise/g) || []).length === 2, true);
 check('R37 openTextFile 编码链：BOM 剥离 + 候选解码 + 替换字符最少者胜出',
   OPEN_TEXT_FN.includes('encodingCandidatesOf(bytes)') &&
   OPEN_TEXT_FN.includes('textBodyOf(bytes)') &&
@@ -5980,23 +5997,23 @@ check('R37 零回归：画质三处计数 / 版本 / 往上层 / 禁用 / 防冻
   INDEX.split('.autoResize(false)').length - 1 === 3 &&
   INDEX.split('.dynamicRangeMode(').length - 1 === 3 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
-  INDEX.includes("this.toolBtn('往上层', 'up', true)") &&
+  SIDEBAR.includes("ToolButton({ label: '往上层', act: 'up', flex: true") &&
   /回上层/.test(INDEX) === false &&
   /\.enabled\(/.test(CODE_LINES) === false &&
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 8, true);
-check('R37 零回归：restoreBrowseContext / inAppUpList / Text(this.name) 计数型契约不变',
+check('R37+R42 零回归：restoreBrowseContext / inAppUpList / Text(this.name) 计数型契约不变',
   (INDEX.match(/this\.restoreBrowseContext\(\);/g) || []).length === 3 &&
-  (INDEX.match(/this\.inAppUpList =/g) || []).length === 4 &&
-  (INDEX.match(/Text\(this\.name\)/g) || []).length === 1 &&
-  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 4, true);
+  (INDEX.match(/this\.inAppUpList =/g) || []).length === 5 &&
+  ((INDEX + ARCHIVE).match(/Text\(this\.name\)/g) || []).length === 1 &&
+  (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 3, true);
 check('R37 零回归：往上层主链 / R36 目录态 / ESC 严格两态 / 诊断开关仍在',
   UP_FN.includes('upLevelOf(current)') &&
   INDEX.includes("const POS_KEY_DIRCTX: string = 'lastDirCtx';") &&
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   INDEX.includes('escActionByState(this.fullscreen, this.pendingSystemEcho);'), true);
 check('R38 构建标记 R38，R37 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
     'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
@@ -6110,10 +6127,10 @@ check('R38 既有往上层主链 / 全量探索 / R36 目录态 / R37 文本态�
   INDEX.includes("if (this.textMode) {"), true);
 check('R38 版本恒定 1.0.7 / 7，构建标记 R38',
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R38';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R55';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") === false, true);
 check('R38 旧包排除：R37 及更早旧标记全不在源码里',
-  ['R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28',
+  ['R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28',
     'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('R38 DirName.ts 新纯函数零 SDK import / 零文件 IO / 零 await / 零 throw 语句',
@@ -6127,6 +6144,314 @@ check('R38 DirName.ts 新纯函数零 SDK import / 零文件 IO / 零 await / �
       /^\s*await\s/m.test(code) === false &&
       /\bthrow\s+(new|[A-Za-z_$])/m.test(code) === false;
   })(), true);
+console.log('--- 第四十一轮：恢复态目录清单的行种类保真（.log 重启后可预览） ---');
+check('R41 根因：upListKindOf 新增 keepFileKinds 形参，true 时直传快照真实种类',
+  INDEX.includes('keepFileKinds?: boolean): number {') &&
+  /if \(keepFileKinds === true\) \{\s*\n\s*return snap\.kinds\[j\];/.test(INDEX) &&
+  // 默认分支（上层清单）原样保留：无授权的父层文件行仍折叠成 ROW_OTHER
+  /return snap\.kinds\[j\] === ROW_FOLDER \? ROW_FOLDER : ROW_OTHER;/.test(INDEX), true);
+check('R41 修复：restoreDirContextOnly 传 keepFileKinds=true，文本行不再被折叠成 ROW_OTHER',
+  /this\.upListKindOf\(base, nm,[\s\S]{0,260}\? ROW_OTHER : ROW_FOLDER, true\);/.test(R36_DIRCTX) &&
+  R36_DIRCTX.includes('isTextFileName(nm) ? ROW_TEXT'), true);
+check('R41 修复：恢复态清单仍是启动期零 IO（兜底只用纯字符串函数，不碰 fs / 选择器）',
+  /fs\.listFile|fs\.statSync|fs\.openSync|this\.openFolder\(|chooseFolder\(|DocumentViewPicker|decodeTo\(|schedulePreload\(/.test(R36_DIRCTX) === false, true);
+check('R41 兜底：恢复态纯清单里的图片行（不在翻页序列）点击即真实重列当前目录，不再静默吞掉',
+  /else if \(kind === ROW_IMAGE\) \{[\s\S]{0,420}this\.openFolder\(this\.browseBase, true, false\);/.test(INDEX) &&
+  // 文本行分发原样未动：仍走 openTextFile，绝不 select
+  ROW_TEXT_BRANCH.includes('this.openTextFile(r.uri, r.name);'), true);
+check('R41 零回归：上层清单（无授权父层）仍不传 keepFileKinds，文件行照旧折叠',
+  /this\.upListKindOf\(target, nm,/.test(UPLIST_CODE) &&
+  UPLIST_CODE.includes('keepFileKinds') === false, true);
+console.log('  ⚠️ 真机步骤 R41：选 /storage/Users/currentUser → 点开一个 .log 预览 → 退出 App 重开 →');
+console.log('     恢复态清单里点同一个 .log 应直接进文本预览（不再「不支持预览」）；');
+console.log('     点「往上层」进上层清单，文件行仍显示「不支持预览」（无授权，原行为）。');
+
+console.log('--- 第四十二轮：网盘目录整表缓存（秒开 + 后台刷新） ---');
+check('R42 缓存结构：DirRowsCacheEntry 接口 + LRU 上限常量',
+  INDEX.includes('interface DirRowsCacheEntry {') &&
+  INDEX.includes('const DIR_ROWS_CACHE_MAX: number = 12;') &&
+  INDEX.includes('private dirRowsCache: Array<DirRowsCacheEntry> = [];'), true);
+check('R42 秒开：openFolder 非重扫先查整表缓存，命中立即零 IO 渲染',
+  /const cacheHit: DirRowsCacheEntry \| undefined =\s*\n\s*isRescan === true \? undefined : this\.findDirRowsCache\(dirUri\);/.test(INDEX) &&
+  /if \(fromCache\) \{\s*\n\s*this\.renderDirFromCache\(cacheHit!, dirUri, resetView, keepUri\);/.test(INDEX) &&
+  INDEX.includes('private renderDirFromCache(hit: DirRowsCacheEntry, dirUri: string, resetView: boolean,') &&
+  INDEX.includes('keepUri: string): void {'), true);
+check('R42 渲染等价：缓存行按当前排序方向重排，分组顺序与真实列举同构（.. → 目录 → 图片 → 文本 → 其它）',
+  INDEX.includes('private resortDirRows(rows: Array<ImageItem>, asc: boolean): Array<ImageItem> {') &&
+  /resortDirRows[\s\S]{0,2200}out\.push\(\{ uri: '', name: '\.\.', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 \}\);/.test(INDEX) &&
+  /imgs\[i\]\.itemIndex = i;[\s\S]{0,80}out\.push\(imgs\[i\]\);/.test(INDEX), true);
+check('R42 后台刷新：条目没变走 sameDirEntries 短路（视图一个像素不动），变了走 applyItems 保位刷新',
+  INDEX.includes('this.applyItems(imgs, dirLabel, \'\', rows, isRescan === true || fromCache);') &&
+  INDEX.includes("this.status = '目录已是最新（' + this.itemCount + ' 张）';") &&
+  INDEX.includes("this.status = '目录已刷新（' + imgs.length + ' 张 · ' + dirLabel + '）';"), true);
+check('R42 离线兜底：缓存已渲染而后台列举失败时保留缓存视图，返回 true 不触发上层清单回退',
+  /if \(fromCache\) \{\s*\n\s*this\.status = '已显示缓存目录 · 刷新失败/.test(INDEX) &&
+  /hilog\.warn\(DOMAIN, TAG, 'openFolder: cache shown, refresh failed[\s\S]{0,120}return true;/.test(INDEX), true);
+check('R42 缓存写入：真实列举成功后整表入 LRU（sameDirPath 去重、超限裁尾），与 upDirCache 快照同点写入',
+  /this\.cacheUpDirSnapshot\(base, rows\);\s*\n\s*\/\/ 第四十二轮[\s\S]{0,80}this\.cacheDirRows\(base, dirLabel, rows\);/.test(INDEX) &&
+  INDEX.includes('private cacheDirRows(base: string, label: string, rows: Array<ImageItem>): void {') &&
+  /cacheDirRows[\s\S]{0,600}this\.dirRowsCache\.length = DIR_ROWS_CACHE_MAX;/.test(INDEX), true);
+check('R42 零回归：自动重扫（isRescan）不查缓存；缓存渲染不碰 dirMtime（留 0 等真值）、不清死路径记忆',
+  /isRescan === true \? undefined : this\.findDirRowsCache\(dirUri\);/.test(INDEX) &&
+  /renderDirFromCache[\s\S]{0,900}this\.dirMtime = 0;/.test(INDEX) &&
+  /renderDirFromCache[\s\S]{0,2000}this\.saveDeadTag\(''\);/.test(INDEX) === false, true);
+console.log('  ⚠️ 真机步骤 R42：选一个网盘 / NAS 目录（条目越多越好）→ 记下列目录耗时 →');
+console.log('     点「往上层」再点回来 / 退出重进 → 目录表应**瞬间**出现（状态栏先显示');
+console.log('     「已显示缓存目录（后台刷新中…）」，随后变「目录已是最新」或「目录已刷新」）；');
+console.log('     在网盘侧增删一个文件 → 1.5s 轮询触发重扫 → 列表保位更新；');
+console.log('     断开网盘后重进该目录 → 应保留缓存视图 +「已显示缓存目录 · 刷新失败」。');
+
+console.log('--- 第四十三轮：用户导航抢占在途列举（修 NAS 点资料夹没反应） ---');
+check('R43 抢占：用户导航（isRescan !== true）不再被 folderBusy 吞掉，自动重扫仍让路',
+  /if \(this\.folderBusy && isRescan === true\) \{\s*\n\s*return false; \/\/ 自动重扫：用户操作在途，让路（原行为）/.test(INDEX) &&
+  /const myEpoch: number = \+\+this\.openEpoch;/.test(INDEX) &&
+  INDEX.includes('private openEpoch: number = 0;'), true);
+check('R43 作废：在途列举被抢占后结果整段丢弃（epoch 过期即静默退出，不落任何状态）',
+  /if \(myEpoch !== this\.openEpoch\) \{\s*\n\s*hilog\.info\(DOMAIN, TAG, 'openFolder: superseded by newer navigation, discard listing'\);\s*\n\s*return true;/.test(INDEX), true);
+check('R43 放锁：只有当前代际持有者释放 folderBusy（被抢占的旧调用不得清掉新调用的锁）',
+  /finally \{\s*\n\s*\/\/ 第四十三轮[\s\S]{0,160}if \(myEpoch === this\.openEpoch\) \{\s*\n\s*this\.folderBusy = false;/.test(INDEX), true);
+check('R43 反馈：非缓存、非重扫的列举先同步显示「正在列出 …」，点击必看得见反应',
+  /else if \(isRescan !== true\) \{\s*\n\s*\/\/ 点了必须看得见反应[\s\S]{0,200}this\.status = '正在列出 ' \+ baseName\(dirUri\) \+ '…';/.test(INDEX), true);
+check('R43 往上层：browseUp 不再因 busy 早退，直接放行由 openFolder 抢占在途列举',
+  /第四十三轮：不再因 folderBusy 早退[\s\S]{0,120}openFolder 会抢占在途列举/.test(INDEX) &&
+  /往上层：上一批目录还在列，稍候再点/.test(INDEX) === false, true);
+console.log('  ⚠️ 真机步骤 R43：进 NAS 目录（缓存秒开、状态栏「后台刷新中…」未消失时）立刻点');
+console.log('     子资料夹 → 应立即响应（「正在列出 …」→ 进入），不再像没反应；');
+console.log('     列表途中连点多个资料夹 → 最后点的那个胜出，中间的自动作废不闪屏；');
+console.log('     「往上层」在列举途中点击也应立即响应。');
+
+console.log('--- 第四十四轮：NAS 重启后 13900002 —— 重连重试 + 恢复态预热 ---');
+check('R44 网络目录判定：isNetworkDirUri（scheme 授权形 / userExternal 挂载形 / UNC；file://docs 与 file://media 是本机 provider 不算）',
+  /function isNetworkDirUri\(u: string\): boolean \{/.test(INDEX) &&
+  /u\.indexOf\(':\/\/'\) >= 0 && u\.indexOf\('file:\/\/docs\/'\) !== 0/.test(INDEX) &&
+  INDEX.includes("u.indexOf('/storage/userExternal/') >= 0"), true);
+check('R44 重试节奏：NAS_RETRY_DELAYS = [600, 1800]，只对网络目录 + ENOENT(13900002) 重试，本地目录快速失败',
+  /const NAS_RETRY_DELAYS: number\[\] = \[600, 1800\];/.test(INDEX) &&
+  /const netRetry: boolean = isNetworkDirUri\(dirUri\);/.test(INDEX) &&
+  /lastErr\.indexOf\('13900002'\) < 0 \|\| !netRetry \|\| isRescan === true/.test(INDEX), true);
+check('R44 重试前静默重推持久授权：reactivatePersistQuiet 绝不调用 finishPersistActivate（一次性收口不得重入）',
+  /private async reactivatePersistQuiet\(\): Promise<void> \{/.test(INDEX) &&
+  INDEX.slice(INDEX.indexOf('private async reactivatePersistQuiet'),
+    INDEX.indexOf('private async warmRestoreDirQuiet')).includes('finishPersistActivate(') === false &&
+  /await this\.reactivatePersistQuiet\(\);/.test(INDEX), true);
+check('R44 重试期间可被抢占：两次 epoch 校验（等待前 / 等待后），被抢占即让位不落状态',
+  (INDEX.match(/if \(myEpoch !== this\.openEpoch\) \{/g) || []).length === 3, true);
+check('R44 恢复态预热：restoreDirContextOnly 渲染后静默 warmRestoreDirQuiet（纯探测，不碰视图 / 状态栏 / folderBusy）',
+  /this\.warmRestoreDirQuiet\(base\)\.catch/.test(INDEX) &&
+  /private async warmRestoreDirQuiet\(base: string\): Promise<void> \{/.test(INDEX) &&
+  /warm[\s\S]{0,400}listNum: 1/.test(INDEX), true);
+check('R44 失败反馈：网络目录 ENOENT 重试耗尽后提示「网络目录未连接？稍候再点一次」',
+  /（网络目录未连接\？稍候再点一次）' : ''\)/.test(INDEX) &&
+  /'网络目录未就绪，正在重连（' \+ \(attempt \+ 1\)/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R44：重启 App（NAS 场景）→ 恢复态清单出现后立刻点 NAS 子资料夹 →');
+console.log('     应看到「正在列出 …」或「网络目录未就绪，正在重连（1/2）…」后成功进入；');
+console.log('     若 NAS 真断线：约 2.4s 后明确报「网络目录未连接？稍候再点一次」；');
+console.log('     本地已删除目录：不重试、快速报错（行为与 R43 前一致）。');
+
+console.log('--- 第四十五轮：只读名单态自愈 —— 预热成功即退出 READONLY ---');
+check('R45 自愈入口：healRestoreMode（重探条目 URI，能开就退出只读态并补解当前张）',
+  /private healRestoreMode\(\): void \{/.test(INDEX) &&
+  /this\.restoreMode = RESTORE_FULL;/.test(INDEX) &&
+  /heal[\s\S]{0,500}this\.showPreviewOf\(this\.cur\);/.test(INDEX), true);
+check('R45 自愈只做一次最轻 sync 探测：fastProbe=true（单候选，不做多候选 openSync）',
+  /this\.probeRestoreUris\(uris, this\.okUri, this\.savedDirUri, true\)/.test(INDEX), true);
+check('R45 预热成功即自愈：warmRestoreDirQuiet 列得动目录后调 healRestoreMode',
+  /warm: network dir ready[\s\S]{0,200}this\.healRestoreMode\(\);/.test(INDEX), true);
+check('R45 快照恢复 / 单张兜底落只读态时同样后台预热自愈（两处 warmRestoreDirQuiet 调用）',
+  (INDEX.match(/this\.warmRestoreDirQuiet\(this\.browseBase\)\.catch/g) || []).length === 2, true);
+check('R45 自愈不硬闯：探不通维持 READONLY（真授权失效仍走「选择文件夹」重授权）',
+  /heal: item uris still unreadable, stay READONLY/.test(INDEX) &&
+  /probeRestoreUris\(uris, this\.okUri, this\.savedDirUri, true\);[\s\S]{0,120}if \(!readable\) \{/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R45：重启 App（NAS 冷启动）→ 若预览区只有档案名（只读名单态）→');
+console.log('     等约 1~3 秒应自动恢复：状态栏出现「网络目录已恢复连接」，当前张补解显示；');
+console.log('     翻页应正常出图。若 NAS 真断线：维持只读名单 + 指引卡（原设计）。');
+
+console.log('--- 第四十六轮：appfreeze THREAD_BLOCK_6S —— 目录轮询 mtime 探测异步化 ---');
+check('R46 根因修复：tryMtime 的 statSync（主线程同步跨进程 stat）已删除，改 tryMtimeAsync',
+  /private async tryMtimeAsync\(uri: string\): Promise<number> \{/.test(INDEX) &&
+  /fs\.statSync\(uri\)\.mtime/.test(INDEX) === false &&
+  /await Promise\.race\(\[\s*fs\.stat\(uri\),/.test(INDEX), true);
+check('R46 超时兜底：3s race 超时按「本轮没探到」（0）处理，复用 nasRetryWait 不新增 Promise 构造',
+  /const MTIME_STAT_TIMEOUT_MS: number = 3000;/.test(INDEX) &&
+  /this\.nasRetryWait\(MTIME_STAT_TIMEOUT_MS\)\.then\(\(\): number => 0\)/.test(INDEX) &&
+  ((INDEX + ARCHIVE + MODEL).match(/new Promise/g) || []).length === 2, true);
+check('R46 轮询不堆叠：mtimeBusy 重入保护（上一轮 stat 未回来跳过本轮，folderBusy/playing 让路语义不变）',
+  /private mtimeBusy: boolean = false;/.test(INDEX) &&
+  /this\.browseBase\.length === 0 \|\| this\.folderBusy \|\| this\.playing \|\| this\.mtimeBusy/.test(INDEX) &&
+  /private async pollMtimeOnce\(\): Promise<void> \{/.test(INDEX), true);
+check('R46 基准 mtime 异步取 + epoch 守卫：两处 openFolder 基准赋值不阻塞视图，被抢占的迟到结果丢弃',
+  (INDEX.match(/this\.tryMtimeAsync\(base\)\.then\(\(m0: number\) => \{/g) || []).length === 2 &&
+  /if \(myEpoch === this\.openEpoch && m0 > 0\) \{[\s\S]{0,60}this\.dirMtime = m0;/.test(INDEX), true);
+check('R46 变动检测语义零改动：mtime 变了仍去抖重扫（isRescan=true / 不弹多选 / 保位）',
+  /m > 0 && this\.dirMtime > 0 && m !== this\.dirMtime/.test(INDEX) &&
+  /this\.openFolder\(this\.browseBase, false, false, true\);/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R46：NAS 目录停留浏览 ≥10 分钟（含 NAS 休眠 / 断网瞬间）→ App 不应再出现');
+console.log('     appfreeze THREAD_BLOCK_6S；NAS 侧增删文件后列表仍约 1.5s+去抖自动刷新。');
+
+console.log('--- 第四十七轮：对开右页首开空白 —— 解码失败重试 ---');
+check('R47 右页解码失败不再留空了事：loadRightPage 失败分支按节奏补试（attempt 递增）',
+  /private loadRightPage\(uri: string, attempt: number = 0\): void \{/.test(INDEX) &&
+  /if \(e === undefined\) \{\s*\n\s*\/\/ 第四十七轮[\s\S]{0,900}this\.loadRightPage\(uri, attempt \+ 1\);/.test(INDEX), true);
+check('R47 重试节奏常量：RIGHT_PAGE_RETRY_DELAYS = [600, 1800]（与 NAS 重试同节奏，试完即止不无限重试）',
+  /const RIGHT_PAGE_RETRY_DELAYS: number\[\] = \[600, 1800\];/.test(INDEX) &&
+  /if \(attempt < RIGHT_PAGE_RETRY_DELAYS\.length\) \{/.test(INDEX), true);
+check('R47 重试可作废：token 校验（翻页 / 换对后旧重试 no-op）+ clearRightPage 清 pending 重试句柄',
+  /if \(token === this\.rightToken\) \{\s*\n\s*this\.loadRightPage\(uri, attempt \+ 1\);/.test(INDEX) &&
+  /clearTimeout\(this\.rightRetryTimer\);   \/\/ 第四十七轮：待重试的右页一并作废/.test(INDEX) &&
+  /private rightRetryTimer: number = -1;/.test(INDEX), true);
+check('R47 页面销毁清重试句柄（aboutToDisappear），成功路径与档位复用逻辑零改动',
+  /clearTimeout\(this\.rightRetryTimer\);   \/\/ 第四十七轮：页面销毁时 pending 的右页重试一并清掉/.test(INDEX) &&
+  /if \(hit !== undefined && shouldReuseDecoded\(hit\.edge, reuseNeed\)\) \{[\s\S]{0,120}this\.rightPixelMap = hit\.px;/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R47：首次打开一个含多张大 JPG 的目录（对开模式）→ 右页应在左页出来后');
+console.log('     最多约 0.6~2.4 秒内补上；翻页换对应正常；坏文件右页留空但左页与翻页不受影响。');
+
+console.log('--- 第四十八轮：右页空白可观测性 —— loadRightPage 全路径留痕 ---');
+check('R48 解码失败留痕：decode FAIL + retry in + give up 三段日志（区分失败 / 重试 / 放弃）',
+  /loadRightPage: decode FAIL attempt=%\{public\}d\/%\{public\}d uri=%\{public\}s/.test(INDEX) &&
+  /loadRightPage: retry in %\{public\}dms uri=%\{public\}s/.test(INDEX) &&
+  /loadRightPage: give up after %\{public\}d attempts uri=%\{public\}s/.test(INDEX), true);
+check('R48 token 竞态留痕：stale discard（解码成功但被翻页作废）与异常路径都进日志',
+  /loadRightPage: stale discard \(page turned\) uri=%\{public\}s/.test(INDEX) &&
+  /loadRightPage: decode threw \(exception\) uri=%\{public\}s/.test(INDEX) &&
+  /loadRightPage: decoded ok on retry %\{public\}d uri=%\{public\}s/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R48：复现右页空白时抓 hilog（grep HeicViewer），日志能直接区分：');
+console.log('     decode FAIL（真解码失败）/ stale discard（竞态丢弃）/ give up（重试耗尽）三种成因。');
+
+console.log('--- 第四十九轮：右页空白根因修复 —— 在途合并落点收口（解好先入缓存） ---');
+check('R49 decodeTo 在途任务解好先 pushPreview 入缓存再交消费者（所有权在交接点收口）',
+  /decodeInflight\.delete\(key\);[\s\S]{0,700}this\.pushPreview\(e\);[\s\S]{0,120}return e;/.test(INDEX), true);
+check('R49 根因链完整：stale 丢弃 → releaseUncachedEntry → 缓存查重跳过（合并条目不再被误释放）',
+  /loadRightPage: stale discard \(page turned\) uri=%\{public\}s/.test(INDEX) &&
+  /private releaseUncachedEntry\(e: PreviewEntry \| undefined\): void \{[\s\S]{0,300}if \(this\.previews\[i\]\.px === e\.px\) \{[\s\S]{0,80}return; \/\/ 缓存已接管：所有权归缓存，调用方不动/.test(INDEX), true);
+check('R49 pushPreview 幂等：同一张 px 只刷 LRU 位置，不重复入列不重复计字节（自动入缓存的前提）',
+  /private pushPreview\(e: PreviewEntry\): void \{[\s\S]{0,400}if \(this\.previews\[i\]\.px === e\.px\) \{[\s\S]{0,200}\/\/ 复用命中：只刷新 LRU 位置，不重复入列、不重复计字节。/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R49：重启 App → 首次打开大 JPG 目录（对开模式）→ 右页应正常显示；');
+console.log('     若仍空白，hilog 里 stale discard 行之后不再有右页空白（合并条目已归缓存所有）。');
+
+console.log('--- 第五十轮：重启恢复态不再自称「已恢复上次目录」 ---');
+check('R50 恢复态列表撤掉说明行伪条目，源码（去注释）不再出现「已恢复上次目录」字样',
+  stripComments(INDEX).includes('已恢复上次目录') === false, true);
+check('R50 恢复态计数改为 rows.length - 1（只剩 .. 不计入），状态栏按普通列表呈现',
+  /this\.dirHint = inAppUpListHint\(label, rows\.length - 1, UP_LIST_TAG\);/.test(INDEX) &&
+  /this\.status = '「' \+ label \+ '」· 本层没有图片 · ' \+/.test(INDEX) &&
+  /\(rows\.length - 1\) \+ ' 个条目（点名称重新真实列举）· '/.test(INDEX), true);
+check('R50 旧快照兼容：isUpListPseudoName 识别旧版「已恢复上次目录」说明行并过滤',
+  isUpListPseudoName('— 已恢复上次目录（APP 内）· uc1 —') === true &&
+  isUpListPseudoName('No.3022') === false, true);
+console.log('  ⚠️ 真机步骤 R50：重启 App → 恢复态列表不再有「— 已恢复上次目录 —」说明行，');
+console.log('     状态栏显示「目录名 · 本层没有图片 · N 个条目」；旧快照里的说明行也不会再出现。');
+
+console.log('--- 第五十一轮：文本预览常显滚动条 + 行段选择复制 ---');
+check('R51→R52 文本纵向滚动条：原生条在全宽 List 右缘（视口外）看不见 → 改自绘条，原生关掉',
+  /.scrollBar\(BarState\.Off\)  \/\/ 原生条在视口外看不见还占位，关掉只留自绘条/.test(INDEX), true);
+check('R51→R54 行段选择状态：textSelAnchor/textSelFocus（交互已改为按住拖选，见 R54）',
+  INDEX.includes('@State textSelAnchor: number = -1;') &&
+  INDEX.includes('@State textSelFocus: number = -1;') &&
+  INDEX.includes('private textSelDragging: boolean = false;'), true);
+check('R51 行高亮 + 抬头工具条：选中行背景、有选区时抬头换成选区信息 + 复制 / 清除按钮',
+  /\.backgroundColor\(this\.isTextRowSelected\(idx\) \? '#2a3550' : '#00000000'\)/.test(INDEX) &&
+  INDEX.includes('Text(this.textSelLabel())') &&
+  /Button\('复制'\)[\s\S]{0,500}this\.copyTextSelection\(\);/.test(INDEX) &&
+  /Button\('清除'\)[\s\S]{0,500}this\.clearTextSelection\(\);/.test(INDEX), true);
+check('R51 复制走系统剪贴板（pasteboard）+ Ctrl+C 同效 + 关文件 / 开新文件清选区',
+  INDEX.includes("import pasteboard from '@ohos.pasteboard';") &&
+  INDEX.includes('pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, parts.join(\'\\n\'))') &&
+  /this\.ctrlDown && code === KeyCode\.KEYCODE_C && this\.textMode && this\.textSelAnchor >= 0/.test(INDEX) &&
+  /private closeTextMode\(\): void \{[\s\S]{0,400}this\.clearTextSelection\(\);[\s\S]{0,80}\}/.test(INDEX) &&
+  /private async openTextFile[\s\S]{0,900}this\.clearTextSelection\(\);/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R51：打开 .log/.txt → 右侧应常显纵向滚动条；点一条行亮起，');
+console.log('     再点另一条成段（高亮范围），抬头出现「复制 / 清除」，复制后到别处粘贴验证内容完整；');
+console.log('     Ctrl+C 同效；关闭文本预览再打开选区应已清除。');
+
+console.log('--- 第五十二轮：文本纵向滚动条自绘（原生条画在全宽 List 右缘，视口外看不见） ---');
+check('R52 自绘条状态与几何：textVpH / textFirstRow / textLastRow + 滑块高 / 位置比例计算',
+  INDEX.includes('@State textVpH: number = 0;') &&
+  INDEX.includes('@State textFirstRow: number = 0;') &&
+  INDEX.includes('@State textLastRow: number = 0;') &&
+  INDEX.includes('private textVBarThumbH(): number {') &&
+  INDEX.includes('private textVBarTopPos(): number {') &&
+  /let h: number = this\.textVpH \* vRows \/ total;/.test(INDEX) &&
+  /const frac: number = this\.textFirstRow \/ denom;/.test(INDEX), true);
+check('R52→R53 Stack TopEnd 叠放：横向 Scroll 视口右缘叠自绘轨道 + 滑块，不随横向滚动移动',
+  /Stack\(\{ alignContent: Alignment\.TopEnd \}\) \{[\s\S]{0,400}Scroll\(this\.textHScroller\)/.test(INDEX) &&
+  /Column\(\)[\s\S]{0,200}\.width\(6\)[\s\S]{0,120}\.height\(this\.textVBarThumbH\(\)\)/.test(INDEX) &&
+  /\.margin\(\{ top: this\.textVBarTopPos\(\) \}\)/.test(INDEX) &&
+  INDEX.includes(".scrollBar(BarState.Off)  // 原生条在视口外看不见还占位，关掉只留自绘条"), true);
+check('R52 数据回填：List onScrollIndex 回填首行 / 视口高 onAreaChange 回填，开新文件重置',
+  /\.onScrollIndex\(\(first: number, last: number, center: number\) => \{[\s\S]{0,120}this\.textFirstRow = first;/.test(INDEX) &&
+  /onAreaChange\(\(_o: Area, n: Area\) => \{[\s\S]{0,80}this\.textVpH = Number\(n\.height\);/.test(INDEX) &&
+  /this\.textScroller\.scrollToIndex\(0, false\);[\s\S]{0,200}this\.textFirstRow = 0;/.test(INDEX), true);
+check('R52 拖滑块换算 scrollToIndex + Transparent 不挡行点击（选段不受滚动条影响）',
+  /PanGesture\(\{ fingers: 1 \}\)[\s\S]{0,200}this\.textVBarDragTop = this\.textVBarTopPos\(\);/.test(INDEX) &&
+  /onActionUpdate\(\(e: GestureEvent\) => \{[\s\S]{0,160}this\.textVBarDragTo\(this\.textVBarDragTop \+ e\.offsetY\);/.test(INDEX) &&
+  /this\.textScroller\.scrollToIndex\(idx, false\);/.test(INDEX) &&
+  INDEX.includes('.hitTestBehavior(HitTestMode.Transparent)'), true);
+console.log('  ⚠️ 真机步骤 R52：打开长 .log（行超一屏且行宽超视口）→ 视口右缘应有纵向滚动条，');
+console.log('     滚轮 / 拖滑块都应联动（滑块随滚动移动、拖滑块滚动正文），横向滚动时条不跟着走；');
+console.log('     短文件（不满一屏）不应有滚动条；滑块区域点击应仍能选中行。');
+
+console.log('--- 第五十三轮：R52 自绘条真机不显示 —— if 条件全直读 + 兜底回填 + 加粗加亮 ---');
+check('R53 if 条件全直读 @State（方法调用藏在条件里 V1 可能不重评 if 分支）',
+  /if \(this\.textVpH > 0 && this\.textLines\.length > Math\.round\(this\.textVpH \/ TEXT_ROW_H_VP\)\)/.test(INDEX) &&
+  /if \(this\.textVBarThumbH\(\) > 0\)/.test(INDEX) === false, true);
+check('R53 onAreaChange / onScrollIndex 兜底回填 textVpH（防个别路径不触发 onAreaChange）',
+  /onAreaChange\(\(_o: Area, n: Area\) => \{[\s\S]{0,120}this\.textVpH = Number\(n\.height\);/.test(INDEX) &&
+  /if \(this\.textVpH <= 0 && last > first\) \{[\s\S]{0,160}this\.textVpH = \(last - first \+ 1\) \* TEXT_ROW_H_VP;/.test(INDEX), true);
+check('R53 加粗加亮：滑块 6 宽亮色 + 轨道 10 宽深色底 + 滑块最小高 32',
+  /Column\(\)[\s\S]{0,80}\.width\(6\)[\s\S]{0,120}\.backgroundColor\('#96a3c2'\)/.test(INDEX) &&
+  /\.backgroundColor\('#232b38'\)/.test(INDEX) &&
+  /if \(h < 32\) \{/.test(INDEX), true);
+check('R53 诊断留痕：textVpH 回填与兜底都有 hilog（再不显示可直接抓日志定位哪个数是 0）',
+  /'text area h=%\{public\}d rows=%\{public\}d'/.test(INDEX) &&
+  /'text vpH fallback=%\{public\}d'/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R53：装新包 → 打开长 .log → 视口右缘应有明显的滚动条（亮色滑块 + 深色轨道）；');
+console.log('     若仍不见：终端跑 hilog | grep --line-buffered HeicViewer，重进一次文本预览，');
+console.log('     把「text area h=…」行发我（h=0 说明 onAreaChange 没回填，走了兜底会有 fallback=… 行）。');
+
+console.log('--- 第五十四轮：选段改为按住左键拖选（hold → 拖动实时扩展 → release 定段） ---');
+check('R54 onMouse 挂 List 统一收口：Press 定起点 / Move 实时扩展 / Release 定终点，只认左键',
+  /private onTextMouse\(event: MouseEvent\): void \{[\s\S]{0,600}MouseAction\.Press[\s\S]{0,200}MouseButton\.Left[\s\S]{0,300}this\.textSelAnchor = this\.textRowAt\(Number\(event\.y\)\);/.test(INDEX) &&
+  /MouseAction\.Move && this\.textSelDragging[\s\S]{0,120}this\.textSelFocus = this\.textRowAt\(Number\(event\.y\)\);/.test(INDEX) &&
+  /MouseAction\.Release && this\.textSelDragging[\s\S]{0,160}this\.textSelDragging = false;/.test(INDEX) &&
+  /\.onMouse\(\(event: MouseEvent\) => \{\s*this\.onTextMouse\(event\);\s*\}\)/.test(INDEX), true);
+check('R54 行号换算：滚动偏移 + 列表内 y → 行号，并夹取到可见范围（不越界选到文档头尾）',
+  /const off: number = Number\(this\.textScroller\.currentOffset\(\)\.yOffset \?\? 0\);/.test(INDEX) &&
+  /let row: number = Math\.floor\(\(off \+ y\) \/ TEXT_ROW_H_VP\);/.test(INDEX) &&
+  /const last: number = Math\.min\(total - 1, first \+ vRows - 1\);/.test(INDEX) &&
+  /if \(row > last\) \{\s*row = last;/.test(INDEX), true);
+check('R54 行级 onClick 移除（旧两次点击定界退役），清除按钮 / Ctrl+C / 关闭自动清选区保留',
+  /this\.onTextRowTap\(idx\);/.test(INDEX) === false &&
+  INDEX.includes('this.clearTextSelection();') &&
+  /this\.ctrlDown && code === KeyCode\.KEYCODE_C && this\.textMode && this\.textSelAnchor >= 0/.test(INDEX) &&
+  /clearTextSelection\(\): void \{[\s\S]{0,140}this\.textSelDragging = false;/.test(INDEX), true);
+console.log('  ⚠️ 真机步骤 R54：打开 .log → 按住左键从某行拖到另一行松开 → 应成段高亮 + 抬头出现复制/清除；');
+console.log('     按住期间滚轮滚动应能跨屏扩展选段；右键 / 中键不碰选区；「清除」按钮和 Ctrl+C 仍可用。');
+
+console.log('--- 第五十五轮：预览区常显角标取消（左上档案名浮层 + 右下缩放百分比方块） ---');
+check('R55 左上角信息浮层整体取消：档案名 / 大小 / 色彩三行都不再渲染，spreadNames 一并移除',
+  /Text\(this\.spreadNames\(\)\)/.test(INDEX) === false &&
+  /private spreadNames\(\): string \{/.test(INDEX) === false &&
+  /extOf\(this\.curName\(\)\) \+ ' · ' \+ fmtBytes/.test(INDEX) === false &&
+  /viewHintOf\(colorSpaceNameOf/.test(INDEX) === false, true);
+check('R55 全屏退出提示保留（唯一指引，仅全屏出现，样式带底色圆角）',
+  /if \(this\.fullscreen\) \{\s*Row\(\) \{\s*Text\('全屏 · Esc \/ F11 \/ 双击退出'\)/.test(INDEX) &&
+  INDEX.includes("Text('全屏 · Esc / F11 / 双击退出')"), true);
+check('R55 右下角百分比方块取消：无常显分支，缩放百分比只在诊断层（Ctrl+D）角标里出现',
+  /Text\(this\.zoomPercentText\(\)\)/.test(INDEX) === false &&
+  /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R55';/.test(INDEX), true);
+check('R55 诊断层入口与内容不变：Ctrl+D 切换、退出 APP 按钮、全字段角标、diagLine 赋值链全保留',
+  INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_D) {') &&
+  /Text\('退出 APP'\)/.test(INDEX) &&
+  (INDEX.match(/this\.diagLine =/g) || []).length >= 10 &&
+  /if \(SHOW_DIAG_BADGE && this\.diagLine\.length > 0\)/.test(INDEX), true);
+check('R55 死代码清干净：viewHintOf / colorSpaceNameOf / fmtBytes 不再被 Index 引用（定义仍在 common/ArchiveRow）',
+  /viewHintOf/.test(INDEX) === false &&
+  /colorSpaceNameOf/.test(INDEX) === false &&
+  /fmtBytes/.test(INDEX) === false, true);
+console.log('  ⚠️ 真机步骤 R55：打开图片 → 左上角无档案名浮层、右下角无百分比方块；');
+console.log('     Ctrl+D 诊断层仍可展开（含退出 APP + 全字段角标）；全屏时左上角仅一行退出提示。');
+
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
 console.log('  ⚠️ 真机步骤 A：装 R38 包 → 选 /storage/Users/currentUser 或从深层反复点「往上层」到 L0；');
 console.log('     该层应真实列出 Download / Desktop / Documents / WorkBuddy 等全部顶层资料夹，可点名称进入。');

@@ -799,6 +799,11 @@ export function isUpListPseudoName(name: string): boolean {
   if (s.indexOf('上层清单') >= 0 && s.indexOf('APP 内') >= 0) {
     return true;
   }
+  // 说明行：'— 已恢复上次目录（APP 内）· uc1 —'（第五十轮起不再生成，
+  // 但旧版本存进快照 / 偏好里的这条伪目录行仍要过滤，不能漏进清单）
+  if (s.indexOf('已恢复上次目录') >= 0 && s.indexOf('APP 内') >= 0) {
+    return true;
+  }
   return false;
 }
 

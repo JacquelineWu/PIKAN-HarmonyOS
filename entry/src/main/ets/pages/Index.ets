@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R55 组件化主线
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -50,9 +50,9 @@ import image from '@ohos.multimedia.image';
 import abilityAccessCtrl from '@ohos.abilityAccessCtrl';
 import dataSharePredicates from '@ohos.data.dataSharePredicates';
 import preferences from '@ohos.data.preferences';
+import pasteboard from '@ohos.pasteboard';  // 第五十一轮：文本态行段选择后复制到系统剪贴板
 import window from '@ohos.window';
 import display from '@ohos.display';
-import colorSpaceManager from '@ohos.graphics.colorSpaceManager';
 import util from '@ohos.util';
 import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
@@ -74,7 +74,6 @@ import { upFullExploreWanted, upExploreFormsOf, upExploreCapOf,
   upExploreNeedFallback } from '../common/DirName';
 // 第三十八轮：用户主目录（用户卷根）重新可选择 / 可真实列举。
 import { rootReenterWantedOf, rootReenterFormsOf } from '../common/DirName';
-import { HoverGuard } from '../common/HoverGuard';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
   shouldResetPreloadChain, fullCacheTargetOf,
@@ -88,18 +87,16 @@ import { DIR_RESUME_CONTEXT, DIRCTX_EMPTY,
   dirContextFlagOf, dirContextSaveWanted, dirOnlyResumeWanted } from '../common/ResumePlan';
 import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
-import { ExifTransform, Size2, exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf,
+import { Size2, viewEdgeOf, preloadEdgeOf,
   displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
-  colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf } from '../common/ViewPlan';
+  isWideGamutOf, fullscreenStepsOf } from '../common/ViewPlan';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
   packWindowRect, parseWindowRect, windowRectUsable,
   shouldSaveWindowRect, collapsedOf, windowModeFlagOf,
   shouldRestoreMaximized, shouldScheduleWindowRestore } from '../common/SessionState';
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../common/DecodeCache';
-import { RawFit, rawFitOf, rawSingleAllowed, rawReadComplete,
-  rawCacheTargetOf, rawPrefetchWanted,
-  rawIoTimeoutMs, rawDenyAfterFailure } from '../common/RawCache';
+import { rawPrefetchWanted } from '../common/RawCache';
 import { ENTER_ABORT, ENTER_TIMEOUT_MIN_MS, ENTER_TIMEOUT_MAX_MS,
   enterTimeoutSafe, enterWatchdogWanted, enterSettledOk,
   enterTimeoutAction, enterTimeoutHint } from '../common/RestoreTimeout';
@@ -137,9 +134,18 @@ import { LANG_NONE, textLangOf, isTextFileName,
   TEXT_CONTENT_MAX_VP, textReadCapOf, textByteTruncatedOf, splitTextLines,
   lineNoWidthOf, textStatusOf, textContentWidthOf, TextToken, TextSplit,
   tokenColorOf, tokenizeLine, blockStartsOf } from '../common/TextDoc';
+// R39（Index.ets 拆分 Phase 1）：左栏行组件与解码服务迁出本文件 ——
+//   · components/ArchiveRow.ets：ArchiveRow 行组件 + ThumbLoader 悬停缩略图 + ROW_* 行种类
+//   · model/Preview.ets：PreviewEntry / RawStore / decodePx 解码链 + hilog TAG/DOMAIN
+// 本文件只保留页面接线与业务逻辑，依赖方向单向（pages → components/model → common）。
+import { ArchiveRow, ROW_IMAGE, ROW_UP, ROW_FOLDER, ROW_OTHER, ROW_TEXT } from '../components/ArchiveRow';
+import { PreviewEntry, decodePx, rawStore, RAW_CACHE_MAX_COUNT, TAG, DOMAIN } from '../model/Preview';
+// R40（Index.ets 拆分 Phase 3）：左栏迁出为独立组件；ImageItem / GalleryDataSource
+// 一并迁至 model/GalleryData.ets（SidebarView 也要用，留在本文件会循环 import）。
+import { SidebarView } from '../components/SidebarView';
+import { ToolButton } from '../components/ToolButton';
+import { ImageItem, GalleryDataSource } from '../model/GalleryData';
 
-const TAG = 'HeicViewer';
-const DOMAIN = 0x0000;
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
  *  进出全屏后用 focusControl.requestFocus(ROOT_FOCUS_ID) 把焦点抢回来。 */
@@ -148,7 +154,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R38';
+const ESC_BUILD_TAG: string = 'R55';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -199,6 +205,9 @@ const UP_LIST_TAG: string = 'ul1';
 /** 启动激活持久授权最多等多久（ms）。activatePermission 是跨进程调用，
  *  必须有超时兜底，否则系统服务挂住时恢复链永远不往下走、界面停在空态。 */
 const PERSIST_ACTIVATE_MS: number = 1500;
+/** 第四十四轮：NAS / 网络目录重启后首次访问可能 13900002（挂载 / 授权未就绪）。
+ *  列举全败且末次错误是 ENOENT 时按此节奏重试（毫秒），重试前静默重推持久授权。 */
+const NAS_RETRY_DELAYS: number[] = [600, 1800];
 /** 上面这个超时的硬上限：防止以后有人把它调成几十秒，变相把恢复拖回启动关键路径。 */
 const PERSIST_TIMEOUT_MAX_MS: number = 3000;
 /** 「启动恢复进入上次目录」的总预算（ms）。从排程恢复那一刻起算：
@@ -239,6 +248,15 @@ const SPREAD_PORTRAIT: boolean = true;
  *  没法挂 inotify 式的文件系统监听，只能退化为「定时比对目录 mtime」；
  *  检测到变化后去抖重扫，并保持当前张不闪（Win64 2bcbbb1 的变形实现）。 */
 const DIR_POLL_MS: number = 1500;
+/** 第四十六轮：mtime 探测的异步 stat 超时（毫秒）。NAS 中途掉线 / 休眠时一次
+ *  stat 能挂很久 —— 异步化后用 race 兜底，超时按「本轮没探到」处理，绝不冻结 UI。 */
+const MTIME_STAT_TIMEOUT_MS: number = 3000;
+/** 第四十七轮：对开右页解码失败的重试节奏（毫秒）。大 JPG 目录**首次**打开时，
+ *  右页解码与预载链并发争内存，可能一次性失败（OOM）/ IO 超时；旧版直接留空且
+ *  uri 进 failed 黑名单 → 右页整个会话空白（右页刻意不做 uri 兜底，无任何自救）。
+ *  这里按节奏补试：通常第一次重试就能命中预载链刚解好的缓存（decodeTo 复用路径，
+ *  零解码）；真解不开的坏文件快速失败两次后放弃，不无限重试。 */
+const RIGHT_PAGE_RETRY_DELAYS: number[] = [600, 1800];
 const DIR_RESCAN_DEBOUNCE_MS: number = 900;
 
 /** 全屏时顶栏自动隐藏（Win64 4666 / 4670）：鼠标压到窗口最上面 TOPBAR_EDGE_PX 个像素
@@ -287,7 +305,6 @@ const LOUPE_RESAMPLE_MIN_GAIN: number = 96;
  *  收起态仍固定 LIST_COLLAPSED_W（只留档案名一列），保持原有交互不变。 */
 const LIST_W: number = 280;
 const LIST_MAX_W: number = 900;
-const LIST_COLLAPSED_W: number = 224;
 const SPLIT_W: number = 14;
 
 const MIN_SCALE: number = 0.05;
@@ -388,32 +405,6 @@ const PRELOAD_ALL_CAP: number = 20000;
 const PRELOAD_CONCURRENCY: number = 4;
 /** 全量预载每批之间让出主线程的间隔（ms）。0 = 尽快但不堆叠在途异步 IO。 */
 const PRELOAD_ALL_YIELD_MS: number = 0;
-// ---- 第八轮（2026-11-12）：原始档案数据（未解码 bytes）的内存缓存 ----
-/** 用户要求「档案数据完全载入内存同时解码」：载入链把每个图片文件的完整 bytes 读进
- *  RawStore（ArrayBuffer LRU），decodePx 直接 image.createImageSource(ArrayBuffer) 解码。
- *  NAS / 网络目录不再为每张图各做一次 openSync + codec 逐段读文件，重解全清 / 全屏放大
- *  也不必再回网络读一遍。
- *
- *  ⚠️ 与解码后 PixelMap 缓存（PRELOAD_MAX_BYTES=1GB）**分开计账**：两者相加是进程峰值，
- *     默认 768MB + 1GB ≈ 1.75GB。这是「尽力全量」的防 OOM 硬闸，不是容量承诺 ——
- *     触顶即按 LRU 淘汰最久没用的原始 bytes（那些图早已解码成 PixelMap，不需要原文件）。
- *     内存吃紧的机器把这里调回 256MB；想让超大图库更彻底地常驻内存可上调到 1GB。 */
-const RAW_CACHE_MAX_BYTES: number = 768 * 1024 * 1024;
-/** 单张原始档案数据的上限：超过就不进内存缓存，避免一张 4K RAW 把预算吃光。
- *  超大的仍走 decodePx 的 fd 兜底路径，功能完全不受影响。0 = 不限制单文件。 */
-const RAW_SINGLE_MAX_BYTES: number = 64 * 1024 * 1024;
-/** 原始档案数据缓存的张数上限（与 PRELOAD_ALL_CAP 同量级）。 */
-const RAW_CACHE_MAX_COUNT: number = 20000;
-// ---- 第二十七轮（2026-11-16）：NAS 路径 THREAD_BLOCK_6S 的异步 IO 超时 ----
-/** 单次原始档案读取的超时基线（ms）：覆盖 open / close 的跨进程固定开销。 */
-const RAW_IO_BASE_MS: number = 400;
-/** 每 MB 追加的超时（ms）：NAS 上的大文件给更宽容的窗口，避免误杀。 */
-const RAW_IO_PER_MB_MS: number = 120;
-/** 硬上限（ms）：死 NAS 路径上 fs.read 的 Promise 可能永不 settle，
- *  没有上限就会让 inflight / allActive 永久挂住，整条预载链假死。
- *  ⚠️ 只有把同步 IO 改成真异步之后，应用才**有可能**自己设这个上限 ——
- *     同步 IO 的超时由平台决定、应用无法缩短（见 FailFast.ts 的边界声明）。 */
-const RAW_IO_CAP_MS: number = 8000;
 /** 主视图解码：长边 = 画布长边 × 该系数，并夹在 [VIEW_EDGE_MIN, VIEW_EDGE_MAX] 内。
  *  系数取 1.5 而不是 2（Win64 版实测）：×2 时一张大图能解到 1.5 秒，
  *  而屏幕实际只需要约 1.0 倍像素 —— 多出来的既不显示又拖慢切图。 */
@@ -429,21 +420,6 @@ const FULLSCREEN_VIEW_EDGE_FACTOR: number = 2.0;
 /** 全屏时预载档位上限：普通态封顶 1536，全屏大画布放宽到 2560，
  *  避免前后 100 张仍是旧的小档位。字节预算 PRELOAD_MAX_BYTES 仍是最终闸门。 */
 const FULLSCREEN_PRELOAD_MAX_EDGE: number = 2560;
-/** 色彩管理：0 = 保留源色彩空间（系统 codec 识别内嵌 ICC，原样交给渲染合成，默认）；
- *  1 = 解码时统一转换到 sRGB（兼容不支持广色域的显示器，颜色最稳）；
- *  2 = 转换到 Display P3（广色域优先，sRGB 屏可能偏色）。
- *  ⚠️ HarmonyOS 26 的 colorSpaceManager 只有 create(ColorSpace) / create(primaries,gamma)，
- *     **没有「从 ICC profile 字节流构造 ColorSpaceManager」的 API**，做不了完整 ICC CMS；
- *     这里做的是识别内嵌 ICC 映射到的标准空间 + 可选的标准空间转换。 */
-const COLOR_MANAGE_MODE: number = 0;
-/** 是否按 EXIF Orientation 自动摆正（含镜像）。
- *  若某机型系统 codec 已经自动摆正，实机会看到多转一次 —— 把本开关改 false 即可。 */
-const EXIF_AUTO_ROTATE: boolean = true;
-/** EXIF 旋转放在解码阶段（rotate 选项，少一次重采样、画质最好）。
- *  若某机型 codec 报「rotate 与 desiredSize 不能同时用」，改 false 走 PixelMap.rotate()。 */
-const EXIF_ROTATE_AT_DECODE: boolean = true;
-/** 是否让系统按图片格式自动选 HDR / SDR 解码（平台不支持 HDR 时 SDK 会自动降级 SDR）。 */
-const HDR_AUTO_DECODE: boolean = true;
 /** 全屏时是否仍画应用内的顶栏浮层 / 退出按钮。
  *  2026-11-11 用户要求「真正全屏、不会有标题列」→ false，全屏画面只剩图片；
  *  退出用 Esc / F11 / 双击画布，左上角信息浮层会写一行提示。 */
@@ -522,18 +498,6 @@ const WHEEL_NOTCH_MS: number = 60;
 const WHEEL_PAN_GUARD_MS: number = 300;
 /** @deprecated 见 WHEEL_NOTCH_MS 上方注释：滚轮翻页已去掉定时节流。 */
 
-/** 左侧档案列表中的一项。
- *  对齐 Win64 的双集合设计：`items` 是纯图片翻页序列，`rows` 是左栏显示行
- *  （可能多出「..」、子文件夹、不支持预览的文件），靠 itemIndex 单向挂钩。 */
-interface ImageItem {
-  uri: string;   // 文件 / 图库 URI（可直接喂给 Image 组件）
-  name: string;  // 显示文件名（已做乱码修复，仅显示用）
-  size: number;  // 字节数（未知为 -1）
-  mtime?: number;      // 修改时间（ms），左栏「日期」列用
-  kind?: number;       // 0=图片 1=上级「..」 2=子文件夹 3=不支持预览的文件 4=可预览文本/源码
-  itemIndex?: number;  // 图片行对应 items 的下标；非图片行 = -1
-}
-
 /** 第二十九轮：会话内「某一层目录的真实清单快照」。
  *  只在 openFolder 真的 fs.listFile 成功、并且用本次真实 names 建好 rows 之后记录，
  *  **绝不**拿 this.rows（可能是上一屏 APP 内伪清单）来建。
@@ -548,36 +512,18 @@ interface UpDirSnapshot {
 }
 const UP_DIR_CACHE_MAX: number = 24;
 
-/** 左栏行种类 */
-const ROW_IMAGE: number = 0;
-const ROW_UP: number = 1;
-const ROW_FOLDER: number = 2;
-const ROW_OTHER: number = 3;
-/** 第三十七轮：可预览的纯文本 / 源码文件行。只进左栏 rows，
- *  **绝不进 items**（图片翻页序列）—— 否则解码 / 预载链会把 .c 当图片解。 */
-const ROW_TEXT: number = 4;
-
-/** 「梅花间竹」交替色格子（2026-11-11 用户要求）：档案列表奇偶行两种底色，
- *  形成一格一格的棋盘条纹；选中行用独立高亮色，优先级最高（见 ArchiveRow.rowBgColor）。
- *  两行之间的垂直缝按「继续压缩到约 1mm」取 1vp —— ArkUI 只有 vp / px，没有 mm 单位，
- *  1vp 在 2in1 高密度屏上就是极细的一线缝；实机觉得宽/窄只改 LIST_ROW_GAP_VP 一个常量即可。 */
-const ROW_STRIPE_EVEN: string = '#1e242e';
-const ROW_STRIPE_ODD: string = '#161a21';
-const ROW_SELECTED_BG: string = '#1f2730';
-const LIST_ROW_GAP_VP: number = 1;
-
-/** 解码结果：uri + 已解码的 PixelMap + 显示宽高 + 解码档位 + 色彩/HDR/EXIF 元数据 */
-interface PreviewEntry {
-  uri: string;
-  px: image.PixelMap;
-  bytes: number;
-  w: number;    // 按 EXIF 摆正后的显示宽（用于 1:1 与信息栏，非 PixelMap 宽）
-  h: number;    // 按 EXIF 摆正后的显示高
-  edge: number; // 解码时的长边档位 —— 用来判断「这张够不够直接上主视图」
-  colorSpace: number; // 系统 codec 识别出的内嵌色彩空间（colorSpaceManager.ColorSpace 数值）
-  isHdr: boolean;     // 源图是否 HDR（ImageInfo.isHdr）
-  exifDegrees: number;// 本张按 EXIF 摆正的角度（0/90/180/270）
+/** 第四十二轮：目录整表缓存条目 —— 网盘 / NAS 列目录慢（listFile + 逐条 statSync
+ *  全走网络），重进同一目录时先用上次真实列举的整表 rows **立即渲染**，真实列举
+ *  继续在后台跑，完成后按需刷新：条目没变就完全不动视图，变了才按 uri 保位替换。
+ *  只存内存（LRU，上限 DIR_ROWS_CACHE_MAX），不落盘 —— 跨重启的「秒开」由
+ *  第三十六轮的目录上下文恢复（POS_KEY_UPCACHE）负责，两者互不替代。 */
+interface DirRowsCacheEntry {
+  path: string;       // 真实列举成功时解析出的 base（子项 URI 的拼接基准）
+  label: string;      // 左栏抬头 / 状态栏用的目录显示名（dirDisplayName 的结果）
+  rows: Array<ImageItem>;  // 上次真实列举的完整左栏行（含「..」行与图片 itemIndex）
+  at: number;         // 写入时刻（调试 / 淘汰参考）
 }
+const DIR_ROWS_CACHE_MAX: number = 12;
 
 /** 受支持的图片后缀 */
 const IMAGE_SUFFIXES: Array<string> = ['.heic', '.heif', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'];
@@ -632,19 +578,6 @@ function clamp(v: number, lo: number, hi: number): number {
   return v;
 }
 
-function fmtBytes(n: number): string {
-  if (n <= 0) {
-    return '--';
-  }
-  if (n < 1024) {
-    return n + ' B';
-  }
-  if (n < 1024 * 1024) {
-    return (n / 1024).toFixed(1) + ' KB';
-  }
-  return (n / 1024 / 1024).toFixed(2) + ' MB';
-}
-
 /* baseName / dirDisplayName / stripTrailingSlash 统一放在 common/DirName.ts。
  * 旧 baseName 遇到「带尾部斜杠的目录 URI」会返回空串，让左栏抬头整条空白；
  * 抽成不依赖 SDK 的纯函数后，也能用 tests/dirname.test.mjs 直接跑回归。 */
@@ -690,6 +623,15 @@ function dirCandidates(raw: string): string[] {
     add(hierPathOf(raw));
   }
   return out;
+}
+
+/** 第四十四轮：URI 是否「网络目录」形态（NAS scheme 授权形 / userExternal 挂载形 / UNC）。
+ *  只有网络目录才做 13900002 重连重试 —— 本地目录 ENOENT 是真删了，快速失败；
+ *  file://docs/ 与 file://media/ 是本机 provider，不算网络目录。 */
+function isNetworkDirUri(u: string): boolean {
+  return (u.indexOf('://') >= 0 && u.indexOf('file://docs/') !== 0 && u.indexOf('file://media/') !== 0)
+    || u.indexOf('/storage/userExternal/') >= 0
+    || u.indexOf('\\\\') >= 0;
 }
 
 /** 取扩展名（大写），无扩展名返回 RAW */
@@ -856,45 +798,6 @@ function ellipsizeMiddle(s: string, max: number): string {
  *  substring(0, i) 得到的还是自己 —— 这就是「往上层」原地不动的根因。
  *  本文件不再保留任何浏览历史栈，层级判断只读 browseBase 这个当前路径真值。 */
 
-/** 时间戳 → 'YY-MM-DD HH:mm'，用于左栏「日期」列（Win64 三栏档案列表）。 */
-function fmtDate(ms: number): string {
-  if (ms <= 0) {
-    return '--';
-  }
-  const d: Date = new Date(ms);
-  const p = (v: number): string => (v < 10 ? '0' + v : '' + v);
-  return (d.getFullYear() % 100).toString().padStart(2, '0') + '-' + p(d.getMonth() + 1) + '-' +
-    p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-}
-
-
-// --------------------------------------------------------------------
-// 缩略图基础设施
-//
-// 为什么必须有它（这是「图片一多就崩」的主因）：
-//   左侧档案列表原本是 Image(item.uri) —— 组件会按**原图分辨率**解码。
-//   一张 4000×3000 的照片解码后是 4000×3000×4 ≈ 48MB；列表里有几十个
-//   可见/缓存项时就是好几个 GB，必然 OOM 崩溃。
-//
-//   所以这里统一先解出「小图 PixelMap」再交给 Image 显示：384px 长边时
-//   单张约 600KB，24 张 LRU 也不过 15MB —— 比解一张原图还小。
-//
-//   2026-11-09：左栏不再常驻缩略图（用户要求「要 mouse over 才显示」）。
-//   现在整套缩略图只在鼠标悬停某行时才解码，滚动列表时一张都不解，
-//   既省内存也省 CPU，大图库滚动更跟手。
-// --------------------------------------------------------------------
-
-/** 悬停缩略图（Win64 51 行）：220 DIP 浮层，用 384px 档解码，
- *  自己的 24 张 LRU、同时只解一个，不挤占主预载缓存。 */
-const HOVER_EDGE: number = 384;
-const HOVER_MAX_COUNT: number = 24;
-/** 第十一轮：悬停小图预览「零延迟、零动画」—— 不再有关闭去抖常量 / 关闭计时器。
- *  onHover(true) 同步展开、onHover(false) 同步收起；popup 的显隐动效由
- *  bindPopup 的 transition: TransitionEffect.IDENTITY 关掉（见下方选项说明）。
- *  闪烁真正的根因仍是 bindPopup 默认的 mask / autoCancel，两项保持关闭。 */
-/** 待处理队列上限。快速滑动列表会堆积大量「已划走」的请求，超了就丢最旧的，
- *  否则一次甩动可能排进上千个任务 */
-const THUMB_QUEUE_MAX: number = 240;
 
 /** 后台补体积时：每批处理条数 + 批间让出时间（ms）。
  *  不能在主线程里对几百个文件逐个 statSync —— 那会卡死 UI 直到 ANR */
@@ -1036,783 +939,6 @@ interface LastPos {
   src: string;    // 当时的图片来源
 }
 
-/** 一个缩略图请求任务 */
-interface ThumbTask {
-  uri: string;
-  alive: () => boolean;                          // 请求方还活着吗（离屏的行会被跳过）
-  cb: (p: image.PixelMap | undefined) => void;
-}
-
-/** EXIF 变换缓存：同一张图在预载 / 主视图 / 悬停缩略图之间只读一次元数据。
- *  getImageProperty 是跨进程调用，201 张窗口里逐张读会明显拖慢预载链。 */
-const EXIF_CACHE: Map<string, ExifTransform> = new Map();
-const EXIF_CACHE_MAX: number = 512;
-
-async function readExifTransform(src: image.ImageSource, uri: string): Promise<ExifTransform> {
-  const cached: ExifTransform | undefined = EXIF_CACHE.get(uri);
-  if (cached !== undefined) {
-    return cached;
-  }
-  let t: ExifTransform = { degrees: 0, flipH: false, flipV: false };
-  try {
-    // 没有 EXIF / 该格式不支持时 SDK 会抛；一律当成「不旋转」，绝不因此丢掉整张图。
-    const raw: string = await src.getImageProperty(image.PropertyKey.ORIENTATION);
-    t = exifTransformOf(raw);
-  } catch (e) {
-    // 元数据读取失败不影响解码主流程
-  }
-  if (EXIF_CACHE.size >= EXIF_CACHE_MAX) {
-    EXIF_CACHE.clear();
-  }
-  EXIF_CACHE.set(uri, t);
-  return t;
-}
-
-// --------------------------------------------------------------------
-// 原始档案数据（未解码 bytes）的内存缓存（2026-11-12 第八轮）
-//
-// 用户要求：「档案数据完全载入内存同时解码以提高图片档案载入速度」。
-// 载入链 pumpAll 每批先把这一批文件的完整 bytes 读进这里，decodePx 再直接从
-// ArrayBuffer 建 ImageSource —— NAS / 网络目录只读一次，解码、重解全清、全屏放大
-// 都不必再跨网络读一遍原文件。
-//
-// 三条硬约束（沿用历史 appfreeze 教训）：
-//  · 受控并发：调用方 pumpAll 一批最多 PRELOAD_CONCURRENCY 路，绝不堆叠同步 IO；
-//  · 在途合并：同一 uri 并发请求共用一个 Promise，绝不重复读同一文件；
-//  · 防 OOM：LRU + rawFitOf 张数/字节预算；读不到 / 超预算时 decodePx 自动降级回 fd，
-//    功能绝不因缓存未命中而受损。
-// 第二十七轮（2026-11-16 NAS THREAD_BLOCK_6S）：read() 改为**真异步** ——
-//   stat/open/read/close 全用 Promise 版并 await，主线程在每个 await 处让出，
-//   NAS 网络往返不再占住 UI 线程；ensure() 再套一层「到点即放弃」超时闸门。
-// 换数据源时 clear() 自增 gen：旧批次读回来的 bytes 只用于本次解码，不再污染新图库。
-// --------------------------------------------------------------------
-class RawStore {
-  private data: Map<string, ArrayBuffer> = new Map();
-  private order: string[] = [];                 // LRU：队头最旧
-  private bytes: number = 0;
-  private inflight: Map<string, Promise<ArrayBuffer | undefined>> = new Map();
-  private denied: Set<string> = new Set();     // 不适合内存缓存的 uri：别反复 fs.stat/fs.read
-  private gen: number = 0;
-
-  /** 同步查内存；命中刷新 LRU 位置。probeOne() 用它零 IO 探元数据。 */
-  get(uri: string): ArrayBuffer | undefined {
-    const buf: ArrayBuffer | undefined = this.data.get(uri);
-    if (buf === undefined) {
-      return undefined;
-    }
-    const i: number = this.order.indexOf(uri);
-    if (i >= 0) {
-      this.order.splice(i, 1);
-      this.order.push(uri);
-    }
-    return buf;
-  }
-
-  /** 确保该 uri 的完整 bytes 已在内存（或已在途）。返回 undefined 表示「本次不缓存」，
-   *  调用方 decodePx 会降级回 fd 解码 —— 功能绝不因缓存未命中而受损。
-   *
-   *  第二十七轮：read() 已改成**真异步**（stat / open / read / close 全是 Promise 版
-   *  await，主线程在每个 await 处让出），再套一层「到点即放弃」闸门：死 NAS 路径上
-   *  fs.read 的 Promise 可能永不 settle，没有上限就会让 inflight / allActive 永久
-   *  挂住，整条预载链假死。 */
-  ensure(uri: string): Promise<ArrayBuffer | undefined> {
-    const hit: ArrayBuffer | undefined = this.get(uri);
-    if (hit !== undefined) {
-      return Promise.resolve<ArrayBuffer | undefined>(hit);
-    }
-    if (this.denied.has(uri)) {
-      return Promise.resolve<ArrayBuffer | undefined>(undefined);
-    }
-    const running: Promise<ArrayBuffer | undefined> | undefined = this.inflight.get(uri);
-    if (running !== undefined) {
-      return running;
-    }
-    const gen: number = this.gen;
-    const job: Promise<ArrayBuffer | undefined> = this.readGuarded(uri, gen)
-      .then((buf: ArrayBuffer | undefined): ArrayBuffer | undefined => {
-        this.inflight.delete(uri);
-        return buf;
-      })
-      .catch((): ArrayBuffer | undefined => {
-        this.inflight.delete(uri);
-        return undefined;
-      });
-    this.inflight.set(uri, job);
-    return job;
-  }
-
-  /** 第二十七轮：真异步读取 + 超时放弃闸门。
-   *  · 上限用 rawIoTimeoutMs 以单文件上限作保守体积上界（stat 之前拿不到真实 size），
-   *    capMs 是决定性硬上限；结果恒为有限整数，绝不把 NaN / Infinity 传给 setTimeout。
-   *  · settled 单闸：定时器与 IO 回调只可能有一个生效，绝不二次 resolve。
-   *  · 到点即放弃：rawDenyAfterFailure 判定后记 denied，本次解码降级 fd、功能不受损；
-   *    换源（gen 变了）绝不拉黑，避免新图库里同一个 uri 被永久误判。
-   *  · 底层 fs 的 Promise 应用无法真正取消；超时后它若在后台返回，read() 会因
-   *    denied 已置位而跳过缓存插入 —— 但主线程从始至终空闲，不会再触发 appfreeze。 */
-  private readGuarded(uri: string, gen: number): Promise<ArrayBuffer | undefined> {
-    const limitMs: number = rawIoTimeoutMs(RAW_SINGLE_MAX_BYTES,
-      RAW_IO_BASE_MS, RAW_IO_PER_MB_MS, RAW_IO_CAP_MS);
-    let settled: boolean = false;
-    let timer: number = -1;
-    return new Promise<ArrayBuffer | undefined>(
-      (resolve: (v: ArrayBuffer | undefined | PromiseLike<ArrayBuffer | undefined>) => void): void => {
-        if (limitMs > 0) {
-          timer = setTimeout((): void => {
-            if (settled) {
-              return;
-            }
-            settled = true;
-            if (rawDenyAfterFailure(gen !== this.gen, false, true)) {
-              this.denied.add(uri);
-            }
-            hilog.warn(DOMAIN, TAG,
-              'rawCache read TIMEOUT uri=%{public}s limit=%{public}d', uri, limitMs);
-            resolve(undefined);
-          }, limitMs);
-        }
-        this.read(uri, gen).then((buf: ArrayBuffer | undefined): void => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          if (timer >= 0) {
-            clearTimeout(timer);
-          }
-          resolve(buf);
-        }).catch((): void => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          if (timer >= 0) {
-            clearTimeout(timer);
-          }
-          resolve(undefined);
-        });
-      });
-  }
-
-  /** 真正的一次性读取（第二十七轮：全部改成 Promise 版异步 IO）。
-   *  · fs.stat / fs.open / fs.read / fs.close 每个都 await，主线程在每个 await 处让出，
-   *    NAS 网络往返不再占住 UI 线程 —— 这是 THREAD_BLOCK_6S 的根治。
-   *  · 所有 await 集中在 IO 阶段；buf 到手后的预算计算与 LRU 插入是**同一段同步代码**
-   *    （中间无 await），与改前一样原子，不会被同批其它读取插队。
-   *  · 唯一仍在主线程的同步操作是 new ArrayBuffer(size) 清零：纯内存、无 IPC / 无网络，
-   *    且被 RAW_SINGLE_MAX_BYTES=64MB 夹死，不可能挂 6 秒。
-   *  · 读满校验 / 单文件上限 / 换源判定 / 预算淘汰 / LRU 账目全部保持原语义。 */
-  private async read(uri: string, gen: number): Promise<ArrayBuffer | undefined> {
-    let file: fs.File | undefined = undefined;
-    try {
-      const st: fs.Stat = await fs.stat(uri);
-      const size: number = st.size;
-      if (!rawSingleAllowed(size, RAW_SINGLE_MAX_BYTES)) {
-        this.denied.add(uri);
-        return undefined;
-      }
-      file = await fs.open(uri, fs.OpenMode.READ_ONLY);
-      const buf: ArrayBuffer = new ArrayBuffer(size);
-      // 两参重载：刚 open 的文件指针在 0，一次读满整个 buffer。刻意不传 options，
-      // 避开各 SDK 版本 ReadOptions.offset 语义差异；没读满就绝不交给 ImageSource。
-      const got: number = await fs.read(file.fd, buf);
-      if (!rawReadComplete(got, size)) {
-        // 网络 / 大文件一次读不满：别每次解码都重读一遍，直接降级 fd 路径更稳。
-        this.denied.add(uri);
-        return undefined;
-      }
-      // 换源了、或这张已被超时闸门放弃：本次解码仍可用，但不入新图库的缓存。
-      if (gen !== this.gen || this.denied.has(uri)) {
-        return buf;
-      }
-      const fit: RawFit = rawFitOf(this.sizesOf(), size,
-        RAW_CACHE_MAX_BYTES, RAW_CACHE_MAX_COUNT);
-      if (!fit.keep) {
-        return buf;         // 预算装不下：仍用内存解这一次，只是不驻留
-      }
-      for (let i = 0; i < fit.evict; i++) {
-        const oldest: string = this.order[0];
-        this.order.splice(0, 1);
-        const victim: ArrayBuffer | undefined = this.data.get(oldest);
-        this.data.delete(oldest);
-        if (victim !== undefined) {
-          this.bytes -= victim.byteLength;
-        }
-      }
-      this.data.set(uri, buf);
-      this.order.push(uri);
-      this.bytes += size;
-      return buf;
-    } catch (e) {
-      hilog.warn(DOMAIN, TAG, 'rawCache read FAIL uri=%{public}s err=%{public}s',
-        uri, JSON.stringify(e));
-      if (rawDenyAfterFailure(gen !== this.gen, true, false)) {
-        this.denied.add(uri);
-      }
-      return undefined;
-    } finally {
-      if (file !== undefined) {
-        try {
-          await fs.close(file);
-        } catch (e) {
-          hilog.warn(DOMAIN, TAG, 'rawCache close skipped');
-        }
-      }
-    }
-  }
-
-  /** 队头→队尾各条字节数，喂给 rawFitOf 算淘汰条数。 */
-  private sizesOf(): number[] {
-    const out: number[] = [];
-    for (let i = 0; i < this.order.length; i++) {
-      const b: ArrayBuffer | undefined = this.data.get(this.order[i]);
-      out.push(b !== undefined ? b.byteLength : 0);
-    }
-    return out;
-  }
-
-  /** 换数据源 / 退出时清空。gen 自增让在途读取的结果不再入缓存。 */
-  clear(): void {
-    this.gen++;
-    this.data.clear();
-    this.order = [];
-    this.bytes = 0;
-    this.inflight.clear();
-    this.denied.clear();
-  }
-
-  /** 排查用账目（hilog / 诊断串），不参与任何逻辑判断。 */
-  stat(): string {
-    return this.data.size + '/' + Math.round(this.bytes / (1024 * 1024)) + 'MB';
-  }
-}
-
-const rawStore: RawStore = new RawStore();
-
-/** 按给定长边上限解码一张图。失败返回 undefined（不影响正常显示路径）。
- *  edge = QUICK_EDGE 低清占位 / preloadEdge() 预载 / viewEdge() 全清 / HOVER_EDGE 悬停缩略图。
- *
- *  2026-11-11 增加三件事（共用一个 DecodingOptions，不再只有 desiredSize）：
- *    ① EXIF Orientation → 解码阶段旋转 + 镜像（`ViewPlan.exifTransformOf`）；
- *    ② desiredDynamicRange = AUTO → HDR 图按 HDR 解码，平台不支持时 SDK 自动降 SDR；
- *    ③ 内嵌 ICC 色彩空间：COLOR_MANAGE_MODE=0 保留源空间，1/2 才在解码时转换到 sRGB / Display P3；
- *       解码后读 PixelMap.getColorSpace() 记录系统识别到的空间，用于信息浮层。
- *  2026-11-12 第八轮 ④：优先用 RawStore 里已载入内存的**完整原始档案数据**建
- *  ImageSource（ArrayBuffer 重载），不再为每张图 openSync + 让 codec 逐段读文件。
- *  ensure 返回 undefined（超预算 / 单文件过大 / 读不满 / 超时 / 无权限）时降级回 fd 路径，
- *  功能绝不受缓存影响。EXIF / HDR / ICC 三件事在两种 ImageSource 上完全一致。
- *  2026-11-16 第二十七轮 ⑤：fd 兜底也从 fs.openSync 改为 await fs.open，
- *  NAS 死路径上这次跨进程 open 同样不再占住 UI 主线程。 */
-async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
-  let file: fs.File | undefined = undefined;
-  let src: image.ImageSource | undefined = undefined;
-  try {
-    const raw: ArrayBuffer | undefined = await rawStore.ensure(uri);
-    if (raw !== undefined) {
-      src = image.createImageSource(raw);
-    } else {
-      // 第二十七轮：fd 兜底路径也改 await fs.open（同 RawStore.read 的真异步口径）。
-      // 缓存未命中 / 超时放弃时，这次跨进程 open 同样不能占住 UI 主线程。
-      file = await fs.open(uri, fs.OpenMode.READ_ONLY);
-      src = image.createImageSource(file.fd);
-    }
-    const info: image.ImageInfo = await src.getImageInfo();
-    const w: number = info.size.width;
-    const h: number = info.size.height;
-    let dw: number = w;
-    let dh: number = h;
-    if (w > edge || h > edge) {
-      const k: number = Math.max(w, h) / edge;
-      dw = Math.max(1, Math.floor(w / k));
-      dh = Math.max(1, Math.floor(h / k));
-    }
-    if (dw <= 0 || dh <= 0) {
-      return undefined;
-    }
-
-    let exif: ExifTransform = { degrees: 0, flipH: false, flipV: false };
-    if (EXIF_AUTO_ROTATE) {
-      exif = await readExifTransform(src, uri);
-    }
-
-    const opts: image.DecodingOptions = { desiredSize: { width: dw, height: dh } };
-    if (EXIF_AUTO_ROTATE && exif.degrees !== 0 && EXIF_ROTATE_AT_DECODE) {
-      opts.rotate = exif.degrees;
-    }
-    if (HDR_AUTO_DECODE) {
-      opts.desiredDynamicRange = image.DecodingDynamicRange.AUTO;
-    }
-    if (COLOR_MANAGE_MODE === 1) {
-      opts.desiredColorSpace = colorSpaceManager.create(colorSpaceManager.ColorSpace.SRGB);
-    } else if (COLOR_MANAGE_MODE === 2) {
-      opts.desiredColorSpace = colorSpaceManager.create(colorSpaceManager.ColorSpace.DISPLAY_P3);
-    }
-
-    const px: image.PixelMap = await src.createPixelMap(opts);
-    if (EXIF_AUTO_ROTATE && exif.degrees !== 0 && !EXIF_ROTATE_AT_DECODE) {
-      await px.rotate(exif.degrees);
-    }
-    if (exif.flipH || exif.flipV) {
-      await px.flip(exif.flipH, exif.flipV);
-    }
-    let cs: number = 0;
-    try {
-      cs = Number(px.getColorSpace().getColorSpaceName());
-    } catch (e) {
-      // 某些机型 / 格式不支持 getColorSpace：按「未标注」处理，不影响显示
-    }
-    const shown: Size2 = exifSizeOf(w, h, exif.degrees);
-    const entry: PreviewEntry = {
-      uri: uri, px: px, bytes: dw * dh * 4,
-      w: shown.w, h: shown.h, edge: edge,
-      colorSpace: cs, isHdr: info.isHdr === true, exifDegrees: exif.degrees
-    };
-    return entry;
-  } catch (e) {
-    // ⚠️ 以前这里静默吞掉：图打不开时屏幕全白、日志全无，排查只能靠猜。
-    //    目录浏览的 uri 权限 / 编码问题全靠这一行定位。
-    hilog.warn(DOMAIN, TAG, 'decodePx FAIL uri=%{public}s err=%{public}s', uri, JSON.stringify(e));
-    return undefined;
-  } finally {
-    if (src !== undefined) {
-      try {
-        src.release();
-      } catch (e) {
-        hilog.warn(DOMAIN, TAG, 'release ImageSource skipped');
-      }
-    }
-    if (file !== undefined) {
-      try {
-        await fs.close(file);
-      } catch (e) {
-        hilog.warn(DOMAIN, TAG, 'close file skipped');
-      }
-    }
-  }
-}
-
-/** 列表缩略图加载器（模块级单例：跨数据源切换保留缓存，靠 LRU 自然淘汰）。
- *
- *  刻意**不做**整体清空：被释放的 PixelMap 若正被某个列表行显示着会导致花屏崩溃，
- *  而 LRU 总是淘汰「最久没人用」的条目 —— 那时对应的行早已离开屏幕。
- *  上限 36MB 对常驻内存完全无所谓，没必要为此冒险。 */
-class ThumbLoader {
-  /** 左栏常驻缩略图已取消，只保留悬停这一套：384px 档 / 24 张 LRU / 并发 1。
-   *  Win64 51 行：悬停用自己的小缓存，且解码同时最多一个在跑。 */
-  private static hoverInst: ThumbLoader = new ThumbLoader(HOVER_EDGE, HOVER_MAX_COUNT, 1);
-  private cache: Map<string, PreviewEntry> = new Map();
-  private order: string[] = [];   // 最近使用顺序，队头最旧
-  private pending: ThumbTask[] = [];
-  private active: number = 0;
-  private edge: number;
-  private maxCount: number;
-  private concurrency: number;
-
-  constructor(edge: number, maxCount: number, concurrency: number) {
-    this.edge = edge;
-    this.maxCount = maxCount;
-    this.concurrency = concurrency;
-  }
-
-  static hover(): ThumbLoader {
-    return ThumbLoader.hoverInst;
-  }
-
-  /** 同步查缓存；命中则刷新最近使用位置 */
-  peek(uri: string): image.PixelMap | undefined {
-    const e: PreviewEntry | undefined = this.cache.get(uri);
-    if (e === undefined) {
-      return undefined;
-    }
-    this.touch(uri);
-    return e.px;
-  }
-
-  /** 请求一张缩略图：命中立刻回调，否则排进限流队列 */
-  request(uri: string, alive: () => boolean, cb: (p: image.PixelMap | undefined) => void): void {
-    const hit: image.PixelMap | undefined = this.peek(uri);
-    if (hit !== undefined) {
-      cb(hit);
-      return;
-    }
-    this.pending.push({ uri: uri, alive: alive, cb: cb });
-    if (this.pending.length > THUMB_QUEUE_MAX) {
-      this.pending.splice(0, this.pending.length - THUMB_QUEUE_MAX);
-    }
-    this.pump();
-  }
-
-  /** 按并发上限取任务执行 */
-  private pump(): void {
-    while (this.active < this.concurrency && this.pending.length > 0) {
-      const t: ThumbTask | undefined = this.pending.shift();
-      if (t === undefined) {
-        break;
-      }
-      if (!t.alive()) {
-        continue; // 行已经划出屏幕了，这个请求作废
-      }
-      this.active++;
-      decodePx(t.uri, this.edge)
-        .then((e: PreviewEntry | undefined) => {
-          this.active--;
-          if (e !== undefined) {
-            this.put(t.uri, e);
-          }
-          if (t.alive()) {
-            t.cb(e !== undefined ? e.px : undefined);
-          }
-          this.pump();
-        })
-        .catch(() => {
-          this.active--;
-          this.pump();
-        });
-    }
-  }
-
-  private put(uri: string, e: PreviewEntry): void {
-    this.cache.set(uri, e);
-    this.touch(uri);
-    while (this.order.length > this.maxCount) {
-      const oldest: string = this.order[0];
-      this.order.splice(0, 1);
-      const victim: PreviewEntry | undefined = this.cache.get(oldest);
-      if (victim === undefined) {
-        continue;
-      }
-      this.cache.delete(oldest);
-      try {
-        victim.px.release();
-      } catch (err) {
-        hilog.warn(DOMAIN, TAG, 'release thumb skipped');
-      }
-    }
-  }
-
-  /** 把 uri 提到「最近使用」队尾 */
-  private touch(uri: string): void {
-    const i: number = this.order.indexOf(uri);
-    if (i >= 0) {
-      this.order.splice(i, 1);
-    }
-    this.order.push(uri);
-  }
-}
-
-/** 左侧档案列表的一行（文件浏览器三栏：档案名 / 字节 / 日期）。
- *
- *  拆成独立组件是为了让「悬停缩略图解码完成」只重渲染**这一行** ——
- *  若由父组件维护一个全局 map，每张图加载完都要刷新整个列表，几百次不足为惧的
- *  全列表重排会直接拖垮滚动流畅度。
- *  2026-11-09：行内不再常驻缩略图，只有 mouse over 整行时才解码并浮出小图。 */
-@Component
-struct ArchiveRow {
-  @Prop uri: string = '';
-  @Prop name: string = '';
-  // ⚠️ 不能叫 `size`：CustomComponent 基类上已有同名通用属性方法
-  //    （'.size({ ... })'），会报 "not assignable to ... (value: SizeOptions) => CommonAttribute"。
-  //    同类雷区还有 width / height / scale / rotate / translate（本文件因此用 zoom 表示缩放）。
-  @Prop bytes: number = -1;
-  @Prop mtime: number = 0;      // 修改时间，日期列用
-  @Prop kind: number = 0;       // 0=图片 1=上级 2=目录 3=不支持预览
-  @Prop idx: number = 0;
-  @Prop selected: boolean = false;
-  @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
-  /** 只读名单态：快照 uri 的授权已失效，悬停时**绝不**发起 384px 缩略图解码
-   *  （ThumbLoader 走 decodePx → await fs.open；虽已异步，死 uri 仍会白等一次
-   *  跨进程往返并挤占 IO 队列，故继续在入口短路）。 */
-  @Prop thumbDisabled: boolean = false;
-  // ⚠️ 回调也不能加 private：ArkTS 会报
-  //    "Property 'onTap' is private and can not be initialized through the component constructor"。
-  onTap: (idx: number) => void = () => {};
-  onDblTap: (idx: number) => void = () => {};
-  @State showHover: boolean = false;                       // 悬停浮层是否展开
-  @State hoverPx: image.PixelMap | undefined = undefined;  // 悬停大图（384px 档）
-  private alive: boolean = true;
-  /** 第十一轮：显隐完全同步，不再有去抖代号 / 关闭计时器。
-   *  hover 只碰上面两个 @State，绝不调用父组件的 onTap / 列表 / 目录方法
-   *  （否则退出 hover 会把当前档案 / 目录带走）。 */
-
-  /** 行标识：同一目录里 uri 唯一，排序 / 重扫改变 idx 也不会串位。 */
-  private rowKey(): string {
-    return this.uri;
-  }
-
-  /** 被 HoverGuard 同步收起（另一行接手浮层）：立刻关，不走延迟，
-   *  否则「旧行还没收、新行已经弹出」会看到两个浮层重叠闪一下。
-   *  只碰 hover 自己的状态，绝不调用 onTap / 列表 / 目录方法。 */
-  private forceHide(): void {
-    this.showHover = false;
-    this.hoverPx = undefined;
-  }
-
-  /** Win64 bac9ff9：图片粉、目录粉蓝、不支持预览的文件灰；上级行用中性色 */
-  /** 行首类型标记的颜色（不是缩略图，只是 18vp 的小符号）。 */
-  private iconColor(): string {
-    if (this.kind === ROW_OTHER) {
-      return '#4b5260';
-    }
-    if (this.kind === ROW_IMAGE) {
-      return this.selected ? '#e8ecf4' : '#e2a8cf';
-    }
-    // 第三十七轮：文本 / 源码行用暖黄，与图片粉、目录蓝、灰行区分。
-    if (this.kind === ROW_TEXT) {
-      return this.selected ? '#e8ecf4' : '#d8c78a';
-    }
-    return '#8fb8e8';
-  }
-
-  private labelColor(): string {
-    if (this.selected) {
-      return '#e8ecf4';
-    }
-    if (this.kind === ROW_FOLDER || this.kind === ROW_UP) {
-      return '#8fb8e8';
-    }
-    if (this.kind === ROW_OTHER) {
-      return '#6b7280';
-    }
-    if (this.kind === ROW_TEXT) {
-      return '#d8c78a';
-    }
-    return '#e2a8cf';
-  }
-
-  /** 「梅花间竹」交替底色：选中态优先，其余按 idx 奇偶两色成格（2026-11-11）。 */
-  private rowBgColor(): string {
-    if (this.selected) {
-      return ROW_SELECTED_BG;
-    }
-    return (this.idx % 2) === 0 ? ROW_STRIPE_EVEN : ROW_STRIPE_ODD;
-  }
-
-  aboutToAppear(): void {
-    this.alive = true;
-    // 刻意不在这里解码任何缩略图：只有 onHover 才触发（见 onHoverChange）
-  }
-
-  aboutToDisappear(): void {
-    this.alive = false; // 离屏后即使队列轮到自己，也不再回调
-    HoverGuard.shared().release(this.rowKey());
-    this.showHover = false; // 行划出屏幕 / 滚动列表：浮层立刻收起（无延迟 / 无动画）
-    this.hoverPx = undefined;
-  }
-
-  /** Win64 51 行：鼠标停在档案行任意位置，右侧浮出小图（左栏本身不常驻缩略图）。
-   *  先查悬停自己的 LRU，命中即同步出图；没命中才后台解一张 384px（同时最多一个）。
-   *  目录行 / 不支持预览的灰行不弹；离屏、点击、划走由 alive / showHover 收起。
-   *  第十一轮：mouseover 事件触发当帧就展开 / 收起 —— 不排队、不 setTimeout、不淡入淡出。 */
-  private onHoverChange(on: boolean): void {
-    // 只读名单态：连浮层都不弹，彻底断掉 hover 解码链（预览区指引卡会说明原因）。
-    if (this.kind !== ROW_IMAGE || this.thumbDisabled) {
-      return;
-    }
-    const key: string = this.rowKey();
-    if (!on) {
-      // 鼠标移出：立即隐藏，不排队、不等计时器、不带淡出。
-      // 已被 HoverGuard 同步收起（换到另一行 / 点击 / 离屏）就别再重复释放。
-      if (!this.showHover) {
-        return;
-      }
-      this.showHover = false;
-      this.hoverPx = undefined;
-      HoverGuard.shared().release(key);
-      return;
-    }
-    // on === true：事件触发即同步展开（showHover 置位的同一帧浮层就在）。
-    if (this.showHover) {
-      return; // 连续派发别重复排队 384px 解码
-    }
-    // 全局唯一浮层：新行接手时同步收起旧行，避免两个 popup 重叠闪一下
-    HoverGuard.shared().take(key, () => this.forceHide());
-    this.showHover = true;
-    const hit: image.PixelMap | undefined = ThumbLoader.hover().peek(this.uri);
-    if (hit !== undefined) {
-      this.hoverPx = hit;
-      return;
-    }
-    this.hoverPx = undefined;
-    ThumbLoader.hover().request(this.uri, () => this.alive && this.showHover,
-      (p: image.PixelMap | undefined) => {
-        if (this.alive && this.showHover && p !== undefined) {
-          this.hoverPx = p;
-        }
-      });
-  }
-
-  @Builder
-  hoverThumb() {
-    Column() {
-      if (this.hoverPx !== undefined) {
-        Image(this.hoverPx!)
-          .objectFit(ImageFit.Contain)
-          .interpolation(ImageInterpolation.Medium)
-          .width(220)
-          .height(165)
-          .borderRadius(4)
-      } else {
-        // 384px 还在解码：给个「读取预览…」占位，不用行内图顶，也不触发原图解码
-        Column() {
-          Text('读取预览…')
-            .fontSize(11)
-            .fontColor('#7f88a8')
-        }
-        .width(220)
-        .height(165)
-        .justifyContent(FlexAlign.Center)
-        .borderRadius(4)
-        .backgroundColor('#262b34')
-      }
-      // 2026-11-11 用户要求：hover 缩略图里只放相片，不显示档案名。
-      // 档案名本来就在左栏那一行上，浮层再写一遍既占空间又挡图。
-    }
-    .padding(8)
-    .backgroundColor('#1a1d23')
-    .border({ width: 1, color: '#3a4150' })
-    .borderRadius(6)
-  }
-
-  build() {
-    Row() {
-      // 左栏不再常驻缩略图：统一只给一个 18vp 的类型标记，档案名多出 38vp。
-      // 缩略图只在 mouse over 整行时由 bindPopup 浮出（见 hoverThumb）。
-      // 第七轮：移除档案行最左侧的「圆点」标记（图片行 / 灰行留空），
-      // 上层 / 目录行仍保留 ↑ / ▣ 导航符号，行内各列对齐不变。
-      Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : ''))
-        .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
-        .fontColor(this.iconColor())
-        .width(18)
-        .height(26)   // 11-10 起压缩行高：42 → 26，配合下方 padding 把每行从 54vp 收到 30vp
-        .textAlign(TextAlign.Center)
-
-      Text(this.name)
-        .fontSize(12)
-        .fontColor(this.labelColor())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        // 左栏已按最长档案名自适应（listWidthForNames），这里再兜一层：
-        // layoutWeight 分配宽度时至少给到名字内容宽，长名字不会被压出省略号；
-        // 极少数超过 LIST_MAX_W 的超长名才由 Ellipsis 截断。
-        .constraintSize({ minWidth: textWidthVp(this.name, 12) + 8 })
-        .layoutWeight(1)
-        .padding({ left: 8 })
-
-      // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
-      if (!this.collapsed) {
-        Text(fmtBytes(this.bytes))
-          .fontSize(10)
-          .fontColor('#7f88a8')
-          .width(66)
-          .textAlign(TextAlign.End)
-          .maxLines(1)
-        Text(this.mtime > 0 ? fmtDate(this.mtime) : '--')
-          .fontSize(10)
-          .fontColor('#6b7385')
-          .width(88)
-          .textAlign(TextAlign.End)
-          .maxLines(1)
-          .margin({ left: 6 })
-      }
-    }
-    .width('100%')
-    // 11-11 起继续压缩：上下 padding 2 → 1，配合 List space=1 把两行缝压到约 1mm。
-    // 行背景改为「梅花间竹」交替色格子（奇偶两色），选中行仍是高亮色。
-    .padding({ left: 6, right: 6, top: 1, bottom: 1 })
-    .borderRadius(3)
-    .backgroundColor(this.rowBgColor())
-    // hover 绑在整行而不是档案名 Text 上：鼠标划过图标 / 字节 / 日期列也能出图，
-    // 触发面积大得多，PC 上更好按（用户反馈「要 mouse over 才显示」）。
-    .onHover((isHover: boolean) => {
-      // 记下「本机 onHover 通道可用」，据此关掉下面 onMouse 的兜底自动打开。
-      // 若放在 onHoverChange 里，兜底自己调用时会把自己禁掉（只派发 onMouse 的设备
-      // 就永远弹不出浮层），所以必须留在 .onHover 回调内。
-      HoverGuard.shared().noteHover();
-      this.onHoverChange(isHover);
-    })
-    // 2in1 兜底：SDK 26 明确 MouseAction.Hover「has no effect」，这里只认 Move。
-    .onMouse((event: MouseEvent) => {
-      if (event.action !== MouseAction.Move) {
-        return;
-      }
-      if (this.showHover) {
-        // 浮层已展开：本行内的移动不重复打开（第十一轮起已无计时器可续命）。
-        return;
-      }
-      // ⚠️ 绝不能无条件自动打开：正常设备由 onHover 当帧收口，
-      // 一次 Move 又打开会「收起→打开→收起」自激成不停闪。
-      // 只有在「整台设备从未派发过 onHover」时才启用兜底。
-      if (!HoverGuard.shared().hoverSupported) {
-        this.onHoverChange(true);
-      }
-    })
-    .bindPopup(this.showHover, {
-      builder: () => { this.hoverThumb(); },
-      placement: Placement.Right,
-      popupColor: '#1a1d23',
-      // ===== 不停闪的真正根因（SDK 26 CustomPopupOptions 的两个默认值）=====
-      // mask 默认 true：popup 一显示就铺一层覆盖全窗口的透明遮罩，吞掉鼠标事件，
-      //   宿主行立刻收到 onHover(false) → 我们收起 popup → 遮罩消失 → hover 恢复
-      //   → 又弹出 → 无限循环。上一轮加的 120ms 去抖只是把闪烁周期拉长而已。
-      // autoCancel 默认 true：页面上任何操作（含鼠标移动）系统都会自行收起 popup，
-      //   而 showHover 仍为 true 又把它拉回来，两边打架 → 高频闪烁。
-      // 关掉这两项后，popup 显隐完全由 showHover 决定，onHover(false) 也重新可信。
-      mask: false,
-      autoCancel: false,
-      enableArrow: false, // 少一次箭头位置计算，弹出的位置更稳定
-      // 第十一轮：关掉 popup 默认的淡入 / 淡出 / 缩放动效 —— 显示与隐藏都是瞬时的。
-      // CustomPopupOptions.transition 设为 IDENTITY 即「无过渡」，比设 duration:0 更彻底。
-      transition: TransitionEffect.IDENTITY
-    })
-    .onClick(() => {
-      // 鼠标按下选图：浮层立刻收起（第十一轮起无计时器、无淡出）。
-      this.showHover = false;
-      this.hoverPx = undefined;
-      HoverGuard.shared().release(this.rowKey());
-      this.onTap(this.idx);
-    })
-    .gesture(
-      TapGesture({ count: 2 })
-        .onAction(() => this.onDblTap(this.idx))
-    )
-  }
-}
-
-/** LazyForEach 要求的数据源：只有实现了它，列表才会**真正按需**创建节点。
- *  ForEach 会为数组中每一项都创建组件，几百张图就是几百个 ListItem —— 这是
- *  图片一多就崩的另一半原因。 */
-class GalleryDataSource implements IDataSource {
-  private items: ImageItem[] = [];
-  private listeners: DataChangeListener[] = [];
-
-  totalCount(): number {
-    return this.items.length;
-  }
-
-  getData(index: number): ImageItem {
-    return this.items[index];
-  }
-
-  registerDataChangeListener(listener: DataChangeListener): void {
-    const i: number = this.listeners.indexOf(listener);
-    if (i < 0) {
-      this.listeners.push(listener);
-    }
-  }
-
-  unregisterDataChangeListener(listener: DataChangeListener): void {
-    const i: number = this.listeners.indexOf(listener);
-    if (i >= 0) {
-      this.listeners.splice(i, 1);
-    }
-  }
-
-  reload(list: ImageItem[]): void {
-    this.items = list;
-    for (let i = 0; i < this.listeners.length; i++) {
-      this.listeners[i].onDataReloaded();
-    }
-  }
-}
-
 /** 第三十七轮：文本预览的行数据源。与 GalleryDataSource 同口径 —— 十几万行文本
  *  只把「原始行字符串」放在普通数组里，靠 LazyForEach 按需创建可见行节点；
  *  reload() 统一通知 onDataReloaded，换文件时不会残留旧节点。 */
@@ -1882,6 +1008,9 @@ struct Index {
    *  父层那份含全部兄弟目录的清单会丢 —— 上层清单于是只剩「恒列当前目录」一项。
    *  这里按层并存，sameDirPath 命中目标层的**全部**快照一起聚合，杜绝遗漏。 */
   private upDirCache: Array<UpDirSnapshot> = [];
+  /** 第四十二轮：目录整表 LRU 缓存（网盘秒开）。键是解析出的 base 路径，
+   *  sameDirPath 模糊匹配（file://docs 与 %XX 写法视为同一目录）。 */
+  private dirRowsCache: Array<DirRowsCacheEntry> = [];
   /** 第三十三轮：初始化时从缓存目录结构预建的父子逻辑层级索引。
    *  第三十四轮订正：只作「往上层」同层候选的**优先佐证**，不是唯一真值源、
    *  更不是闸门；触发时只查不建，未命中时原有路径层级链照常上移。 */
@@ -1892,7 +1021,11 @@ struct Index {
   private dirMtime: number = 0;             // 当前目录 mtime，用于自检（SDK26 无 fileObserver）
   private dirPollTimer: number = -1;        // 目录轮询句柄
   private rescanTimer: number = -1;         // 变动后去抖重扫句柄
+  private mtimeBusy: boolean = false;       // 第四十六轮：上一轮 mtime 异步 stat 未回来时不堆叠
   private folderBusy: boolean = false;      // 防止导航连点 / 重扫叠加重入
+  /** 第四十三轮：目录列举的代际号。每次真正开始列目录 +1；在途列举完成后
+   *  若发现自己的代际号已过期，说明被更新的用户导航抢占，结果整段丢弃。 */
+  private openEpoch: number = 0;
   @State itemCount: number = 0;
   /** 左栏实际行数（含「..」/ 子文件夹 / 灰行），与 itemCount（只算图片）分开。
    *  判空态必须用 rowCount：像「人像」这种全是子文件夹、零图片的目录，
@@ -2258,6 +1391,7 @@ struct Index {
   @State rightPixelMap: image.PixelMap | undefined = undefined;
   private rightOwned: image.PixelMap | undefined = undefined;
   private rightToken: number = 0;
+  private rightRetryTimer: number = -1;   // 第四十七轮：右页解码失败的重试句柄
   @State viewFailed: boolean = false;                 // 自解码确认失败 → 才回退到 Image(uri)
   @State curToken: number = 0;                        // 当前显示图的代号（每切换一次自增）
 
@@ -2277,6 +1411,22 @@ struct Index {
   @State textNoW: number = 54;
   @State textContentW: number = 800;
   @State textTruncated: boolean = false;
+  /** 第五十一轮：文本态行段选择。点一条定起点、再点一条定终点（成段后新点击重选、
+   *  再点同一条取消），抬头工具条「复制 / 清除」，Ctrl+C 同效。行高亮由这两个
+   *  小状态驱动，LazyForEach 生成器里读它们即可按行重渲染，与左栏选中态同口径。 */
+  @State textSelAnchor: number = -1;
+  @State textSelFocus: number = -1;
+  // R54：按住左键拖选期间为 true（普通字段：只做事件闸门，不驱动 UI）
+  private textSelDragging: boolean = false;
+  /** 第五十二轮：自绘纵向滚动条。R51 把 List 原生条设为常显后真机仍看不见 —— 原生条
+   *  画在**全宽 List 的右缘**（x = textContentW），长行把横向 Scroll 撑宽后它永远在
+   *  可视区外。改为在视口右缘自绘：视口高由 onAreaChange 回填，首行号由 List
+   *  onScrollIndex 回填，滑块按「可见行 / 总行数」比例算高、按首行比例定位，
+   *  PanGesture 拖动换算 scrollToIndex；原生条关掉（Off），免得横向滚到底时双条重叠。 */
+  @State textVpH: number = 0;
+  @State textFirstRow: number = 0;
+  @State textLastRow: number = 0;
+  private textVBarDragTop: number = 0;
   private textLines: Array<string> = [];
   private textBlockStarts: Array<boolean> = [];
   private textLang: number = 0;
@@ -2326,6 +1476,10 @@ struct Index {
     if (this.rescanTimer !== -1) {
       clearTimeout(this.rescanTimer);
       this.rescanTimer = -1;
+    }
+    if (this.rightRetryTimer !== -1) {
+      clearTimeout(this.rightRetryTimer);   // 第四十七轮：页面销毁时 pending 的右页重试一并清掉
+      this.rightRetryTimer = -1;
     }
     if (this.warm !== undefined) {
       // 预热的那张还没被接进缓存（用户没打开任何图），别留着 PixelMap 泄漏
@@ -2777,6 +1931,112 @@ struct Index {
     }
   }
 
+  /** 第四十四轮：毫秒级等待（NAS 重连重试节奏用）。 */
+  private nasRetryWait(ms: number): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout(() => {
+        resolve();
+      }, ms);
+    });
+  }
+
+  /** 第四十四轮：重试前的**静默**授权再激活 —— 只推 activatePermission，绝不走
+   *  finishPersistActivate（那是启动恢复链的一次性收口，重入会重复触发
+   *  showLastOnStart）。任何异常静默吞掉：重试本身才是主路径，激活只是顺手推一把。 */
+  private async reactivatePersistQuiet(): Promise<void> {
+    const rootUri: string = this.pickRootUri.length > 0 ? this.pickRootUri : this.savedDirUri;
+    if (rootUri.length === 0) {
+      return;
+    }
+    const uris: Array<string> = persistPolicyUris(rootUri, '', PERSIST_POLICY_LIMIT);
+    if (uris.length === 0) {
+      return;
+    }
+    const policies: Array<fileShare.PolicyInfo> = [];
+    for (let i = 0; i < uris.length; i++) {
+      const policy: fileShare.PolicyInfo = {
+        uri: uris[i],
+        operationMode: fileShare.OperationMode.READ_MODE
+      };
+      policies.push(policy);
+    }
+    try {
+      await fileShare.activatePermission(policies);
+      hilog.info(DOMAIN, TAG, 'persist: re-activated for NAS retry');
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'persist: re-activate failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 第四十四轮：恢复态清单是零 IO 画出来的，NAS 挂载还冷着 —— 渲染完后对
+   *  base 做后台静默预热（listFile 探测 + 失败重试），用户点资料夹时挂载已热。
+   *  纯探测：不碰视图 / 状态栏 / folderBusy，成功即止，绝不触发任何导航。 */
+  private async warmRestoreDirQuiet(base: string): Promise<void> {
+    if (base.length === 0 || !isNetworkDirUri(base)) {
+      return;
+    }
+    const cands: string[] = dirCandidates(base).slice(0, 4);
+    for (let attempt = 0; attempt <= NAS_RETRY_DELAYS.length; attempt++) {
+      for (let c = 0; c < cands.length; c++) {
+        try {
+          await fs.listFile(cands[c], { recursion: false, listNum: 1 });
+          hilog.info(DOMAIN, TAG, 'warm: network dir ready (attempt %{public}d)', attempt);
+          // 第四十五轮：目录已通 = 网络已恢复 → 顺手自愈只读态（重探条目 URI，
+          // 能开就退出 READONLY 并补解当前张，见 healRestoreMode）。
+          this.healRestoreMode();
+          return;
+        } catch (e) {
+          // 该写法列不动：试下一个
+        }
+      }
+      if (attempt < NAS_RETRY_DELAYS.length) {
+        await this.reactivatePersistQuiet();
+        await this.nasRetryWait(NAS_RETRY_DELAYS[attempt]);
+      }
+    }
+    hilog.warn(DOMAIN, TAG, 'warm: network dir still cold after retries (user tap will retry again)');
+  }
+
+  /** 第四十五轮：授权自愈 —— 后台预热成功后重探条目 URI，能开就退出只读名单态。
+   *  背景：重启后 NAS 挂载 / 授权未就绪时，启动探测（probeRestoreUris）会**误判**
+   *  「授权失效」→ 整个会话锁进 READONLY（名单在、图片白，翻页只剩档案名 ——
+   *  正是「右边预览图只显示档案名」的来源）。R44 已让目录列举可重试自愈；
+   *  这里是同源补丁：目录预热成功 = 网络已通，再探一次文件 URI，通了就打开
+   *  解码闸门并补解当前张。探不通则维持 READONLY（真授权失效，不硬闯）。 */
+  private healRestoreMode(): void {
+    if (bulkIoAllowed(this.restoreMode)) {
+      return;   // 本来就是 FULL：无事可做
+    }
+    const uris: Array<string> = [];
+    const n: number = Math.min(this.items.length, RESTORE_PROBE_LIMIT);
+    for (let i = 0; i < n; i++) {
+      uris.push(this.items[i].uri);
+    }
+    if (uris.length === 0) {
+      // 纯目录上下文态（items 为空）：点任意行即真实重列，applyItems 自会退出只读态。
+      return;
+    }
+    // fast=true：只探第一个候选（restoreProbeUris 优先给 okUri = 上次成功显示过的
+    // 那张，最可能存在）。后台自愈不做多候选 sync open —— READONLY 设计本就是
+    // 要把失效 uri 的同步跨进程 IO 挡在主线程外，自愈只做一次最轻的确认。
+    const readable: boolean = this.probeRestoreUris(uris, this.okUri, this.savedDirUri, true);
+    if (!readable) {
+      hilog.warn(DOMAIN, TAG, 'heal: item uris still unreadable, stay READONLY');
+      return;
+    }
+    this.restoreMode = RESTORE_FULL;
+    this.restoreHintText = '';
+    this.diagLine = 'restore HEALED | ' + RESTORE_TAG + ' | ' + this.items.length + ' 张 | v' + APP_VERSION;
+    hilog.info(DOMAIN, TAG, 'heal: auth recovered, exit READONLY (%{public}d items)', this.items.length);
+    if (this.cur >= 0 && this.cur < this.items.length) {
+      this.loadMeta(this.cur);
+      this.showPreviewOf(this.cur);
+      this.refreshSpread();
+      this.schedulePreload();
+    }
+    this.status = '网络目录已恢复连接，图片可以预览了';
+  }
+
   /** activate 收口点：只跑一次，清掉超时定时器，然后照常进入恢复链。
    *  ⚠️ 无论激活成功与否都**不改** probeRestoreUris / RESTORE_READONLY 的行为 ——
    *     那是上一轮修好的防冻结兜底，持久授权只是提高「探测通过」的概率。 */
@@ -3071,14 +2331,19 @@ struct Index {
         }
         const rowUri: string = j < snap.uris.length && snap.uris[j].length > 0
           ? snap.uris[j] : stripTrailingSlash(base) + '/' + nm;
+        // 第四十一轮：恢复态目录有持久授权，行种类按快照真实值直传（keepFileKinds），
+        // .log 等文本行保持 ROW_TEXT，点了直接进文本预览；快照里没有的名字按后缀
+        // 兜底，文本后缀也给 ROW_TEXT（openTextFile 内部还有 textLangOf 复核）。
         const rowKind: number = this.upListKindOf(base, nm,
-          (isImageName(nm) || nm.indexOf('.') > 0) ? ROW_OTHER : ROW_FOLDER);
+          isTextFileName(nm) ? ROW_TEXT
+            : (isImageName(nm) || nm.indexOf('.') > 0) ? ROW_OTHER : ROW_FOLDER, true);
         rows.push({ uri: rowUri, name: nm, size: -1, mtime: 0,
           kind: rowKind, itemIndex: -1 });
       }
     }
-    rows.push({ uri: '', name: '— 已恢复上次目录（APP 内）· ' + UP_LIST_TAG + ' —',
-      size: -1, mtime: 0, kind: ROW_OTHER, itemIndex: -1 });
+    // 第五十轮：重启恢复态不再自称「已恢复上次目录」——撤掉列表尾部的说明行伪条目，
+    // 状态栏也按普通目录列表的样子呈现；旧快照里已存下的说明行由
+    // isUpListPseudoName 过滤（DirName.ts 同轮加了识别），不会再漏进清单。
     this.items = [];
     this.rows = rows;
     this.source = label;
@@ -3095,7 +2360,7 @@ struct Index {
     this.cur = -1;
     this.resetView();
     this.inAppUpList = true;
-    this.dirHint = inAppUpListHint(label, rows.length - 2, UP_LIST_TAG);
+    this.dirHint = inAppUpListHint(label, rows.length - 1, UP_LIST_TAG);
     if (this.dirPollTimer !== -1) {
       clearInterval(this.dirPollTimer);
       this.dirPollTimer = -1;
@@ -3104,11 +2369,14 @@ struct Index {
       clearTimeout(this.rescanTimer);
       this.rescanTimer = -1;
     }
-    this.status = '已恢复上次目录「' + label + '」· 本层没有图片 · ' +
-      (rows.length - 2) + ' 个条目（点名称重新真实列举）· ' + ESC_BUILD_TAG;
+    this.status = '「' + label + '」· 本层没有图片 · ' +
+      (rows.length - 1) + ' 个条目（点名称重新真实列举）· ' + ESC_BUILD_TAG;
     this.diagLine = 'up CTX | ' + UP_CTX_TAG + ' | dironly=1 | L' + dirLevelOf(base) +
       ' | rows=' + rows.length + ' | no-picker | v' + APP_VERSION;
     this.markRestoreEntered();
+    // 第四十四轮：NAS 挂载 / 授权预热（静默探测 + 失败重试，见 warmRestoreDirQuiet）。
+    this.warmRestoreDirQuiet(base).catch(() => {
+    });
     hilog.info(DOMAIN, TAG,
       'restore: dir context only L%{public}d rows=%{public}d base=%{public}s',
       dirLevelOf(base), rows.length, base);
@@ -3381,6 +2649,11 @@ struct Index {
       this.setItems([single], src, [oneMeta]);
       // 回填目录层级：单张兜底同样要让「往上层」能用，不能只给名单就锁死层级。
       this.restoreBrowseContext();
+      // 第四十五轮：单张兜底落只读态时同样后台预热 + 自愈（同快照恢复路径）。
+      if (!bulkIoAllowed(this.restoreMode)) {
+        this.warmRestoreDirQuiet(this.browseBase).catch(() => {
+        });
+      }
       // ⚠️ setItems → applyItems 末尾会 markPos() + snapDirty=true，500ms 后 flushPos
       //    会把「只有 1 张」的列表写进快照，覆盖掉上次会话的整批 uri；位置记忆也会被
       //    改成 count=1 / idx=0。单张只是个临时兜底画面，**绝不能污染持久化数据**。
@@ -3834,6 +3107,12 @@ struct Index {
       // setItems 清空了 browseBase / browseDir / pickRootUri —— 这里把持久授权的
       // 原始目录 URI 还原回来，否则重开后「往上层」永远停在「没有上层目录」。
       this.restoreBrowseContext();
+      // 第四十五轮：快照恢复若落只读态（NAS 冷启动时启动探测误判授权失效），
+      // 同样后台预热 + 自愈 —— 否则整个会话「名单在、图片白」，翻页只剩档案名。
+      if (!bulkIoAllowed(this.restoreMode)) {
+        this.warmRestoreDirQuiet(this.browseBase).catch(() => {
+        });
+      }
       this.snapDirty = false;         // 列表本来就是从快照来的，没必要再写回去
       this.status = this.status + '（来自上次会话）';
       return true;
@@ -3919,7 +3198,7 @@ struct Index {
    *  第三轮：判据改成与左页**同一个** displayEdge()（ViewPlan.displayEdgeOf），
    *  两边不会再出现「一边用 1536、一边用 1800」的档位差；重解结果写回缓存，
    *  下一次翻回来直接命中，不重复解码。 */
-  private loadRightPage(uri: string): void {
+  private loadRightPage(uri: string, attempt: number = 0): void {
     this.rightToken++;
     const token: number = this.rightToken;
     this.releaseRightOwned();   // 上一张右页若是自解码的，先释放
@@ -3935,8 +3214,36 @@ struct Index {
     }
     this.decodeTo(uri, need)
       .then((e: PreviewEntry | undefined) => {
-        if (token !== this.rightToken || e === undefined) {
+        if (token !== this.rightToken) {
+          // 第四十八轮：翻页 / 换对把在途解码作废 —— 留痕，用于分辨「解码失败」
+          // 与「解码成功但被 token 竞态丢弃」这两种完全不同的右页空白成因。
+          hilog.info(DOMAIN, TAG, 'loadRightPage: stale discard (page turned) uri=%{public}s', uri);
           this.releaseUncachedEntry(e);
+          return;
+        }
+        if (e === undefined) {
+          // 第四十七轮：右页解码失败不再「留空了事」。大 JPG 首开时这次失败多半是
+          // 与预载链并发争内存的一次性抖动 —— 按 RIGHT_PAGE_RETRY_DELAYS 节奏补试，
+          // 第一次重试往往已能命中预载链刚写进缓存的同图（复用路径，零解码）。
+          // token 校验保证翻页 / 换对后旧重试自动作废；坏文件试完即止，不无限重试。
+          hilog.warn(DOMAIN, TAG, 'loadRightPage: decode FAIL attempt=%{public}d/%{public}d uri=%{public}s',
+            attempt, RIGHT_PAGE_RETRY_DELAYS.length, uri);
+          if (attempt < RIGHT_PAGE_RETRY_DELAYS.length) {
+            const delay: number = RIGHT_PAGE_RETRY_DELAYS[attempt];
+            if (this.rightRetryTimer !== -1) {
+              clearTimeout(this.rightRetryTimer);
+            }
+            hilog.info(DOMAIN, TAG, 'loadRightPage: retry in %{public}dms uri=%{public}s', delay, uri);
+            this.rightRetryTimer = setTimeout(() => {
+              this.rightRetryTimer = -1;
+              if (token === this.rightToken) {
+                this.loadRightPage(uri, attempt + 1);
+              }
+            }, delay);
+          } else {
+            hilog.warn(DOMAIN, TAG, 'loadRightPage: give up after %{public}d attempts uri=%{public}s',
+              attempt + 1, uri);
+          }
           return;
         }
         // 交给缓存持有（不再自持有，避免与缓存淘汰双重 release）
@@ -3944,15 +3251,23 @@ struct Index {
         this.rightPixelMap = undefined;  // 先撤旧引用，让 upgradePreview 安全 release
         const best: PreviewEntry = this.upgradePreview(e);
         this.rightPixelMap = best.px;
+        if (attempt > 0) {
+          hilog.info(DOMAIN, TAG, 'loadRightPage: decoded ok on retry %{public}d uri=%{public}s', attempt, uri);
+        }
       })
       .catch(() => {
         // 右页解不开就留空，左页照常显示（不把整屏拖成失败态）
+        hilog.warn(DOMAIN, TAG, 'loadRightPage: decode threw (exception) uri=%{public}s', uri);
       });
   }
 
   /** 单页 / 换源时收掉右页（不动左页） */
   private clearRightPage(): void {
     this.rightToken++;
+    if (this.rightRetryTimer !== -1) {
+      clearTimeout(this.rightRetryTimer);   // 第四十七轮：待重试的右页一并作废
+      this.rightRetryTimer = -1;
+    }
     this.releaseRightOwned();
     this.rightPixelMap = undefined;
   }
@@ -3981,15 +3296,7 @@ struct Index {
     return this.cur >= 0 && this.cur < this.items.length ? this.items[this.cur] : undefined;
   }
 
-  /** 信息浮层的档案名：对开时「左名 · 右名」，单页时只有当前名。 */
-  private spreadNames(): string {
-    const a: string = this.curName();
-    const b: number = this.spreadB;
-    if (b >= 0 && b < this.items.length) {
-      return a + '  ·  ' + this.items[b].name;
-    }
-    return a;
-  }
+  // 第五十五轮：spreadNames()（对开「左名 · 右名」拼接）随左上角信息浮层一并移除。
 
   private curName(): string {
     const it = this.curItem();
@@ -4821,6 +4128,11 @@ struct Index {
     const idx: number = r.itemIndex ?? rowIdx;
     if (idx >= 0 && idx < this.items.length) {
       this.select(idx);
+    } else if (kind === ROW_IMAGE) {
+      // 第四十一轮：恢复态纯清单里的图片行不在翻页序列（items 为空、itemIndex=-1），
+      // 旧版这里静默吞掉点击。点它 = 用户主动路径，允许 IO：直接真实重列当前目录
+      // 重建翻页序列，列完再点即可预览。
+      this.openFolder(this.browseBase, true, false);
     }
   }
 
@@ -5287,7 +4599,16 @@ struct Index {
         this.decodeInflight.delete(key);
         if (e === undefined) {
           this.failed.add(uri);
+          return undefined;
         }
+        // 第四十九轮：在途合并的落点收口 —— 解好先入缓存，再交给消费者。
+        // 冷缓存首开时，probeOne 完成回调 / 画布 resize / 预载链推进会在同一张的
+        // 解码窗口内反复触发 loadRightPage：多代回调共享同一条 inflight Entry，
+        // 旧代际 stale 丢弃时 releaseUncachedEntry 会把最新代际正要用的 PixelMap
+        // 一起释放（右页空白，缓存里还可能躺着已释放的死条目）。入缓存后所有权
+        // 归缓存：releaseUncachedEntry 查重跳过、upgradePreview / pushPreview 幂等，
+        // 任何代际的迟到回调都不可能再释放掉别人正用的那张。
+        this.pushPreview(e);
         return e;
       })
       .catch((): PreviewEntry | undefined => {
@@ -6404,12 +5725,34 @@ struct Index {
    *  「往上层」传 false —— 那种兜底会调 setItems 把目录态清掉，反而让往上层白做。 */
   private async openFolder(dirUri: string, resetView: boolean, allowFileFallback?: boolean,
     isRescan?: boolean, extraForms?: string[], fullExplore?: boolean): Promise<boolean> {
+    // 第四十三轮（用户导航抢占）：在途列举不再吞掉用户点击。用户主动导航
+    // （点资料夹 / 往上层 / 重选目录，isRescan !== true）直接抢占在途列举 ——
+    // 旧调用按 openEpoch 作废，结果落地前整段丢弃；自动重扫（isRescan）不抢
+    // 别人也不被抢，保持原「让路」语义。R42 缓存秒开让「列表已显示、后台还在
+    // 核对」成为常态，NAS 上核对动辄数秒，不抢占 = 点资料夹像没反应。
+    if (this.folderBusy && isRescan === true) {
+      return false; // 自动重扫：用户操作在途，让路（原行为）
+    }
+    const myEpoch: number = ++this.openEpoch;
     if (this.folderBusy) {
-      return false; // 上一批还在列，别叠
+      hilog.info(DOMAIN, TAG, 'openFolder: preempt in-flight listing, new=%{public}s', dirUri);
     }
     this.folderBusy = true;
-    const keepUri: string = this.cur >= 0 ? this.items[this.cur].uri : '';
     try {
+      const keepUri: string = this.cur >= 0 ? this.items[this.cur].uri : '';
+      // 第四十二轮（网盘秒开）：非重扫的进目录 / 往上层，若整表缓存里有这一层，
+      // 先用缓存 rows 立即渲染（零 IO、零等待），真实列举继续在后台跑。
+      // 自动重扫（isRescan）不走这里 —— 它本来就有活视图，缓存渲染只会闪一下。
+      const cacheHit: DirRowsCacheEntry | undefined =
+        isRescan === true ? undefined : this.findDirRowsCache(dirUri);
+      const fromCache: boolean = cacheHit !== undefined;
+      if (fromCache) {
+        this.renderDirFromCache(cacheHit!, dirUri, resetView, keepUri);
+      } else if (isRescan !== true) {
+        // 点了必须看得见反应（2026-11-11 实机反馈原则）：NAS 列目录动辄数秒，
+        // 先同步给一句「正在列出」，别让用户以为点击被吞了。
+        this.status = '正在列出 ' + baseName(dirUri) + '…';
+      }
       // picker 的 FOLDER 模式返回的 uri 形态不统一，且 URI 授权是**逐项**的：
       // 能 listFile 不代表能读子文件。逐个候选试，优先挑「子文件真能 open」的那个 base。
       let candidates: string[] = dirCandidates(dirUri);
@@ -6428,40 +5771,69 @@ struct Index {
       let base: string = '';
       let names: string[] = [];
       let childReadable: boolean = false;
-      let fallbackBase: string = '';
       let lastErr: string = '';
       // 第三十五轮：同一目录的多个 URI 写法在逐 URI 授权下**各自只能看到一部分
       // 子目录**。旧版用覆盖式 `names = n` 只留第一份，其余候选真实列出来的兄弟
       // 目录全被丢弃 —— 表现就是「往上层只显示一个目录，没探索这一层其它目录」。
       // 这里把每次成功 listFile 的结果收集起来，循环末合并成完整清单（零新增 IO，
       // 这些 listFile 本来就会跑），再挑「看得最全」的写法做子项 URI 拼接基准。
-      const exploreForms: Array<string> = [];
-      const exploreGroups: Array<Array<string>> = [];
-      for (let c = 0; c < cap; c++) {
-        const cand: string = candidates[c];
-        try {
-          const n: string[] = await fs.listFile(cand, { recursion: false, listNum: 0 });
-          hilog.info(DOMAIN, TAG, 'listFile OK [%{public}d] %{public}s → %{public}d entries',
-            c, cand, n.length);
-          exploreForms.push(cand);
-          exploreGroups.push(n);
-          if (fallbackBase.length === 0) {
-            fallbackBase = cand;
-          }
-          if (n.length > 0 && this.probeChild(cand, n)) {
-            base = cand;
-            childReadable = true;
-            hilog.info(DOMAIN, TAG, 'openFolder using candidate [%{public}d] %{public}s', c, cand);
-            // 第三十六轮：用户主动导航绝不 early break —— 后面的 URI 写法
-            // 往往还能看到别的兄弟资料夹。自动重扫保留早停，防止 NAS 放大 IO。
-            if (!wantFull) {
-              break;
+      let exploreForms: Array<string> = [];
+      let exploreGroups: Array<Array<string>> = [];
+      let fallbackBase: string = '';
+      // 第四十四轮（NAS 重连重试）：重启后首次访问网络目录，挂载 / 持久授权可能
+      // 都还没就绪，fs.listFile 全部候选报 13900002（ENOENT）—— 实机表现就是
+      // 「点资料夹 → 无法列出该目录 · 13900002」。会话内（挂载已热）不会走到这里。
+      // 只对网络目录形态重试（本地 ENOENT 是真删了，快速失败），重试前静默重推
+      // 一次持久授权；等待期间被新导航抢占（epoch 过期）则立即让位。
+      const netRetry: boolean = isNetworkDirUri(dirUri);
+      for (let attempt = 0; ; attempt++) {
+        exploreForms = [];
+        exploreGroups = [];
+        fallbackBase = '';
+        base = '';
+        childReadable = false;
+        for (let c = 0; c < cap; c++) {
+          const cand: string = candidates[c];
+          try {
+            const n: string[] = await fs.listFile(cand, { recursion: false, listNum: 0 });
+            hilog.info(DOMAIN, TAG, 'listFile OK [%{public}d] %{public}s → %{public}d entries',
+              c, cand, n.length);
+            exploreForms.push(cand);
+            exploreGroups.push(n);
+            if (fallbackBase.length === 0) {
+              fallbackBase = cand;
             }
+            if (n.length > 0 && this.probeChild(cand, n)) {
+              base = cand;
+              childReadable = true;
+              hilog.info(DOMAIN, TAG, 'openFolder using candidate [%{public}d] %{public}s', c, cand);
+              // 第三十六轮：用户主动导航绝不 early break —— 后面的 URI 写法
+              // 往往还能看到别的兄弟资料夹。自动重扫保留早停，防止 NAS 放大 IO。
+              if (!wantFull) {
+                break;
+              }
+            }
+          } catch (e) {
+            lastErr = JSON.stringify(e);
+            hilog.warn(DOMAIN, TAG, 'listFile FAIL [%{public}d] %{public}s → %{public}s',
+              c, cand, lastErr);
           }
-        } catch (e) {
-          lastErr = JSON.stringify(e);
-          hilog.warn(DOMAIN, TAG, 'listFile FAIL [%{public}d] %{public}s → %{public}s',
-            c, cand, lastErr);
+        }
+        // 收口：列出来了 / 重试额度用完 / 不是 ENOENT / 不是网络目录 / 自动重扫 —— 都不再重试。
+        if (base.length > 0 || exploreForms.length > 0 || attempt >= NAS_RETRY_DELAYS.length
+          || lastErr.indexOf('13900002') < 0 || !netRetry || isRescan === true) {
+          break;
+        }
+        if (myEpoch !== this.openEpoch) {
+          return true;   // 重试等待期间被抢占：让位（视图已由抢占者接管）
+        }
+        this.status = '网络目录未就绪，正在重连（' + (attempt + 1) + '/' + NAS_RETRY_DELAYS.length + '）…';
+        hilog.warn(DOMAIN, TAG, 'openFolder: ENOENT on network dir, retry %{public}d/%{public}d',
+          attempt + 1, NAS_RETRY_DELAYS.length);
+        await this.reactivatePersistQuiet();
+        await this.nasRetryWait(NAS_RETRY_DELAYS[attempt]);
+        if (myEpoch !== this.openEpoch) {
+          return true;
         }
       }
       // 合并所有真实列举结果：兄弟目录一个不漏，伪行 / 隐藏点文件由纯函数过滤。
@@ -6481,16 +5853,41 @@ struct Index {
             base, exploreForms.length, names.length);
         }
       }
+      // 第四十三轮：列举期间被更新的用户导航抢占 —— 本调用结果整段作废，
+      // 静默退出（视图已由抢占者接管），folderBusy 也归抢占者，finally 不释放。
+      if (myEpoch !== this.openEpoch) {
+        hilog.info(DOMAIN, TAG, 'openFolder: superseded by newer navigation, discard listing');
+        return true;
+      }
       if (base.length === 0) {
-        this.status = '无法列出该目录 · ' + lastErr + '；可点「选择文件夹」重新选择';
+        // 第四十二轮：缓存已把这一层画出来了 —— 列举失败（网盘掉线 / 授权失效）
+        // 也算「进来了」，保留缓存视图当离线快照用，绝不回退到上一层把它冲掉。
+        if (fromCache) {
+          this.status = '已显示缓存目录 · 刷新失败（' + lastErr + '）';
+          hilog.warn(DOMAIN, TAG, 'openFolder: cache shown, refresh failed: %{public}s', lastErr);
+          return true;
+        }
+        this.status = '无法列出该目录 · ' + lastErr +
+          (netRetry && lastErr.indexOf('13900002') >= 0 ? '（网络目录未连接？稍候再点一次）' : '') +
+          '；可点「选择文件夹」重新选择';
         hilog.error(DOMAIN, TAG, 'openFolder all candidates failed: %{public}s', lastErr);
         return false;
       }
       // 自动重扫：mtime 变了不代表条目变了（hover 缩略图解码会读文件，网盘同步目录
       // 还会写本地缓存）。条目名集合一致就只更新基准值，绝不重建列表 ——
       // 否则 applyItems 的 restoreIndex + scrollToIndex 会把用户视图拉回「上次位置」。
-      if (isRescan === true && this.sameDirEntries(names)) {
-        this.dirMtime = this.tryMtime(base);
+      if ((isRescan === true || fromCache) && this.sameDirEntries(names)) {
+        // 第四十六轮：基准 mtime 改异步取（不阻塞短路返回）；被抢占的旧列举
+        // 迟到的结果直接丢弃（epoch 守卫），不污染新目录的基准值。
+        this.tryMtimeAsync(base).then((m0: number) => {
+          if (myEpoch === this.openEpoch && m0 > 0) {
+            this.dirMtime = m0;
+          }
+        });
+        if (fromCache) {
+          // 缓存视图已在线，后台核对完条目没变：视图一个像素都不动，只收掉提示。
+          this.status = '目录已是最新（' + this.itemCount + ' 张）';
+        }
         hilog.info(DOMAIN, TAG, 'rescan: entries unchanged, keep view');
         return true;
       }
@@ -6603,6 +6000,8 @@ struct Index {
       // 同时按层并存快照：单槽 lastUpNames 会被下一次 openFolder 覆盖，
       // 父层那份含全部兄弟目录（2026 / 2025 / 2024 …）的清单就再也找不回来。
       this.cacheUpDirSnapshot(base, rows);
+      // 第四十二轮：整表也存一份（网盘秒开缓存），条目变了的后台刷新会覆盖它。
+      this.cacheDirRows(base, dirLabel, rows);
       this.inAppUpList = false;   // 这次是真列出来的目录态，不是 APP 内自建清单
       // 第十轮 ff1：任何一次「真的列目录成功」都证明路径可达 —— 死路径记忆作废。
       // 只在标记非空时写，自动重扫（每 1.5s）不会因此多写盘。
@@ -6611,10 +6010,20 @@ struct Index {
       }
       this.browseDir = dirUri;
       this.browseBase = base;
-      this.dirMtime = this.tryMtime(base);
+      // 第四十六轮：基准 mtime 改异步取（不阻塞视图刷新）；epoch 守卫同上。
+      this.tryMtimeAsync(base).then((m0: number) => {
+        if (myEpoch === this.openEpoch && m0 > 0) {
+          this.dirMtime = m0;
+        }
+      });
       this.startDirPoll();
-      // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）
-      this.applyItems(imgs, dirLabel, '', rows, isRescan === true);
+      // 重扫时保持当前张：按 uri 找回落点，不让画面闪一下（Win64 2bcbbb1）。
+      // 第四十二轮：缓存先渲染后的后台刷新同样保位 —— 用户可能已经在缓存视图里
+      // 翻了几张，绝不能因为刷新完成把视图拉回第 1 张。
+      this.applyItems(imgs, dirLabel, '', rows, isRescan === true || fromCache);
+      if (fromCache) {
+        this.status = '目录已刷新（' + imgs.length + ' 张 · ' + dirLabel + '）';
+      }
       if (keepUri.length > 0 && !resetView) {
         for (let i = 0; i < imgs.length; i++) {
           if (imgs[i].uri === keepUri) {
@@ -6654,7 +6063,11 @@ struct Index {
         imgs.length, rows.length, base);
       return true;
     } finally {
-      this.folderBusy = false;
+      // 第四十三轮：只有「当前代际」的持有者才能放锁 —— 被抢占的旧调用
+      // 若在这里放锁，会把新调用正握着的 folderBusy 清掉，导致重入。
+      if (myEpoch === this.openEpoch) {
+        this.folderBusy = false;
+      }
     }
   }
 
@@ -6684,11 +6097,46 @@ struct Index {
     return false;
   }
 
-  private tryMtime(uri: string): number {
+  /** 第四十六轮：mtime 探测改**异步** stat + 3s 超时。
+   *  旧版 statSync 是主线程上的同步跨进程调用 —— NAS 中途掉线 / 休眠时一次
+   *  statSync 能挂住主线程 6 秒以上（appfreeze THREAD_BLOCK_6S：进程跑了约 3 小时后
+   *  命中，期间每 1.5s 轮询一次）。异步化后挂住的 stat 不再冻结 UI；race 超时按
+   *  「本轮没探到」（0）处理。复用 nasRetryWait 做延时，不新增 Promise 构造。 */
+  private async tryMtimeAsync(uri: string): Promise<number> {
     try {
-      return fs.statSync(uri).mtime;
+      const st: fs.Stat | number = await Promise.race([
+        fs.stat(uri),
+        this.nasRetryWait(MTIME_STAT_TIMEOUT_MS).then((): number => 0)
+      ]);
+      if (typeof st === 'number') {
+        hilog.warn(DOMAIN, TAG, 'tryMtime: stat timeout (>3s), skip this round');
+        return 0;
+      }
+      return st.mtime;
     } catch (e) {
       return 0;
+    }
+  }
+
+  /** 轮询单轮：mtime 变了 → 去抖重扫。逻辑与旧版逐行等价，只是 stat 换成异步。 */
+  private async pollMtimeOnce(): Promise<void> {
+    this.mtimeBusy = true;
+    try {
+      const m: number = await this.tryMtimeAsync(this.browseBase);
+      if (m > 0 && this.dirMtime > 0 && m !== this.dirMtime) {
+        this.dirMtime = m;
+        if (this.rescanTimer !== -1) {
+          clearTimeout(this.rescanTimer);
+        }
+        this.rescanTimer = setTimeout(() => {
+          this.rescanTimer = -1;
+          // 第 4 参 true = 自动重扫：内容没变就跳过，内容变了也保持当前视图，
+          // 绝不把用户拉回「上次位置」。第 3 参 false = 重扫不弹文件多选。
+          this.openFolder(this.browseBase, false, false, true);
+        }, DIR_RESCAN_DEBOUNCE_MS);
+      }
+    } finally {
+      this.mtimeBusy = false;
     }
   }
 
@@ -6721,22 +6169,12 @@ struct Index {
       clearInterval(this.dirPollTimer);
     }
     this.dirPollTimer = setInterval(() => {
-      if (this.browseBase.length === 0 || this.folderBusy || this.playing) {
+      // 第四十六轮：mtime 探测异步化 —— 上一轮 stat 还没回来（网络挂起）时跳过本轮，
+      // 绝不让慢 stat 在定时器里堆叠；folderBusy / playing 让路的原语义不变。
+      if (this.browseBase.length === 0 || this.folderBusy || this.playing || this.mtimeBusy) {
         return;
       }
-      const m: number = this.tryMtime(this.browseBase);
-      if (m > 0 && this.dirMtime > 0 && m !== this.dirMtime) {
-        this.dirMtime = m;
-        if (this.rescanTimer !== -1) {
-          clearTimeout(this.rescanTimer);
-        }
-        this.rescanTimer = setTimeout(() => {
-          this.rescanTimer = -1;
-          // 第 4 参 true = 自动重扫：内容没变就跳过，内容变了也保持当前视图，
-          // 绝不把用户拉回「上次位置」。第 3 参 false = 重扫不弹文件多选。
-          this.openFolder(this.browseBase, false, false, true);
-        }, DIR_RESCAN_DEBOUNCE_MS);
-      }
+      this.pollMtimeOnce();
     }, DIR_POLL_MS);
   }
 
@@ -6912,6 +6350,137 @@ struct Index {
     this.rebuildUpParentIndex();
   }
 
+  /** 第四十二轮（网盘秒开）：把一次真实列举的整表 rows 存进 LRU 缓存。
+   *  sameDirPath 去重（file://docs / %XX / 尾斜杠写法视为同一目录），
+   *  新的放队头，超上限裁尾。零 IO，纯内存。 */
+  private cacheDirRows(base: string, label: string, rows: Array<ImageItem>): void {
+    if (base.length === 0) {
+      return;
+    }
+    for (let i = 0; i < this.dirRowsCache.length; i++) {
+      if (sameDirPath(this.dirRowsCache[i].path, base)) {
+        this.dirRowsCache.splice(i, 1);
+        break;
+      }
+    }
+    this.dirRowsCache.unshift({ path: base, label: label, rows: rows, at: Date.now() });
+    if (this.dirRowsCache.length > DIR_ROWS_CACHE_MAX) {
+      this.dirRowsCache.length = DIR_ROWS_CACHE_MAX;
+    }
+    hilog.info(DOMAIN, TAG, 'cacheDirRows: %{public}s rows=%{public}d total=%{public}d',
+      base, rows.length, this.dirRowsCache.length);
+  }
+
+  /** 第四十二轮：按目录 URI 找整表缓存。dirUri 的全部候选写法逐一对
+   *  sameDirPath 模糊匹配；命中即提到 LRU 队头。找不到返回 undefined。 */
+  private findDirRowsCache(dirUri: string): DirRowsCacheEntry | undefined {
+    if (dirUri.length === 0) {
+      return undefined;
+    }
+    const cands: string[] = dirCandidates(dirUri);
+    for (let i = 0; i < this.dirRowsCache.length; i++) {
+      const e: DirRowsCacheEntry = this.dirRowsCache[i];
+      for (let c = 0; c < cands.length; c++) {
+        if (sameDirPath(e.path, cands[c])) {
+          this.dirRowsCache.splice(i, 1);
+          this.dirRowsCache.unshift(e);
+          return e;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /** 第四十二轮：缓存行按当前排序方向重排（缓存时可能是另一个方向）。
+   *  与 openFolder 真实列举的分组排序完全同构：'..' → 文件夹 → 图片（重编
+   *  itemIndex）→ 文本 → 其它；纯内存操作，零 IO。 */
+  private resortDirRows(rows: Array<ImageItem>, asc: boolean): Array<ImageItem> {
+    const dirs: ImageItem[] = [];
+    const imgs: ImageItem[] = [];
+    const texts: ImageItem[] = [];
+    const others: ImageItem[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r: ImageItem = rows[i];
+      const k: number = r.kind ?? ROW_IMAGE;
+      if (k === ROW_UP) {
+        continue;
+      }
+      if (k === ROW_FOLDER) {
+        dirs.push(r);
+      } else if (k === ROW_IMAGE) {
+        imgs.push(r);
+      } else if (k === ROW_TEXT) {
+        texts.push(r);
+      } else {
+        others.push(r);
+      }
+    }
+    const cmp = (a: ImageItem, b: ImageItem): number => naturalCompare(a.name, b.name);
+    dirs.sort(cmp);
+    imgs.sort(cmp);
+    texts.sort(cmp);
+    others.sort(cmp);
+    if (!asc) {
+      dirs.reverse();
+      imgs.reverse();
+      texts.reverse();
+      others.reverse();
+    }
+    const out: ImageItem[] = [];
+    out.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+    for (let i = 0; i < dirs.length; i++) {
+      out.push(dirs[i]);
+    }
+    for (let i = 0; i < imgs.length; i++) {
+      imgs[i].itemIndex = i;
+      out.push(imgs[i]);
+    }
+    for (let i = 0; i < texts.length; i++) {
+      out.push(texts[i]);
+    }
+    for (let i = 0; i < others.length; i++) {
+      out.push(others[i]);
+    }
+    return out;
+  }
+
+  /** 第四十二轮（网盘秒开）：用整表缓存立即渲染目录态 —— 零 IO、零等待。
+   *  只做渲染与状态落地，不碰 dirMtime（保持 0，等真实列举 / 轮询补真值），
+   *  不清死路径记忆（真实列举成功才清）。真实列举仍在同一 openFolder 调用里
+   *  后台进行：条目没变 → sameDirEntries 短路，视图一个像素不动；
+   *  条目变了 → applyItems 保位刷新；列举失败 → 保留缓存视图当离线快照。 */
+  private renderDirFromCache(hit: DirRowsCacheEntry, dirUri: string, resetView: boolean,
+    keepUri: string): void {
+    const rows: Array<ImageItem> = this.resortDirRows(hit.rows, this.sortAsc);
+    const imgs: ImageItem[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      if ((rows[i].kind ?? ROW_IMAGE) === ROW_IMAGE) {
+        imgs.push(rows[i]);
+      }
+    }
+    this.inAppUpList = false;
+    this.browseDir = dirUri;
+    this.browseBase = hit.path;
+    this.dirMtime = 0;
+    this.startDirPoll();
+    this.applyItems(imgs, hit.label, '', rows, false);
+    // 与真实列举路径的 keepUri 块同构：重选同一目录（resetView=false）时保住
+    // 当前那张，不因缓存先渲染跳回第 1 张（后台核对没变也不会再修正一次）。
+    if (keepUri.length > 0 && !resetView) {
+      for (let i = 0; i < imgs.length; i++) {
+        if (imgs[i].uri === keepUri) {
+          this.cur = i;
+          this.dataSource.reload(this.rows);
+          break;
+        }
+      }
+    }
+    this.refreshSpread();
+    this.status = '已显示缓存目录（后台刷新中…）';
+    hilog.info(DOMAIN, TAG, 'renderDirFromCache: %{public}s rows=%{public}d imgs=%{public}d',
+      hit.path, rows.length, imgs.length);
+  }
+
   /** 第三十一轮：行式快照文本含 SOH / STX 分隔符（XML 非法控制字符），
    *  直接写 preferences 会让 putSync / flushSync 抛异常并写坏 KV 文件。
    *  编码成纯可打印文本再落盘，从根上消除本回归；decode 侧在 readBrowseExtras。
@@ -6975,8 +6544,16 @@ struct Index {
   /** 第二十九轮：用快照里 statSync 判出的真实行种类，而不是「名字里有没有点」猜。
    *  兄弟目录名带点（`Vol.2`、`2026.备份`）时，旧名字启发式会判成 ROW_OTHER，
    *  而 ROW_OTHER 在 onRowTap 里不可点 —— 目录就「看得到但进不去」。
-   *  没有快照时仍退回旧启发式，零回归。 */
-  private upListKindOf(target: string, name: string, fallback: number): number {
+   *  没有快照时仍退回旧启发式，零回归。
+   *
+   *  第四十一轮：新增 keepFileKinds（默认 false = 上层清单原行为）。
+   *  上层清单所在的父目录**没有 URI 授权**（showUpListInApp 只在 openFolder 列不出
+   *  时才用），文件行点了也读不了，所以仍折叠成 ROW_OTHER 给「不支持预览」的
+   *  明确反馈；而 restoreDirContextOnly 恢复的是**有持久授权**的上次目录
+   *  （activatePersistedUri 已异步激活），文件行按快照真实种类直传 ——
+   *  .log 等文本行保持 ROW_TEXT，点了直接进文本预览，不再被误报「不支持预览」。 */
+  private upListKindOf(target: string, name: string, fallback: number,
+    keepFileKinds?: boolean): number {
     for (let i = 0; i < this.upDirCache.length; i++) {
       const snap: UpDirSnapshot = this.upDirCache[i];
       if (!sameDirPath(snap.path, target)) {
@@ -6984,6 +6561,9 @@ struct Index {
       }
       for (let j = 0; j < snap.names.length && j < snap.kinds.length; j++) {
         if (snap.names[j] === name && snap.kinds[j] >= 0) {
+          if (keepFileKinds === true) {
+            return snap.kinds[j];
+          }
           return snap.kinds[j] === ROW_FOLDER ? ROW_FOLDER : ROW_OTHER;
         }
       }
@@ -7013,10 +6593,8 @@ struct Index {
     if (this.textMode) {
       this.closeTextMode();
     }
-    if (this.folderBusy) {
-      this.status = '往上层：上一批目录还在列，稍候再点';
-      return;
-    }
+    // 第四十三轮：不再因 folderBusy 早退 —— 用户点「往上层」是主动导航，
+    // openFolder 会抢占在途列举（epoch 作废旧结果），这里直接放行。
     // 只读名单态 + **没有**目录层级（老快照没存过 picker 原始目录 URI）：
     // 绝不禁用按钮 —— 点了必须给明确指引，不能像没反应一样（2026-11-11 实机反馈）。
     // 2026-11-11 第三次反馈：若 restoreBrowseContext 已从持久授权目录 URI 重建层级，
@@ -7819,6 +7397,11 @@ struct Index {
       this.status = this.listCollapsed ? '已收起左栏（Ctrl+B 展开）' : '已展开左栏';
       return;
     }
+    // 第五十一轮：Ctrl+C 在文本态且有行段选区时复制所选；无选区不吞键，交给系统。
+    if (this.ctrlDown && code === KeyCode.KEYCODE_C && this.textMode && this.textSelAnchor >= 0) {
+      this.copyTextSelection();
+      return;
+    }
     // 第二十五轮：诊断层开关 Ctrl+D（不占任何 UI 空间，回归复查一键展开）。
     if (this.ctrlDown && code === KeyCode.KEYCODE_D) {
       this.toggleDiagOverlay();
@@ -8209,29 +7792,6 @@ struct Index {
   // UI 片段
   // ------------------------------------------------------------------
 
-  /** 三个工具按钮共用的外观 —— **恒亮、恒可点，永不 grey out / 永不禁用**。
-   *
-   *  2026-11-11 用户澄清：上一版把「按钮 grey out」的反馈理解反了，那是**抱怨**按钮被灰掉、
-   *  要求修正，不是要禁用。所以这里回到无条件外观：
-   *   · 无 .enabled()、无 .opacity() 条件、无条件 fontColor / backgroundColor；
-   *   · 签名回到三参，不再接受任何「是否可用」入参，从类型上杜绝再次被禁用；
-   *   · 到卷根 / 图片列表态 / 启动恢复态点击都照常进 doAction('up') → browseUp()，
-   *     由 upNavStateOf 给准确提示，不移动目录。诊断信息完整保留。 */
-  @Builder
-  toolBtn(label: string, act: string, flex: boolean) {
-    Button(label)
-      .type(ButtonType.Normal)
-      .fontSize(12)
-      .fontColor('#e8ecf4')
-      .backgroundColor('#2a2f3a')
-      .borderRadius(6)
-      .height(30)
-      .padding({ left: 10, right: 10 })
-      .margin(3)
-      .layoutWeight(flex ? 1 : 0)
-      .onClick(() => this.doAction(act))
-  }
-
   /** 第十四轮：预览图放大镜浮层（6cm 圆形 / 3 倍局部 / 跟随光标 / 边缘夹界）。
    *  第十五轮：总开关 loupeEnabled 预设关闭，右键 toggle 后才绘制；关闭时
    *  loupePane / loupeHover / 坐标仍照常维护，开启即可立即显示，无需重新移入。
@@ -8466,7 +8026,7 @@ struct Index {
       Row() {
         // 11-10 起按用户要求彻底移除「选择图片」与「回到上次」两个按钮及其入口；
         // 顶栏其余按钮（全屏 / 幻灯片）与事件保持不变。
-        this.toolBtn('全屏', 'full', false)
+        ToolButton({ label: '全屏', act: 'full', flex: false, onAction: (a: string): void => { this.doAction(a); } })
         Button(this.playing ? '暂停' : '幻灯片')
           .type(ButtonType.Normal)
           .fontSize(13)
@@ -8501,125 +8061,40 @@ struct Index {
         Row() {
         // ---------- 左侧：图像档案列表 ----------
         if (!this.fullscreen) {
-          Column() {
-            Row() {
-              Text(this.source)
-                .fontSize(13)
-                .fontWeight(FontWeight.Bold)
-                .fontColor('#dfe5ef')
-                .layoutWeight(1)
-              // 第十一轮：版本号只在最顶部标题栏（topBar 的 PIKAN 版本号）显示一次，
-              // 第二栏不再重复；这里只留档案张数，样式 / 位置都不变。
-              Text(this.itemCount > 0 ? this.itemCount + ' 张' : '')
-                .fontSize(12)
-                .fontColor('#7f88a3')
-            }
-            .width('100%')
-            .padding({ left: 12, right: 12, top: 10, bottom: 8 })
-
-            // 11-10 起：排序 / 往上层 / 选择文件夹 三个按钮水平排在同一行。
-            // toolBtn 的 layoutWeight(1) 三等分宽度 → 水平间距由统一的 margin(3) 决定，一致；
-            // 统一 height(30) + Row 垂直居中 → 垂直对齐整齐；
-            // 合并掉原来的第二行后，按钮区不再有多余垂直空白，也不会重叠 / 错位。
-            Row() {
-              this.toolBtn(this.sortAsc ? '排序 ↑' : '排序 ↓', 'sort', true)
-              // 「往上层」恒亮恒可点（2026-11-11：不要 grey out、不能禁用）。
-              // canGoUp 只用于状态栏 / 诊断串 / browseUp 行为判据，不传进按钮。
-              this.toolBtn('往上层', 'up', true)
-              this.toolBtn('选择文件夹', 'folder', true)
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Center)
-            .padding({ left: 6, right: 6, bottom: 6 })
-            .border({ width: { bottom: 1 }, color: '#2a2f3a' })
-
-            // 目录里零图片但有一堆子文件夹时，列表照常渲染，只是在上面补一行说明，
-            // 别让用户把「本层没有图片」误看成「又空白了」。
-            if (this.dirHint.length > 0 && this.rowCount > 0) {
-              Text(this.dirHint)
-                .fontSize(11)
-                .fontColor('#8b95a8')
-                .width('100%')
-                .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-                .backgroundColor('#1c212a')
-            }
-
-            // ⚠️ 判空态用 rowCount（左栏实际行数），不能用 itemCount（只算图片）：
-            // 「人像」这类全是子文件夹、零图片的目录 itemCount=0 但 rows 有内容，
-            // 旧版会整块换成「还没有图片」空态，目录表一行都不显示。
-            if (this.rowCount === 0) {
-              Column() {
-                Text('还没有图片')
-                  .fontSize(13)
-                  .fontColor('#7f88a3')
-                  .margin({ bottom: 6 })
-                if (this.resumeHint.length > 0) {
-                  Text(this.resumeHint)
-                    .fontSize(11)
-                    .fontColor('#7f88a3')
-                    .textAlign(TextAlign.Center)
-                    .margin({ bottom: 6 })
-                }
-                Text('点左栏「选择文件夹」浏览目录')
-                  .fontSize(11)
-                  .fontColor('#5a6272')
-                  .textAlign(TextAlign.Center)
+          // R40（Index.ets 拆分 Phase 3）：左栏整体迁至 components/SidebarView.ets；
+          // 状态仍归 Index（@Prop 下传 / 回调上抛），UI 描述与拆分前逐行等价。
+          SidebarView({
+            source: this.source,
+            itemCount: this.itemCount,
+            sortAsc: this.sortAsc,
+            dirHint: this.dirHint,
+            rowCount: this.rowCount,
+            resumeHint: this.resumeHint,
+            cur: this.cur,
+            listCollapsed: this.listCollapsed,
+            listW: this.listW,
+            scroller: this.scroller,
+            dataSource: this.dataSource,
+            restoreReadonly: (): boolean => this.restoreMode === RESTORE_READONLY,
+            onRowTap: (i: number): void => {
+              this.onRowTap(i);
+            },
+            onDblTap: (i: number): void => {
+              // Win64 7ff850d：双击档案名切换全屏（只对图片行生效）
+              const r: ImageItem | undefined = this.rows[i];
+              if (r !== undefined && (r.kind ?? ROW_IMAGE) === ROW_IMAGE) {
+                this.undoLastClickZoom();
+                this.toggleFull();
               }
-              .width('100%')
-              .layoutWeight(1)
-              .justifyContent(FlexAlign.Center)
-              .alignItems(HorizontalAlign.Center)
-            } else {
-              // LazyForEach + cachedCount：只为「屏幕上这几行 + 少量缓存」创建节点。
-              // 用 ForEach 的话会为数组中每一项都建组件，几百张图就是几百个 ListItem，
-              // 内存与节点数随图片数线性增长 —— 这是图片一多就崩的原因之一。
-              List({ scroller: this.scroller, space: LIST_ROW_GAP_VP }) {
-                LazyForEach(this.dataSource, (item: ImageItem, idx: number) => {
-                  ListItem() {
-                    ArchiveRow({
-                      uri: item.uri,
-                      name: item.name,
-                      bytes: item.size,
-                      mtime: item.mtime ?? 0,
-                      kind: item.kind ?? ROW_IMAGE,
-                      idx: idx,
-                      selected: (item.itemIndex ?? idx) === this.cur,
-                       collapsed: this.listCollapsed,
-                       thumbDisabled: this.restoreMode === RESTORE_READONLY,
-                       onTap: (i: number) => {
-                        this.onRowTap(i);
-                      },
-                      onDblTap: (i: number) => {
-                        // Win64 7ff850d：双击档案名切换全屏（只对图片行生效）
-                        const r: ImageItem | undefined = this.rows[i];
-                        if (r !== undefined && (r.kind ?? ROW_IMAGE) === ROW_IMAGE) {
-                          this.undoLastClickZoom();
-                          this.toggleFull();
-                        }
-                      }
-                    })
-                  }
-                }, (item: ImageItem) => item.uri)
-              }
-              .layoutWeight(1)
-              .width('100%')
-              .scrollBar(BarState.Auto)
-              .padding({ left: 8, right: 8 })
-              .cachedCount(6)
-              // 第十三轮：记录左栏可见范围，供点选 / 翻页的滚动判定使用。
-              // 只读数值、不驱动 UI，故直接写普通字段（不进状态系统）。
-              .onScrollIndex((first: number, last: number, center: number) => {
-                this.listFirstRow = first;
-                this.listLastRow = last;
-              })
+            },
+            onAction: (act: string): void => {
+              this.doAction(act);
+            },
+            onScrollIndex: (first: number, last: number): void => {
+              this.listFirstRow = first;
+              this.listLastRow = last;
             }
-  
-            // 11-10 起按用户要求取消左下角 4 行 × 2 列共 8 个视图控制按钮。
-            // 缩放 / 旋转 / 镜像 / 复位能力仍由键盘与鼠标提供（见 README 快捷键表）。
-          }
-          .width(this.listCollapsed ? LIST_COLLAPSED_W : this.listW)
-          .height('100%')
-          .backgroundColor('#161a21')
+          })
 
           // 分隔条正中的 « / »（Win64 45~49 行）：与 Ctrl+B 同效。
           // 收起后按钮仍在原地，再点一下展回来；全屏时随左栏一起整条隐藏。
@@ -8746,52 +8221,28 @@ struct Index {
             .hitTestBehavior(HitTestMode.Transparent)
           }
 
-          // 左上角信息浮层（Win64 015464f：只留档案名；对开时两个数并列）
-          Row() {
-            Column() {
-              Text(this.spreadNames())
-                .fontSize(12)
-                .fontColor('#e8ecf4')
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-              Text(extOf(this.curName()) + ' · ' + fmtBytes(this.bytes) +
-                (this.imgW > 0 ? (' · ' + this.imgW + '×' + this.imgH) : ''))
-                .fontSize(11)
-                .fontColor('#8b95a8')
-                .margin({ top: 2 })
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-              // 内嵌 ICC 识别出来的色彩空间 / HDR / EXIF 摆正角度（ViewPlan.viewHintOf）
-              Text(viewHintOf(colorSpaceNameOf(this.viewColorSpace), this.viewIsHdr, this.viewExifDegrees) +
-                (isWideGamutOf(this.viewColorSpace) ? ' · 广色域' : ''))
+          // 第五十五轮：左上角档案名 / 大小 / 色彩信息浮层按用户要求取消 —— 平时预览区
+          // 不再有任何常显角标；全屏时保留一行退出提示（真全屏没有任何标题列 / 按钮，
+          // 这是唯一指引，且只在全屏出现）。
+          if (this.fullscreen) {
+            Row() {
+              Text('全屏 · Esc / F11 / 双击退出')
                 .fontSize(10)
                 .fontColor('#8b95a8')
-                .margin({ top: 2 })
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-              // 全屏没有任何标题列 / 按钮，只能在这里告诉用户怎么退出
-              if (this.fullscreen) {
-                Text('全屏 · Esc / F11 / 双击退出')
-                  .fontSize(10)
-                  .fontColor('#8b95a8')
-                  .margin({ top: 2 })
-              }
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .backgroundColor('#cc12161c')
+                .borderRadius(6)
             }
-            .alignItems(HorizontalAlign.Start)
-            .padding(8)
-            .backgroundColor('#cc12161c')
-            .borderRadius(6)
-            .constraintSize({ maxWidth: 360 })
+            .width('100%')
+            .height('100%')
+            .justifyContent(FlexAlign.Start)
+            .alignItems(VerticalAlign.Top)
+            .padding(12)
+            .hitTestBehavior(HitTestMode.Transparent)
           }
-          .width('100%')
-          .height('100%')
-          .justifyContent(FlexAlign.Start)
-          .alignItems(VerticalAlign.Top)
-          .padding(12)
-          .hitTestBehavior(HitTestMode.Transparent)
 
-          // 右下角角标：只显示「缩放百分比」一项（第七轮：移除百分比上方的「缓存 N 张」）。
-          // 目录诊断串默认隐藏（SHOW_DIAG_BADGE=false）；需要实机截图排查时把开关改 true，
+          // 右下角角标：正式版不画任何常显项（第五十五轮按用户要求取消缩放百分比方块）。
+          // 目录诊断串默认隐藏（SHOW_DIAG_BADGE=false）；诊断层由 Ctrl+D 展开，
           // diagLine 的赋值逻辑一直在，改一行常量即可恢复，不动任何业务流程。
           Column() {
             if (SHOW_DIAG_BADGE && this.diagLine.length > 0) {
@@ -8832,48 +8283,35 @@ struct Index {
                   .margin({ bottom: 6 })
               }
             }
-            Row() {
-              // 第二十五轮：诊断层展开时显示「退出 APP」+ 全字段角标；
-              // 关闭时只留缩放百分比，界面回到正式版。
-              if (this.diagOverlayOn) {
-                // 第二十三轮：ESC 被系统全局消费时 **100% 可用** 的退出入口。
-                // 鼠标点击不依赖任何键盘事件 / 焦点 / 窗口形态，全屏与普通模式都可见。
-                Text('退出 APP')
-                  .fontSize(10)
-                  .fontColor('#ff9a9a')
-                  .padding({ left: 6, right: 6, top: 4, bottom: 4 })
-                  .backgroundColor('#cc12161c')
-                  .borderRadius(4)
-                  .margin({ right: 6 })
-                  .onClick(() => {
-                    this.quitApp();
-                  })
-                Text(this.zoomPercentText() + ' · ' + ESC_BUILD_TAG +
-                  ' · full=' + (this.fullscreen ? 'T' : 'F') +
-                  ' · win=' + (this.winFullBySystem ? 'T' : 'F') +
-                  ' · keys=' + this.keySeen +
-                  ' · dsp=' + this.dispatchSeen + ' · hk=' + this.hkDiag +
-                  ' · ' + this.winFocusDiag)
-                  .fontSize(12)
-                  .fontColor('#dfe5ef')
-                  .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                  .backgroundColor('#cc12161c')
-                  .borderRadius(4)
-                  .onClick(() => {
-                    this.toggleDiagOverlay();
-                  })
-              } else {
-                // 正式版：只有缩放百分比。单击可随时展开诊断层（回归复查入口）。
-                Text(this.zoomPercentText())
-                  .fontSize(12)
-                  .fontColor('#dfe5ef')
-                  .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                  .backgroundColor('#cc12161c')
-                  .borderRadius(4)
-                  .onClick(() => {
-                    this.toggleDiagOverlay();
-                  })
-              }
+            // 第五十五轮：正式版右下角不再常显「缩放百分比」角标（用户要求取消）；
+            // 诊断层（Ctrl+D）展开时仍显示「退出 APP」+ 全字段角标，回归排查入口不变。
+            if (this.diagOverlayOn) {
+              // 第二十三轮：ESC 被系统全局消费时 **100% 可用** 的退出入口。
+              // 鼠标点击不依赖任何键盘事件 / 焦点 / 窗口形态，全屏与普通模式都可见。
+              Text('退出 APP')
+                .fontSize(10)
+                .fontColor('#ff9a9a')
+                .padding({ left: 6, right: 6, top: 4, bottom: 4 })
+                .backgroundColor('#cc12161c')
+                .borderRadius(4)
+                .margin({ right: 6 })
+                .onClick(() => {
+                  this.quitApp();
+                })
+              Text(this.zoomPercentText() + ' · ' + ESC_BUILD_TAG +
+                ' · full=' + (this.fullscreen ? 'T' : 'F') +
+                ' · win=' + (this.winFullBySystem ? 'T' : 'F') +
+                ' · keys=' + this.keySeen +
+                ' · dsp=' + this.dispatchSeen + ' · hk=' + this.hkDiag +
+                ' · ' + this.winFocusDiag)
+                .fontSize(12)
+                .fontColor('#dfe5ef')
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .backgroundColor('#cc12161c')
+                .borderRadius(4)
+                .onClick(() => {
+                  this.toggleDiagOverlay();
+                })
             }
           }
           .width('100%')
@@ -9164,6 +8602,7 @@ struct Index {
     this.textName = '';
     this.textStatusText = '';
     this.textTruncated = false;
+    this.clearTextSelection();
   }
 
   /** 解码结果落地：切行 / 算行号栏宽 / 算横向滚动宽 / 通知 LazyForEach 重取。
@@ -9186,6 +8625,8 @@ struct Index {
     this.textSource.reload(split.lines);
     this.textScroller.scrollToIndex(0, false);
     this.textHScroller.scrollTo({ xOffset: 0, yOffset: 0 });
+    this.textFirstRow = 0;
+    this.textLastRow = 0;
     hilog.info(DOMAIN, TAG,
       'text open name=%{public}s lang=%{public}d enc=%{public}s lines=%{public}d trunc=%{public}d',
       name, lang, encLabel, split.lines.length, truncated ? 1 : 0);
@@ -9214,6 +8655,7 @@ struct Index {
     this.textLines = [];
     this.textBlockStarts = [];
     this.textSource.reload([]);
+    this.clearTextSelection();
     let file: fs.File | undefined = undefined;
     try {
       const st: fs.Stat = await fs.stat(uri);
@@ -9303,6 +8745,169 @@ struct Index {
     return tokenizeLine(this.textLines[idx], this.textLang, inBlock, true).tokens;
   }
 
+  /** 第五十一轮：行段选择 —— 范围 / 高亮 / 点选交互 / 复制 / 清除。
+   *  纯 onClick 实现点两条定范围（不依赖 Shift 键态跟踪，键态在窗口失焦时会丢 Up）；
+   *  复制走系统剪贴板（pasteboard），状态栏回报行号范围。 */
+  private textSelRange(): Array<number> {
+    if (this.textSelAnchor < 0 || this.textSelFocus < 0) {
+      return [];
+    }
+    const a: number = Math.min(this.textSelAnchor, this.textSelFocus);
+    const b: number = Math.max(this.textSelAnchor, this.textSelFocus);
+    return [a, b];
+  }
+
+  private isTextRowSelected(idx: number): boolean {
+    const r: Array<number> = this.textSelRange();
+    return r.length === 2 && idx >= r[0] && idx <= r[1];
+  }
+
+  private textSelLabel(): string {
+    if (this.textSelAnchor < 0 || this.textSelFocus < 0) {
+      return '';
+    }
+    const a: number = Math.min(this.textSelAnchor, this.textSelFocus);
+    const b: number = Math.max(this.textSelAnchor, this.textSelFocus);
+    const n: number = b - a + 1;
+    const head: string = a === b ? '已选第 ' + (a + 1) + ' 行'
+      : '已选第 ' + (a + 1) + '–' + (b + 1) + ' 行（' + n + ' 行）';
+    return head + ' · 点两条定范围，再点重选';
+  }
+
+  /** 第五十四轮：选段交互改为「按住左键定起点 → 拖动实时扩展 → 松开定终点」
+   *  （替换第五十一轮的两次点击定界）。按住期间滚轮仍可滚动列表（滚着选跨屏段落）；
+   *  再按一次重新选；取消走抬头「清除」按钮。onMouse 挂在 List 上统一收口：
+   *  行级事件全部冒泡到 List（ArkUI 按住后 Move/Release 也不离开本组件），坐标即列表系。 */
+  private textRowAt(y: number): number {
+    const total: number = this.textTotalRows();
+    if (total <= 0) {
+      return -1;
+    }
+    if (y !== y) { // NaN：某些机型 MouseEvent 不给坐标，保持现状
+      return this.textSelFocus;
+    }
+    const off: number = Number(this.textScroller.currentOffset().yOffset ?? 0);
+    let row: number = Math.floor((off + y) / TEXT_ROW_H_VP);
+    // 可见范围夹取：指针在视口上下沿之外时贴到首 / 末可见行，
+    // 不越界选到文档头尾（要跨屏选就按住 + 滚轮滚动）。
+    const vRows: number = this.textVpH > 0 ? Math.max(1, Math.round(this.textVpH / TEXT_ROW_H_VP)) : total;
+    const first: number = Math.max(0, Math.floor(off / TEXT_ROW_H_VP));
+    const last: number = Math.min(total - 1, first + vRows - 1);
+    if (row < first) {
+      row = first;
+    }
+    if (row > last) {
+      row = last;
+    }
+    return row;
+  }
+
+  private onTextMouse(event: MouseEvent): void {
+    if (event.action === MouseAction.Press) {
+      if (event.button !== MouseButton.Left) {
+        return; // 只认左键选段；右键 / 中键不碰选区
+      }
+      this.textSelAnchor = this.textRowAt(Number(event.y));
+      this.textSelFocus = this.textSelAnchor;
+      this.textSelDragging = true;
+      return;
+    }
+    if (event.action === MouseAction.Move && this.textSelDragging) {
+      this.textSelFocus = this.textRowAt(Number(event.y));
+      return;
+    }
+    if (event.action === MouseAction.Release && this.textSelDragging) {
+      this.textSelFocus = this.textRowAt(Number(event.y));
+      this.textSelDragging = false;
+    }
+  }
+
+  private copyTextSelection(): void {
+    const r: Array<number> = this.textSelRange();
+    if (r.length !== 2) {
+      return;
+    }
+    const last: number = Math.min(r[1], this.textLines.length - 1);
+    const parts: Array<string> = [];
+    for (let i = r[0]; i <= last; i++) {
+      parts.push(this.textLines[i]);
+    }
+    if (parts.length === 0) {
+      return;
+    }
+    const data: pasteboard.PasteData =
+      pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, parts.join('\n'));
+    pasteboard.getSystemPasteboard().setData(data)
+      .then(() => {
+        this.status = '已复制第 ' + (r[0] + 1) + '–' + (last + 1) + ' 行（' + parts.length +
+          ' 行）到剪贴板 · ' + ESC_BUILD_TAG;
+      })
+      .catch(() => {
+        this.status = '复制失败（剪贴板不可用）· ' + ESC_BUILD_TAG;
+      });
+  }
+
+  private clearTextSelection(): void {
+    this.textSelAnchor = -1;
+    this.textSelFocus = -1;
+    this.textSelDragging = false;  // R54：松键判定一并复位，防半路丢 Release 后误扩展
+  }
+
+  /** 第五十二轮：自绘纵向滚动条的几何与拖动。 */
+  private textTotalRows(): number {
+    return this.textLines.length;
+  }
+
+  /** 视口能放下的行数（按行高估算；onScrollIndex 的 last 滞后半行，只做参考值）。 */
+  private textVisibleRows(): number {
+    if (this.textVpH <= 0) {
+      return 1;
+    }
+    return Math.max(1, Math.round(this.textVpH / TEXT_ROW_H_VP));
+  }
+
+  /** 滑块高（0 = 内容没超一屏，不画条）；最小 32，长文件滑块也有可抓的目标。 */
+  private textVBarThumbH(): number {
+    const total: number = this.textTotalRows();
+    const vRows: number = this.textVisibleRows();
+    if (total <= 0 || this.textVpH <= 0 || vRows >= total) {
+      return 0;
+    }
+    let h: number = this.textVpH * vRows / total;
+    if (h < 32) {
+      h = 32;
+    }
+    return h > this.textVpH ? this.textVpH : h;
+  }
+
+  /** 滑块顶端位置：首行 / (总行 - 可见行) 比例 × (视口高 - 滑块高)。 */
+  private textVBarTopPos(): number {
+    const thumb: number = this.textVBarThumbH();
+    if (thumb <= 0) {
+      return 0;
+    }
+    const denom: number = this.textTotalRows() - this.textVisibleRows();
+    if (denom <= 0) {
+      return 0;
+    }
+    const maxTop: number = this.textVpH - thumb;
+    const frac: number = this.textFirstRow / denom;
+    return Math.max(0, Math.min(maxTop, frac * maxTop));
+  }
+
+  /** 拖滑块：拖动量换算目标首行号，scrollToIndex 落位（onScrollIndex 再回填滑块）。 */
+  private textVBarDragTo(top: number): void {
+    const thumb: number = this.textVBarThumbH();
+    const maxTop: number = this.textVpH - thumb;
+    const denom: number = this.textTotalRows() - this.textVisibleRows();
+    if (thumb <= 0 || maxTop <= 0 || denom <= 0) {
+      return;
+    }
+    const t: number = Math.max(0, Math.min(maxTop, top));
+    const idx: number = Math.round(t / maxTop * denom);
+    this.textScroller.scrollToIndex(idx, false);
+  }
+
   /** 一行：行号栏 + 等宽 token 片段。@Builder 里不声明局部变量，
    *  随窗口 / 文件变化的尺寸一律直接读 @State（第五轮 ArkUI 按值参数不刷新的教训）。
    *  每个 token 一个 Text（Row 内 ForEach）—— 规避 ArkUI `Text()` 内不能动态生成 Span
@@ -9331,6 +8936,8 @@ struct Index {
     .width(this.textContentW)
     .height(TEXT_ROW_H_VP)
     .alignItems(VerticalAlign.Center)
+    .backgroundColor(this.isTextRowSelected(idx) ? '#2a3550' : '#00000000')
+    // R54：行级 onClick 移除 —— 选段改由 List 级 onMouse（按住→拖→松开）统一收口
   }
 
   /** 文本预览整块：抬头（文件名 / 语言 / 编码 / 行数 / 截断提示）+ 可滚动行表。
@@ -9347,13 +8954,49 @@ struct Index {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .constraintSize({ maxWidth: 320 })
-        Text(this.textStatusText)
-          .fontSize(11)
-          .fontColor('#8b95a8')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-          .margin({ left: 12 })
+        // 第五十一轮：有行段选区时，抬头右侧换成「选区信息 + 复制 / 清除」工具条；
+        // 无选区保持原来的语言 / 编码 / 行数状态。复用抬头一行，不挤压正文、不跳动布局。
+        if (this.textSelAnchor >= 0) {
+          Text(this.textSelLabel())
+            .fontSize(11)
+            .fontColor('#9fb4e8')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+            .margin({ left: 12 })
+          Button('复制')
+            .type(ButtonType.Normal)
+            .fontSize(12)
+            .fontColor('#e8ecf4')
+            .backgroundColor('#2a2f3a')
+            .borderRadius(6)
+            .height(24)
+            .padding({ left: 10, right: 10 })
+            .margin({ left: 6 })
+            .onClick(() => {
+              this.copyTextSelection();
+            })
+          Button('清除')
+            .type(ButtonType.Normal)
+            .fontSize(12)
+            .fontColor('#e8ecf4')
+            .backgroundColor('#2a2f3a')
+            .borderRadius(6)
+            .height(24)
+            .padding({ left: 10, right: 10 })
+            .margin({ left: 6 })
+            .onClick(() => {
+              this.clearTextSelection();
+            })
+        } else {
+          Text(this.textStatusText)
+            .fontSize(11)
+            .fontColor('#8b95a8')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+            .margin({ left: 12 })
+        }
       }
       .width(this.textContentW)
       .height(32)
@@ -9361,25 +9004,82 @@ struct Index {
       .alignItems(VerticalAlign.Center)
       .backgroundColor('#1a1d23')
 
-      Scroll(this.textHScroller) {
-        List({ scroller: this.textScroller, space: 0 }) {
-          LazyForEach(this.textSource, (line: string, idx: number) => {
-            ListItem() {
-              this.textRow(line, idx)
+      // 第五十二轮：原生纵向条挂在全宽 List 的右缘（x = textContentW），长行横向滚出
+      // 视口后它永远看不见 —— 改为视口右缘自绘条（见状态区注释）。Stack TopEnd 叠放：
+      // 左层 = 原有横向 Scroll + 纵向 List；右层 = 自绘轨道 + 滑块（不随横向滚动移动）。
+      Stack({ alignContent: Alignment.TopEnd }) {
+        Scroll(this.textHScroller) {
+          List({ scroller: this.textScroller, space: 0 }) {
+            LazyForEach(this.textSource, (line: string, idx: number) => {
+              ListItem() {
+                this.textRow(line, idx)
+              }
+            }, (line: string, idx: number) => idx.toString() + ':' + line)
+          }
+          .width(this.textContentW)
+          .height('100%')
+          .scrollBar(BarState.Off)  // 原生条在视口外看不见还占位，关掉只留自绘条
+          .cachedCount(6)
+          .backgroundColor('#12161c')
+          .onScrollIndex((first: number, last: number, center: number) => {
+            this.textFirstRow = first;
+            this.textLastRow = last;
+            // 第五十三轮兜底：个别路径 onAreaChange 没回填视口高时，
+            // 用首屏可见行数 × 行高估算，保证滑块几何有数可算。
+            if (this.textVpH <= 0 && last > first) {
+              this.textVpH = (last - first + 1) * TEXT_ROW_H_VP;
+              hilog.info(DOMAIN, TAG, 'text vpH fallback=%{public}d', Math.round(this.textVpH));
             }
-          }, (line: string, idx: number) => idx.toString() + ':' + line)
+          })
+          // R54：选段统一在 List 级收口（行事件冒泡上来；按住期间 Move/Release 不丢）
+          .onMouse((event: MouseEvent) => {
+            this.onTextMouse(event);
+          })
         }
-        .width(this.textContentW)
-        .height('100%')
+        .scrollable(ScrollDirection.Horizontal)
         .scrollBar(BarState.Auto)
-        .cachedCount(6)
-        .backgroundColor('#12161c')
+        .width('100%')
+        .height('100%')
+        .align(Alignment.TopStart)
+        .onAreaChange((_o: Area, n: Area) => {
+          this.textVpH = Number(n.height);
+          hilog.info(DOMAIN, TAG, 'text area h=%{public}d rows=%{public}d',
+            Math.round(this.textVpH), this.textLines.length);
+        })
+
+        // 第五十三轮：R52 真机仍不见条 —— if 条件里藏方法调用（textVBarThumbH()）
+        // 的话，V1 的 if 分支依赖收集可能认不出来，首评 textVpH=0 为 false 之后
+        // 就再也不重评。条件改为**全直读 @State**：视口高已知且总行高超过一屏。
+        if (this.textVpH > 0 && this.textLines.length > Math.round(this.textVpH / TEXT_ROW_H_VP)) {
+          // 轨道（10 宽、深色底）+ 滑块（6 宽、亮色、最小 32 高）—— R52 的 4 宽
+          // 细条在深底色上太不显眼；Transparent 让点击落到行上（选段不受挡）。
+          Column() {
+            Column()
+              .width(6)
+              .height(this.textVBarThumbH())
+              .borderRadius(3)
+              .backgroundColor('#96a3c2')
+              .margin({ top: this.textVBarTopPos() })
+          }
+          .width(10)
+          .height('100%')
+          .margin({ right: 3 })
+          .borderRadius(5)
+          .backgroundColor('#232b38')
+          .hitTestBehavior(HitTestMode.Transparent)
+          .gesture(
+            PanGesture({ fingers: 1 })
+              .onActionStart((e: GestureEvent) => {
+                this.textVBarDragTop = this.textVBarTopPos();
+              })
+              .onActionUpdate((e: GestureEvent) => {
+                this.textVBarDragTo(this.textVBarDragTop + e.offsetY);
+              })
+          )
+        }
       }
-      .scrollable(ScrollDirection.Horizontal)
-      .scrollBar(BarState.Auto)
       .layoutWeight(1)
       .width('100%')
-      .align(Alignment.TopStart)
     }
     .width('100%')
     .height('100%')
