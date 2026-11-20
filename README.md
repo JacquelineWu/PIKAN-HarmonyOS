@@ -544,8 +544,9 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > 未改写任何验证动作**；每节标注来源行号便于回溯。测试里另有若干
 > 「⚠️ 本组…真机步骤见 README 第 X 轮章节」的导航注记，只指向既有章节、不含步骤，
 > 故不重复收录。
-> README 上方的功能表与各轮章节停在 **R38**（R39–R55 的实现说明暂以
-> `tests/dirname.test.mjs` 断言名与 `Index.ets` / `components/` / `model/` 源码为准）。
+> README 上方的功能表与各轮章节停在 **R38**；R39–R55 的实现说明见下方
+> 「R39–R55 实现说明（依据测试断言名与源码）」章节，该章以测试断言名与
+> `Index.ets` / `components/` / `model/` 源码为准，与本章的真机步骤一一对应。
 
 ### 使用前必读
 
@@ -764,6 +765,230 @@ R54 起已改为按住左键拖选，测试断言 `R54 行级 onClick 移除（�
 >     到 / 或 NAS 设备根仍给「已到最上层」提示，绝不越级到 /storage、/ 等系统目录。
 > ⚠️ 边界：只在用户主动点击且当前层恰好是用户卷根时做一次真实全量列举；
 >     自动重扫（每 1.5s）/ 启动恢复期仍零新增 IO，绝不重演 THREAD_BLOCK_6S。
+
+---
+
+## R39–R55 实现说明（依据测试断言名与源码，2026-11-20）
+
+> 本章补 README 缺失的 **R39–R55 实现说明**，与上方「真机验证手册」互补：
+> 手册讲「怎么在真机上验」，本章讲「每轮改了什么、落在哪个文件」。
+> 素材只有两类且均**逐字引用**：① `tests/dirname.test.mjs` 的 `check('…')` 断言名
+> 与 `console.log('--- 第 X 轮…')` 分组标题；② `components/` / `model/` 五个源文件的
+> 头部注释、导出符号，以及用脚本逐个核实过的 `Index.ets` 符号落点。
+> **无源码 / 无断言支撑的实现细节一律不写**（不是需求文档，也不复述提交信息）。
+>
+> **一个必须先说清的事实**：`components/` / `model/` 只在 **R39 / R40 组件化拆分**
+> 引入；R41–R55 的核心符号（`DirRowsCacheEntry` / `openEpoch` / `NAS_RETRY_DELAYS` /
+> `tryMtimeAsync` / `loadRightPage` / `pushPreview` / `textVpH` / `onTextMouse` /
+> `zoomPercentText` / `ESC_BUILD_TAG` 等）经脚本逐个 `grep` 核实**全部仍在
+> `pages/Index.ets`**，两个新目录只作为跨文件计数断言的拼接源码出现
+> （如 R46 的 `new Promise` 计数用 `INDEX + ARCHIVE + MODEL`）。
+
+### 一、组件化拆分：R39 / R40（新增 5 文件，共 1160 行）
+
+测试里**没有**以 `R39` / `R40` 命名的断言 —— 这两轮同时改造了测试自身：
+`SRC_FILES` 登记 5 个源文件、锚点按「逻辑所在文件」取源码，跨文件计数型断言改用
+拼接源码 `CODE_LINES = (INDEX + ARCHIVE + MODEL + SIDEBAR + TOOLBTN)` 保持原语义。
+对应测试注释逐字为：
+
+> `// R39 Phase 0（Index.ets 拆分）：静态契约锚点与文件解耦 —— 断言按「逻辑所在文件」`
+> `// 取源码，不再绑死单一文件。当前所有锚点仍指向 pages/Index.ets，行为零变化；`
+> `// 后续轮次把组件 / 解码服务迁出时，只需在 SRC_FILES 登记新文件并改锚点指向。`
+> `// R40 Phase 3：左栏迁 components/SidebarView.ets、工具按钮迁 components/ToolButton.ets。`
+
+#### 第三十九轮（R39）：Phase 0–1 —— 行组件与解码链迁出
+
+| 文件 | 行数 | 导出 | 头部注释所述迁出内容（逐字摘录） |
+|---|---|---|---|
+| `components/ArchiveRow.ets` | 479 | `ROW_IMAGE` / `ROW_UP` / `ROW_FOLDER` / `ROW_OTHER` / `ROW_TEXT`、`fmtBytes`、`ArchiveRow` | 「从 `pages/Index.ets` **原样迁出**（零逻辑改动，仅加 export）：`ArchiveRow` 三栏档案行、`ThumbLoader` 悬停缩略图 384px 档 LRU 加载器、`ROW_*` 行种类常量」；「只依赖 `common/` 纯函数层与 `model/Preview` 解码服务，不回指 `pages/` —— 模块图无环」 |
+| `model/Preview.ets` | 425 | `TAG` / `DOMAIN` / `RAW_CACHE_MAX_COUNT`、`PreviewEntry`、`RawStore` / `rawStore`、`decodePx` | 「从 `pages/Index.ets` **原样迁出**的顶层解码链（零逻辑改动，仅加 export）：`PreviewEntry` 解码结果结构、`RawStore` / `rawStore` 原始档案 bytes 内存 LRU、`decodePx` 按长边档位解码一张图」；「只依赖 `common/` 纯函数层与 SDK，不回指任何页面 / 组件」 |
+
+> 补充（源码事实）：`Preview.ets` 里 `RAW_CACHE_MAX_BYTES = 768MB`、`RAW_SINGLE_MAX_BYTES =
+> 64MB`、`RAW_IO_BASE_MS = 400` / `RAW_IO_PER_MB_MS = 120` / `RAW_IO_CAP_MS = 8000`，
+> 均为第八轮 / 第二十七轮既有常量，R39 只是迁出并按需导出，未改数值。
+
+#### 第四十轮（R40）：Phase 2–3 —— 左栏、工具按钮与数据模型迁出
+
+| 文件 | 行数 | 导出 | 头部注释所述迁出内容（逐字摘录） |
+|---|---|---|---|
+| `components/SidebarView.ets` | 162 | `SidebarView` | 「从 `pages/Index.ets` 的 `build()` **原样迁出**（UI 描述逐行等价）：标题行 → 工具行 → `dirHint` 提示条 → 空态 / `LazyForEach` 档案列表」；「状态仍归 `pages/Index.ets`：本组件只收 `@Prop` 快照 + 回调上抛，不持有任何业务状态」 |
+| `components/ToolButton.ets` | 36 | `ToolButton` | 「原 `pages/Index.ets` 的 `@Builder toolBtn`，左栏与顶栏共用；外观与行为一字未动，仅从「结构体方法」改为「共享组件 + `onAction` 回调」」；「恒亮、恒可点，永不 grey out / 永不禁用」 |
+| `model/GalleryData.ets` | 58 | `ImageItem`、`GalleryDataSource` | 「从 `pages/Index.ets` **原样迁出**（零逻辑改动，仅加 export）：`ImageItem` 左栏一行 / 翻页序列一项的数据结构（双集合设计：`items` 纯图片、`rows` 含目录行）、`GalleryDataSource` —— `LazyForEach` 的按需数据源」；「若留在 `pages/Index.ets` 会形成页面 ↔ 组件循环 import，放 `model/` 层后依赖方向保持单向」 |
+
+依赖方向（源码注释逐字）：`pages/Index.ets → 本组件 → components/ArchiveRow + model/，无环`；
+整体为 `pages / components → model → common`。
+
+拆分后**断言锚点改按新文件取源码**，断言名逐字保留（节选，完整见
+`tests/dirname.test.mjs` 285–328 / 553–567 行）：
+
+- `空态判断用 rowCount（左栏实际行数）` → `SIDEBAR`
+- `不再用 itemCount 判空态（itemCount 只算图片）` → `INDEX` 取反
+- `applyItems 同步 rowCount` / `零图片目录设置 dirHint 提示条` → `INDEX`
+- `不再有「选择图片」toolBtn` / `不再有「回到上次」toolBtn` → `INDEX + SIDEBAR` 取反
+- `三个按钮合并在同一行，且「往上层」恒亮恒可点` / `按钮区不再有原来的第二行` → `SIDEBAR`
+- `左栏宽度改用自适应 listW` / `List 行间距改用 LIST_ROW_GAP_VP 常量且为 1` → `SIDEBAR`
+- `档案名列有 minWidth 兜底` / `行首图标高度压到 26` → `ARCHIVE`
+- `往上层按钮恒亮恒可点（不再传 canGoUp）` → `SIDEBAR`
+- `toolBtn 三参签名，不接受 enabled 入参` / `toolBtn 函数体无 .enabled / 条件颜色 / 条件 opacity`
+  / `toolBtn 无条件恒定外观` / `源码非注释行无 .enabled( 禁用属性` → `TOOLBTN` / `CODE_LINES`
+
+> R39 / R40 是纯结构迁移（源码注释明确「零逻辑改动」「外观与行为一字未动」），
+> 因此**上方手册里没有这两轮的独立真机步骤**；验证靠静态契约全绿 + R41 起各轮界面回归。
+
+### 二、R41–R55 各轮实现要点（断言名逐字）
+
+以下 15 轮分组标题（去掉 `console.log('--- … ---')` 的装饰符后）与 65 条断言名
+均逐字取自 `tests/dirname.test.mjs`；落点统一为 `pages/Index.ets`
+（已用脚本逐个核实符号）。**真机步骤见上方手册同编号条目**。
+
+| 轮次 | 主题（测试分组标题） | 断言数 | 落点 |
+|---|---|---|---|
+| R41 | 恢复态目录清单的行种类保真 | 5 | `Index.ets` |
+| R42 | 网盘目录整表缓存（秒开 + 后台刷新） | 7 | `Index.ets` |
+| R43 | 用户导航抢占在途列举 | 5 | `Index.ets` |
+| R44 | NAS 重启后 13900002 —— 重连重试 + 恢复态预热 | 6 | `Index.ets` |
+| R45 | 只读名单态自愈 | 5 | `Index.ets` |
+| R46 | appfreeze THREAD_BLOCK_6S —— mtime 探测异步化 | 5 | `Index.ets` |
+| R47 | 对开右页首开空白 —— 解码失败重试 | 4 | `Index.ets` |
+| R48 | 右页空白可观测性 —— 全路径留痕 | 2 | `Index.ets` |
+| R49 | 右页空白根因修复 —— 在途合并落点收口 | 3 | `Index.ets` |
+| R50 | 重启恢复态不再自称「已恢复上次目录」 | 3 | `Index.ets` |
+| R51 | 文本预览常显滚动条 + 行段选择复制 | 4 | `Index.ets` |
+| R52 | 文本纵向滚动条自绘 | 4 | `Index.ets` |
+| R53 | 自绘条真机不显示 —— 条件全直读 + 兜底回填 | 4 | `Index.ets` |
+| R54 | 选段改为按住左键拖选 | 3 | `Index.ets` |
+| R55 | 预览区常显角标取消 | 5 | `Index.ets` |
+
+**第四十一轮：恢复态目录清单的行种类保真（.log 重启后可预览）**
+
+- `R41 根因：upListKindOf 新增 keepFileKinds 形参，true 时直传快照真实种类`
+- `R41 修复：restoreDirContextOnly 传 keepFileKinds=true，文本行不再被折叠成 ROW_OTHER`
+- `R41 修复：恢复态清单仍是启动期零 IO（兜底只用纯字符串函数，不碰 fs / 选择器）`
+- `R41 兜底：恢复态纯清单里的图片行（不在翻页序列）点击即真实重列当前目录，不再静默吞掉`
+- `R41 零回归：上层清单（无授权父层）仍不传 keepFileKinds，文件行照旧折叠`
+
+**第四十二轮：网盘目录整表缓存（秒开 + 后台刷新）**
+
+- `R42 缓存结构：DirRowsCacheEntry 接口 + LRU 上限常量`
+- `R42 秒开：openFolder 非重扫先查整表缓存，命中立即零 IO 渲染`
+- `R42 渲染等价：缓存行按当前排序方向重排，分组顺序与真实列举同构（.. → 目录 → 图片 → 文本 → 其它）`
+- `R42 后台刷新：条目没变走 sameDirEntries 短路（视图一个像素不动），变了走 applyItems 保位刷新`
+- `R42 离线兜底：缓存已渲染而后台列举失败时保留缓存视图，返回 true 不触发上层清单回退`
+- `R42 缓存写入：真实列举成功后整表入 LRU（sameDirPath 去重、超限裁尾），与 upDirCache 快照同点写入`
+- `R42 零回归：自动重扫（isRescan）不查缓存；缓存渲染不碰 dirMtime（留 0 等真值）、不清死路径记忆`
+
+**第四十三轮：用户导航抢占在途列举（修 NAS 点资料夹没反应）**
+
+- `R43 抢占：用户导航（isRescan !== true）不再被 folderBusy 吞掉，自动重扫仍让路`
+- `R43 作废：在途列举被抢占后结果整段丢弃（epoch 过期即静默退出，不落任何状态）`
+- `R43 放锁：只有当前代际持有者释放 folderBusy（被抢占的旧调用不得清掉新调用的锁）`
+- `R43 反馈：非缓存、非重扫的列举先同步显示「正在列出 …」，点击必看得见反应`
+- `R43 往上层：browseUp 不再因 busy 早退，直接放行由 openFolder 抢占在途列举`
+
+**第四十四轮：NAS 重启后 13900002 —— 重连重试 + 恢复态预热**
+
+- `R44 网络目录判定：isNetworkDirUri（scheme 授权形 / userExternal 挂载形 / UNC；file://docs 与 file://media 是本机 provider 不算）`
+- `R44 重试节奏：NAS_RETRY_DELAYS = [600, 1800]，只对网络目录 + ENOENT(13900002) 重试，本地目录快速失败`
+- `R44 重试前静默重推持久授权：reactivatePersistQuiet 绝不调用 finishPersistActivate（一次性收口不得重入）`
+- `R44 重试期间可被抢占：两次 epoch 校验（等待前 / 等待后），被抢占即让位不落状态`
+- `R44 恢复态预热：restoreDirContextOnly 渲染后静默 warmRestoreDirQuiet（纯探测，不碰视图 / 状态栏 / folderBusy）`
+- `R44 失败反馈：网络目录 ENOENT 重试耗尽后提示「网络目录未连接？稍候再点一次」`
+
+**第四十五轮：只读名单态自愈 —— 预热成功即退出 READONLY**
+
+- `R45 自愈入口：healRestoreMode（重探条目 URI，能开就退出只读态并补解当前张）`
+- `R45 自愈只做一次最轻 sync 探测：fastProbe=true（单候选，不做多候选 openSync）`
+- `R45 预热成功即自愈：warmRestoreDirQuiet 列得动目录后调 healRestoreMode`
+- `R45 快照恢复 / 单张兜底落只读态时同样后台预热自愈（两处 warmRestoreDirQuiet 调用）`
+- `R45 自愈不硬闯：探不通维持 READONLY（真授权失效仍走「选择文件夹」重授权）`
+
+**第四十六轮：appfreeze THREAD_BLOCK_6S —— 目录轮询 mtime 探测异步化**
+
+- `R46 根因修复：tryMtime 的 statSync（主线程同步跨进程 stat）已删除，改 tryMtimeAsync`
+- `R46 超时兜底：3s race 超时按「本轮没探到」（0）处理，复用 nasRetryWait 不新增 Promise 构造`
+- `R46 轮询不堆叠：mtimeBusy 重入保护（上一轮 stat 未回来跳过本轮，folderBusy/playing 让路语义不变）`
+- `R46 基准 mtime 异步取 + epoch 守卫：两处 openFolder 基准赋值不阻塞视图，被抢占的迟到结果丢弃`
+- `R46 变动检测语义零改动：mtime 变了仍去抖重扫（isRescan=true / 不弹多选 / 保位）`
+
+> 跨文件计数证据：本轮 `new Promise` / `Promise.race` 断言使用
+> `INDEX + ARCHIVE + MODEL` 拼接源码（测试 6277 行），即组件 / 模型源码参与计数，
+> 但**不表示 R46 修改了这两个目录**。
+
+**第四十七轮：对开右页首开空白 —— 解码失败重试**
+
+- `R47 右页解码失败不再留空了事：loadRightPage 失败分支按节奏补试（attempt 递增）`
+- `R47 重试节奏常量：RIGHT_PAGE_RETRY_DELAYS = [600, 1800]（与 NAS 重试同节奏，试完即止不无限重试）`
+- `R47 重试可作废：token 校验（翻页 / 换对后旧重试 no-op）+ clearRightPage 清 pending 重试句柄`
+- `R47 页面销毁清重试句柄（aboutToDisappear），成功路径与档位复用逻辑零改动`
+
+**第四十八轮：右页空白可观测性 —— loadRightPage 全路径留痕**
+
+- `R48 解码失败留痕：decode FAIL + retry in + give up 三段日志（区分失败 / 重试 / 放弃）`
+- `R48 token 竞态留痕：stale discard（解码成功但被翻页作废）与异常路径都进日志`
+
+**第四十九轮：右页空白根因修复 —— 在途合并落点收口（解好先入缓存）**
+
+- `R49 decodeTo 在途任务解好先 pushPreview 入缓存再交消费者（所有权在交接点收口）`
+- `R49 根因链完整：stale 丢弃 → releaseUncachedEntry → 缓存查重跳过（合并条目不再被误释放）`
+- `R49 pushPreview 幂等：同一张 px 只刷 LRU 位置，不重复入列不重复计字节（自动入缓存的前提）`
+
+**第五十轮：重启恢复态不再自称「已恢复上次目录」**
+
+- `R50 恢复态列表撤掉说明行伪条目，源码（去注释）不再出现「已恢复上次目录」字样`
+- `R50 恢复态计数改为 rows.length - 1（只剩 .. 不计入），状态栏按普通列表呈现`
+- `R50 旧快照兼容：isUpListPseudoName 识别旧版「已恢复上次目录」说明行并过滤`
+
+**第五十一轮：文本预览常显滚动条 + 行段选择复制**
+
+- `R51→R52 文本纵向滚动条：原生条在全宽 List 右缘（视口外）看不见 → 改自绘条，原生关掉`
+- `R51→R54 行段选择状态：textSelAnchor/textSelFocus（交互已改为按住拖选，见 R54）`
+- `R51 行高亮 + 抬头工具条：选中行背景、有选区时抬头换成选区信息 + 复制 / 清除按钮`
+- `R51 复制走系统剪贴板（pasteboard）+ Ctrl+C 同效 + 关文件 / 开新文件清选区`
+
+**第五十二轮：文本纵向滚动条自绘（原生条画在全宽 List 右缘，视口外看不见）**
+
+- `R52 自绘条状态与几何：textVpH / textFirstRow / textLastRow + 滑块高 / 位置比例计算`
+- `R52→R53 Stack TopEnd 叠放：横向 Scroll 视口右缘叠自绘轨道 + 滑块，不随横向滚动移动`
+- `R52 数据回填：List onScrollIndex 回填首行 / 视口高 onAreaChange 回填，开新文件重置`
+- `R52 拖滑块换算 scrollToIndex + Transparent 不挡行点击（选段不受滚动条影响）`
+
+**第五十三轮：R52 自绘条真机不显示 —— if 条件全直读 + 兜底回填 + 加粗加亮**
+
+- `R53 if 条件全直读 @State（方法调用藏在条件里 V1 可能不重评 if 分支）`
+- `R53 onAreaChange / onScrollIndex 兜底回填 textVpH（防个别路径不触发 onAreaChange）`
+- `R53 加粗加亮：滑块 6 宽亮色 + 轨道 10 宽深色底 + 滑块最小高 32`
+- `R53 诊断留痕：textVpH 回填与兜底都有 hilog（再不显示可直接抓日志定位哪个数是 0）`
+
+**第五十四轮：选段改为按住左键拖选（hold → 拖动实时扩展 → release 定段）**
+
+- `R54 onMouse 挂 List 统一收口：Press 定起点 / Move 实时扩展 / Release 定终点，只认左键`
+- `R54 行号换算：滚动偏移 + 列表内 y → 行号，并夹取到可见范围（不越界选到文档头尾）`
+- `R54 行级 onClick 移除（旧两次点击定界退役），清除按钮 / Ctrl+C / 关闭自动清选区保留`
+
+**第五十五轮：预览区常显角标取消（左上档案名浮层 + 右下缩放百分比方块）**
+
+- `R55 左上角信息浮层整体取消：档案名 / 大小 / 色彩三行都不再渲染，spreadNames 一并移除`
+- `R55 全屏退出提示保留（唯一指引，仅全屏出现，样式带底色圆角）`
+- `R55 右下角百分比方块取消：无常显分支，缩放百分比只在诊断层（Ctrl+D）角标里出现`
+- `R55 诊断层入口与内容不变：Ctrl+D 切换、退出 APP 按钮、全字段角标、diagLine 赋值链全保留`
+- `R55 死代码清干净：viewHintOf / colorSpaceNameOf / fmtBytes 不再被 Index 引用（定义仍在 common/ArchiveRow）`
+
+### 三、边界与口径差异（据源码核实）
+
+- **R39 / R40 无独立真机步骤**：纯结构迁移，源码注释逐字写明「零逻辑改动」
+  「外观与行为一字未动」；验证靠静态契约全绿 + 后续轮次界面回归。
+- **R41–R55 未改 `components/` / `model/`**：65 条断言的锚点全是 `INDEX`
+  （`pages/Index.ets`）；唯一例外是 R46 的跨文件计数断言拼接了 `ARCHIVE + MODEL`，
+  但也只是计数，不是改动。
+- ⚠️ **R55 最后一条断言名含过时路径措辞**：断言写「定义仍在 `common/ArchiveRow`」，
+  但源码里 `viewHintOf` / `colorSpaceNameOf` 定义在 `common/ViewPlan.ts`（191 / 213 行），
+  `fmtBytes` 定义在 `components/ArchiveRow.ets`（46 行），`common/` 下并无 ArchiveRow 文件。
+  断言本体（`/viewHintOf/`、`/colorSpaceNameOf/`、`/fmtBytes/` 不在 `INDEX` 中）仍成立；
+  本章逐字保留断言名原文，此处仅标注源码实际位置，供后续清理断言措辞时参考。
+- **证据边界**：本章是**静态契约 + 源码结构**的说明，`node --experimental-strip-types`
+  只剥离 TS 类型、不做完整类型检查；静态契约不能代替真实 ArkTS 编译，
+  **编译校验 ≠ 真机验证**。真机 DevEco / `hdc` / `hilog` 验证由使用者完成，
+  步骤见上方「真机验证手册」。版本仍 `1.0.7 / versionCode 7`。
 
 ---
 
