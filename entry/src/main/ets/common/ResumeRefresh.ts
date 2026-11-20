@@ -76,3 +76,57 @@ export function resumeRefreshHint(ok: boolean, dirKept: boolean, selKept: boolea
   }
   return s;
 }
+
+// ------------------------------------------------------------------
+// 第五十七轮：冷启动（杀进程后重新打开 APP）恢复链收口后的「单次」目录补列举
+// ------------------------------------------------------------------
+
+/**
+ * R56 的覆盖缺口：第五十六轮只处理「切后台 / 锁屏 / 被别的应用盖住后恢复显示」，
+ * `resumeRefreshAction` 要求 `suspended=true`（只有 onPageHide 置位），冷启动
+ * onPageShow 恒 SKIP —— 这是「不打断启动恢复链」的正确语义，不该改。
+ *
+ * 但冷启动恢复走的是**零 IO 的快照清单**（restoreFromSnapshot 的上次会话 uri 快照 /
+ * restoreDirContextOnly 的 upDirCache 本层清单）；setItems() 又清掉 dirPollTimer，
+ * dirMtime 冷启动为 0 使 pollMtimeOnce() 首轮必然跳过。四者叠加 →
+ * 「重启后左栏永远停在退出时的旧档案结构」，新增 / 删除 / 改名 / 层级变动都不反映。
+ *
+ * 这条链与 R56 完全独立，只在恢复链已收口（resumeDone=true）后放行一次，
+ * 真正的真实列举与状态对账仍复用 Index.ets 的 openFolder(isRescan=true)。
+ */
+export const BOOT_REFRESH_SKIP: number = 0;
+export const BOOT_REFRESH_GO: number = 1;
+
+/**
+ * 冷启动是否补刷一次目录清单。七个条件全部满足才 GO：
+ *  · `handled`：本次冷启动是否已消费（markRestoreEntered / onPageShow / 重试回调
+ *    可能多次到达，保证只刷一次）；
+ *  · `resumeDone`：启动恢复链必须已收口 —— 绝不抢占恢复期 IO（R36/R44 防线）；
+ *  · `busy`：存在在途列举 / 幻灯片 / mtime 探测 / picker 一律让路；
+ *  · `hasDir`：有当前目录上下文（browseBase 非空）才谈得上重扫；
+ *  · `ioOk`：restoreMode 允许批量 IO（只读名单态不刷，R45 防主线程打满）；
+ *  · `hasRestoreMemory`：有上次会话记忆；首次启动没有任何目录可同步；
+ *  · `userActed`：用户已经自己动手（选图 / 选文件夹 / 导航）就不补刷，尊重用户。
+ */
+export function bootRefreshAction(handled: boolean, resumeDone: boolean,
+  busy: boolean, hasDir: boolean, ioOk: boolean,
+  hasRestoreMemory: boolean, userActed: boolean): number {
+  if (handled || !resumeDone || busy || !hasDir || !ioOk ||
+      !hasRestoreMemory || userActed) {
+    return BOOT_REFRESH_SKIP;
+  }
+  return BOOT_REFRESH_GO;
+}
+
+/** 冷启动补刷成功后的状态栏文案。失败时保留 openFolder 给出的明确错误串，不调用本函数。 */
+export function bootRefreshHint(dirKept: boolean, selKept: boolean,
+  hadSelection: boolean): string {
+  let s: string = '重启 APP · 目录清单已与磁盘同步';
+  if (!dirKept) {
+    s += ' · 原目录已失效';
+  }
+  if (hadSelection && !selKept) {
+    s += ' · 原选中档案已不在目录，失效选中已清除';
+  }
+  return s;
+}

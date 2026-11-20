@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R56`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R57`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -547,15 +547,15 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > README 上方的功能表与各轮章节停在 **R38**；R39–R55 的实现说明见下方
 > 「R39–R55 实现说明（依据测试断言名与源码）」章节，该章以测试断言名与
 > `Index.ets` / `components/` / `model/` 源码为准，与本章的真机步骤一一对应。
-> **R56（返回 APP 自动同步目录 / 并排只看左图比例）见下方独立章节**，
-> 其真机步骤在本手册之后、R39–R55 实现说明之前。
+> **R56（返回 APP 自动同步目录 / 并排只看左图比例）、R57（重启 APP 后左侧列表补刷）
+> 见下方两个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R56`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R56` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R57`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R57` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3842`；R56 新增 import 后行号由 3837 顺延 5 行）
+  （`tests/dirname.test.mjs:3845`；R57 新增 3 行 import 后行号由 3842 顺延 3 行）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -878,6 +878,81 @@ R54 起已改为按住左键拖选，测试断言 `R54 行级 onClick 移除（�
 
 **边界**：`Ctrl+D` 诊断层角标必须是 **`R56`**；未跑 `build.sh`、未升版本、
 未把 HAP 放桌面；本轮**未推送**任何远端（等待使用者指示）。
+
+---
+
+## 第五十七轮：重启 APP 后左侧列表补刷（2026-11-20，R57）
+
+> 使用者反馈：**「重启 app 后左边列表没有刷新」**。本章只讲这一处修复，
+> R56 的「切后台返回自动刷新」与「并排只看左图比例」行为保持原样。
+
+### 一、根因链路（四层叠加，逐段核实过调用关系）
+
+| # | 环节 | 事实 |
+|---|---|---|
+| 1 | 冷启动恢复 | 走 `restoreFromSnapshot()`（上次会话的 **uri 快照**）或 `restoreDirContextOnly()`（`upDirCache` 本层纯清单），**两条都是零 IO 快照**，左栏显示的是退出时的旧档案结构；新增 / 删除 / 改名 / 层级变动都不在其中。 |
+| 2 | `setItems()` | 恢复链必经点，会清掉 `browseBase` 与 **`dirPollTimer`**；随后 `restoreBrowseContext()` 只回填目录上下文，**没有重启 `startDirPoll()`**（该函数原本只在 `openFolder` 成功末尾调用）。 |
+| 3 | mtime 轮询 | `dirMtime` 冷启动为 `0`，`pollMtimeOnce()` 的条件是 `m > 0 && dirMtime > 0 && m !== dirMtime`，首轮必然跳过；而 `dirMtime` 只有 `openFolder()` 真正列目录成功后才写。 |
+| 4 | R56 决策 | `resumeRefreshAction()` 要求 `suspended=true`（**只有 `onPageHide` 置位**），冷启动 `onPageShow` 恒 SKIP —— 这是「不打断启动恢复链」的正确语义，测试里甚至有断言把它固化，不该改。 |
+
+四者叠加，结论是：**重启后左栏永远停在退出时的旧清单，且后续 1.5s 轮询也救不回来**。
+
+### 二、修法（独立决策链，不动 R56 决策）
+
+- `common/ResumeRefresh.ts` 新增 `bootRefreshAction()` / `bootRefreshHint()` 与
+  `BOOT_REFRESH_GO` / `BOOT_REFRESH_SKIP`：**七个条件**全满足才放行一次
+  （未消费 / `resumeDone` / 无在途操作 / 有目录 / 允许批量 IO / 有上次会话记忆 / 用户未动手）。
+  `resumeRefreshAction()` 的 5 参签名与「首次进入恒 SKIP」语义**一字未改**。
+- `pages/Index.ets` 把 R56 的 GO 分支执行体抽成 **`runRefreshOnce(scene)`**，
+  由「切后台返回」与「冷启动重启」两个入口共用；真正的真实列举仍是
+  `openFolder(base, false, false, true)`（`isRescan=true`），
+  经 `sameDirEntries` → `applyItems(preserveView)` 按 uri 保位，**没有另起一套 IO**。
+  `scene` 只决定状态栏文案是「返回 APP」还是「重启 APP」。
+- **主触发点** `markRestoreEntered()`：这是仅目录恢复与快照恢复两条路径
+  **统一的「成功进入上次目录」收口**，此刻 `resumeDone=true`、`browseBase` 已回填，
+  补刷既真实又不抢恢复期。`onPageShow()` 另加一次 `tryBootRefresh()` 作兜底，
+  恢复链走 900ms 定时器 / 3s 看门狗时用 `400ms × 12` 有限延后，`bootRefreshHandled`
+  保证**重启只刷一次**。
+- **顺带补上轮询**：`runRefreshOnce()` 成功后若 `dirPollTimer === -1` 就调一次
+  `startDirPoll()`（幂等：先清再起）。因为重扫命中 `sameDirEntries` 短路时
+  `openFolder` 自己不会重启轮询，补上后重启之后的目录变化仍能持续同步。
+- 状态对账与 R56 完全一致：选中档案仍存在则按 uri 保位，已不存在则
+  `cur=-1` + 收右页，**不悄悄改选邻图**；目录失效只清 `inAppUpList` / `dirMtime`，
+  **不误清 `browseBase`**（保 R36 目录恢复）。
+
+### 三、改动范围
+
+| 文件 | 改动 |
+|---|---|
+| `common/ResumeRefresh.ts` | 新增冷启动补刷决策 / 文案的零 IO 纯函数（文件仍零 SDK / 零 IO / 零 `await` / 零 `throw`） |
+| `pages/Index.ets` | `bootRefreshHandled` / `bootRefreshTimer` / `bootRefreshRetry`；`tryBootRefresh()`；抽取 `runRefreshOnce(scene)`；`onPageShow` 双入口；`markRestoreEntered()` 末尾触发；刷新成功后恢复轮询；两个 timer 在 `onPageHide` / `aboutToDisappear` 清理；`ESC_BUILD_TAG` R56→R57 |
+| `tests/dirname.test.mjs` | 新增 20 条 R57 断言；构建标记与旧包排除批量升级 R56→R57 |
+| `README.md` | 本章 + 抬头 / 「使用前必读」构建标记与测试行号引用同步 |
+
+未动 `EntryAbility.ets`、`openFolder()` / `applyItems()` / `sameDirEntries()` 主体、
+预览渲染布局、`refreshSpread()` 并排决策、`AppScope/app.json5`。
+
+### 四、验证结果（三类证据严格分开）
+
+| 证据 | 结果 |
+|---|---|
+| **静态契约 / 纯函数** | `ALL PASS 1879 passed, 0 failed`（R56 基线 1859，+20）；`git diff --check` 通过；本章真机步骤与测试逐字比对缺失 0 |
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` 首轮为 `UP-TO-DATE`（按本项目口径**不算**真编译），改一处文件头注释强制输入变化后重跑 → **`BUILD SUCCESSFUL in 20 s 284 ms`**，**`Finished :entry:default@CompileArkTS... after 12 s 387 ms`**（非 UP-TO-DATE），**0 ERROR / 17 WARN**（与 R56 基线一致，全在既有区域） |
+| **产物核验** | 签名 HAP **1,218,910 B** / 未签名 **1,184,561 B** / `modules.abc` **699,908 B**；产物晚于源码；`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 **`R57=1 / R56=0 / R55=0 / R38=0 / R37=0`**、**`1.0.7=1 / 1.0.6=0`** |
+| **真机验证** | ⚠️ **未做，由使用者完成**。**编译校验 ≠ 真机验证** —— 尤其「彻底杀进程后重启」是否稳定走到 `markRestoreEntered()`、以及 NAS / 只读名单态下的表现，必须实机确认 |
+
+### 五、真机步骤（逐字取自 `tests/dirname.test.mjs` R57 组）
+
+> ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R57-A：打开含图目录后彻底杀进程重启 APP → 恢复出上次目录时左栏应自动与磁盘同步，
+>     期间新增 / 删除 / 改名 / 建子目录都能反映；Ctrl+D 角标必须是 R57。
+> ⚠️ 真机步骤 R57-B：重启后原选中档案仍在则保留选中；已被删则清除失效选中且不自动改选别张。
+> ⚠️ 真机步骤 R57-C：重启落在空目录 / 无图片目录也要恢复并同步；切后台再返回仍只刷一次，
+>     正在翻页 / 幻灯片 / 选文件夹时不打断；只读名单态（授权失效）不强行刷、等后台自愈。
+
+**边界**：只读名单态（URI 授权失效、`bulkIoAllowed=false`）**刻意不刷**，
+由既有 `warmRestoreDirQuiet()` 后台自愈，避免 R45 那类跨进程 IO 打满主线程；
+未跑 `build.sh`、未升版本、未把 HAP 放桌面；本轮**未推送**任何远端。
 
 ---
 

@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R56 主线（R39 起组件化）
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R57 主线（R39 起组件化）· 冷启动补刷
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -137,7 +137,8 @@ import { LANG_NONE, textLangOf, isTextFileName,
 // 第五十六轮：返回 APP 时左侧目录清单「单次、非侵入」刷新的决策真值源（零 SDK / 零 IO）。
 // 真正的重列举仍复用既有 openFolder(isRescan=true) 链，本文件只判断「该不该刷、刷完怎么对账」。
 import { RESUME_REFRESH_GO, resumeRefreshAction, resumeSelectedIndex,
-  resumeDirKept, resumeRefreshHint } from '../common/ResumeRefresh';
+  resumeDirKept, resumeRefreshHint,
+  BOOT_REFRESH_GO, bootRefreshAction, bootRefreshHint } from '../common/ResumeRefresh';
 // R39（Index.ets 拆分 Phase 1）：左栏行组件与解码服务迁出本文件 ——
 //   · components/ArchiveRow.ets：ArchiveRow 行组件 + ThumbLoader 悬停缩略图 + ROW_* 行种类
 //   · model/Preview.ets：PreviewEntry / RawStore / decodePx 解码链 + hilog TAG/DOMAIN
@@ -158,7 +159,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R56';
+const ESC_BUILD_TAG: string = 'R57';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -266,6 +267,15 @@ const DIR_RESCAN_DEBOUNCE_MS: number = 900;
  *  既不抢占用户操作，也不让「返回后自动同步」被一次瞬时忙状态永久吞掉。 */
 const RESUME_REFRESH_RETRY_MS: number = 400;
 const RESUME_REFRESH_RETRY_MAX: number = 3;
+/** 第五十七轮：冷启动补刷 —— 恢复链可能走满 900ms 定时器 + 3s 看门狗，
+ *  重试窗口要盖得住；只在「恢复链尚未收口 / 在途操作」这类可恢复等待态重试，
+ *  用户已动手 / 只读名单态 / 已消费资格一律不重试。 */
+const BOOT_REFRESH_RETRY_MS: number = 400;
+const BOOT_REFRESH_RETRY_MAX: number = 12;
+/** 刷新来源：切后台返回（R56）/ 冷启动重启（R57）—— 只影响状态栏文案，
+ *  两条链共用同一段真实列举与状态对账执行体。 */
+const RESUME_SCENE_BACK: number = 0;
+const RESUME_SCENE_BOOT: number = 1;
 
 /** 全屏时顶栏自动隐藏（Win64 4666 / 4670）：鼠标压到窗口最上面 TOPBAR_EDGE_PX 个像素
  *  才把顶栏浮出来，顶栏高度 52 + 下方 TOPBAR_KEEP_PX 之内保持显示。
@@ -1221,6 +1231,11 @@ struct Index {
   private resumeRefreshHandled: boolean = false;
   private resumeRefreshTimer: number = -1;
   private resumeRefreshRetry: number = 0;
+  /** 第五十七轮：冷启动补刷状态，与 R56「切后台返回」资格完全独立。
+   *  bootRefreshHandled 保证重启只刷一次；Timer / Retry 覆盖恢复链 3s 收口窗口。 */
+  private bootRefreshHandled: boolean = false;
+  private bootRefreshTimer: number = -1;
+  private bootRefreshRetry: number = 0;
   // ---- 第二十二轮：按键到达可观测（零按键到达是本轮要解决的唯一断点）----
   /** 任意键（不只 ESC）进入 onKey() 的累计次数。常显在右下角角标：
    *  keys=0 = 键盘事件根本没到 APP（焦点 / 系统消费）；keys>0 = 事件链路通。 */
@@ -1481,6 +1496,11 @@ struct Index {
     this.pageSuspended = true;
     this.resumeRefreshHandled = false;
     this.resumeRefreshRetry = 0;
+    this.bootRefreshRetry = 0;
+    if (this.bootRefreshTimer !== -1) {
+      clearTimeout(this.bootRefreshTimer);
+      this.bootRefreshTimer = -1;
+    }
     if (this.resumeRefreshTimer !== -1) {
       clearTimeout(this.resumeRefreshTimer);
       this.resumeRefreshTimer = -1;
@@ -1493,6 +1513,7 @@ struct Index {
    *  链路覆盖。同一返回事件只刷一次；在途操作一律让路（不抢占、不中断）。 */
   onPageShow(): void {
     this.tryRefreshOnResume();
+    this.tryBootRefresh(); // 第五十七轮：冷启动补刷兜底（主触发在 markRestoreEntered）
   }
 
   /** 返回刷新的唯一决策落点。真值源是 ResumeRefresh.ts 的纯函数，
@@ -1527,15 +1548,71 @@ struct Index {
     // 先消费资格：窗口状态变化可能让 onPageShow / 前台回调多次到达，绝不刷第二次。
     this.resumeRefreshHandled = true;
     this.pageSuspended = false;
+    this.runRefreshOnce(RESUME_SCENE_BACK);
+  }
+
+  /** 第五十七轮：冷启动（杀进程后重开）恢复链收口后补一次真实目录列举。
+   *  与 R56「切后台返回」资格完全独立 —— resumeRefreshAction 仍要求 suspended=true，
+   *  冷启动恒 SKIP（启动恢复链不被打断的原语义保留）。本链只在 resumeDone=true
+   *  后放行，绝不抢恢复期；主触发点是 markRestoreEntered()，onPageShow 兜底重试。 */
+  private tryBootRefresh(): void {
+    const busy: boolean = this.folderBusy || this.playing || this.mtimeBusy ||
+      this.pickerBusy || !this.pageAlive;
+    const hasDir: boolean = this.browseBase.length > 0;
+    const ioOk: boolean = bulkIoAllowed(this.restoreMode);
+    const act: number = bootRefreshAction(this.bootRefreshHandled, this.resumeDone,
+      busy, hasDir, ioOk, this.hasRestoreMemory, this.userActed);
+    if (act !== BOOT_REFRESH_GO) {
+      // 恢复链尚未收口 / 在途操作时短延时再判；只读名单态、用户已动手、
+      // 已消费过资格一律不重试（避免无意义定时器与抢占）。
+      if ((busy || !this.resumeDone) && ioOk && this.hasRestoreMemory &&
+          !this.userActed && !this.bootRefreshHandled && this.pageAlive &&
+          this.bootRefreshRetry < BOOT_REFRESH_RETRY_MAX) {
+        this.bootRefreshRetry++;
+        if (this.bootRefreshTimer !== -1) {
+          clearTimeout(this.bootRefreshTimer);
+        }
+        this.bootRefreshTimer = setTimeout(() => {
+          this.bootRefreshTimer = -1;
+          this.tryBootRefresh();
+        }, BOOT_REFRESH_RETRY_MS);
+      }
+      return;
+    }
+    // 先消费资格：markRestoreEntered / onPageShow / 重试回调可能多次到达，只刷一次。
+    this.bootRefreshHandled = true;
+    this.runRefreshOnce(RESUME_SCENE_BOOT);
+  }
+
+  /** R56「切后台返回」与 R57「冷启动重启」共用的唯一真实列举 + 状态对账执行体。
+   *  资格消费在两个决策入口各自完成；这里只做一次 openFolder(isRescan=true)，
+   *  绝不另起一套列举、绝不改 openFolder / applyItems 主体。 */
+  private runRefreshOnce(scene: number): void {
+    if (this.resumeRefreshTimer !== -1) {
+      clearTimeout(this.resumeRefreshTimer);
+      this.resumeRefreshTimer = -1;
+    }
+    if (this.bootRefreshTimer !== -1) {
+      clearTimeout(this.bootRefreshTimer);
+      this.bootRefreshTimer = -1;
+    }
     const prevUri: string = (this.cur >= 0 && this.cur < this.items.length)
       ? this.items[this.cur].uri : '';
     const prevDir: string = this.browseBase;
     const hadSelection: boolean = prevUri.length > 0;
     const base: string = this.browseBase;
-    hilog.info(DOMAIN, TAG, 'resume refresh: relist %{public}s', base);
+    hilog.info(DOMAIN, TAG, 'resume refresh: relist %{public}s scene=%{public}d',
+      base, scene);
     this.openFolder(base, false, false, true).then((ok: boolean) => {
       if (!this.pageAlive) {
         return;
+      }
+      // 第五十七轮：冷启动恢复走的是零 IO 快照，setItems() 清掉了 dirPollTimer，
+      // dirMtime 也是 0 —— 若这次重扫命中 sameDirEntries 短路（内容未变），
+      // openFolder 不会自己重启轮询。这里补一次（startDirPoll 幂等：先清再起），
+      // 让重启之后目录变化仍能靠既有 1.5s mtime 轮询持续同步。
+      if (ok && this.dirPollTimer === -1) {
+        this.startDirPoll();
       }
       const uris: Array<string> = [];
       for (let i = 0; i < this.items.length; i++) {
@@ -1560,7 +1637,9 @@ struct Index {
         hilog.warn(DOMAIN, TAG, 'resume refresh: listing failed, keep ctx %{public}s', prevDir);
       }
       if (ok) {
-        this.status = resumeRefreshHint(true, dirKept, selKept, hadSelection);
+        this.status = scene === RESUME_SCENE_BOOT
+          ? bootRefreshHint(dirKept, selKept, hadSelection)
+          : resumeRefreshHint(true, dirKept, selKept, hadSelection);
       }
       // ok=false 时保留 openFolder 给出的明确错误串，不覆盖成泛泛提示。
     }).catch(() => {
@@ -1610,6 +1689,10 @@ struct Index {
     if (this.resumeRefreshTimer !== -1) {
       clearTimeout(this.resumeRefreshTimer); // 第五十六轮：页面销毁后不许再排返回刷新
       this.resumeRefreshTimer = -1;
+    }
+    if (this.bootRefreshTimer !== -1) {
+      clearTimeout(this.bootRefreshTimer); // 第五十七轮：页面销毁后不许再排冷启动补刷
+      this.bootRefreshTimer = -1;
     }
     this.clearEnterWatchdog(); // 页面已销毁，超时也不该再弹选择文件夹
     this.giveUpDone = true;    // 页面已销毁：warm 回调也不许再对死路径发起同步 IO
@@ -2544,6 +2627,10 @@ struct Index {
     this.clearEnterWatchdog();
     hilog.info(DOMAIN, TAG, 'restore: entered last dir in %{public}d ms (et1)',
       Date.now() - this.restoreStartedAt);
+    // 第五十七轮：恢复链已真正进入上次目录（resumeDone=true、browseBase 已回填），
+    // 此时补一次真实列举，把零 IO 快照清单同步回磁盘（新增 / 删除 / 改名 / 层级变动）。
+    // 若仍有在途操作，tryBootRefresh 自行有限延后；绝不在恢复期抢占 IO。
+    this.tryBootRefresh();
   }
 
   /** 看门狗到期：由 RestoreTimeout 纯函数裁决，
