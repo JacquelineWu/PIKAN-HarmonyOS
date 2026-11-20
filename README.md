@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R55`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R56`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -547,13 +547,15 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > README 上方的功能表与各轮章节停在 **R38**；R39–R55 的实现说明见下方
 > 「R39–R55 实现说明（依据测试断言名与源码）」章节，该章以测试断言名与
 > `Index.ets` / `components/` / `model/` 源码为准，与本章的真机步骤一一对应。
+> **R56（返回 APP 自动同步目录 / 并排只看左图比例）见下方独立章节**，
+> 其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R55`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R55` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R56`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R56` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3837`）
+  （`tests/dirname.test.mjs:3842`；R56 新增 import 后行号由 3837 顺延 5 行）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -765,6 +767,117 @@ R54 起已改为按住左键拖选，测试断言 `R54 行级 onClick 移除（�
 >     到 / 或 NAS 设备根仍给「已到最上层」提示，绝不越级到 /storage、/ 等系统目录。
 > ⚠️ 边界：只在用户主动点击且当前层恰好是用户卷根时做一次真实全量列举；
 >     自动重扫（每 1.5s）/ 启动恢复期仍零新增 IO，绝不重演 THREAD_BLOCK_6S。
+
+---
+
+## 第五十六轮：返回 APP 自动同步目录清单 + 并排预览只看左图比例（2026-11-20，R56）
+
+> 本章依据本轮源码、`tests/dirname.test.mjs` 断言名与真实编译产物撰写；
+> **静态契约 / 真实 ArkTS 编译 / 真机验证三类证据严格分开**。
+> 用户规格：①「当使用者离开 APP 后再次返回并恢复显示时，自动 refresh 左侧列表，
+> 使其重新同步当前目录的档案结构……同一返回事件只触发一次 refresh，且不得中断
+> 当前正在进行的操作；若当前选中档案及已展开目录仍存在，则保留选中项与展开状态，
+> 若已不存在则清除对应失效状态」；②「以左侧图片比例为准，若左图为 portrait，
+> 不论右图为 landscape、portrait 或方形，都保留右侧预览图并显示在右侧；若左图为
+> landscape 或方形，则不显示右侧图片，仅将左图置于中间显示」；两项均要求
+> 「保持现有功能不受影响」。
+
+### 一、改动范围（4 个文件）
+
+| 文件 | 改动 |
+|---|---|
+| `entry/src/main/ets/common/ResumeRefresh.ts` | **新增**：返回刷新决策与状态对账的零 IO 纯函数真值源 |
+| `entry/src/main/ets/common/ViewPlan.ts` | 新增 `ORIENT_*` 三分类、`imageOrientationOf()`、`spreadRightWantedOf()` |
+| `entry/src/main/ets/pages/Index.ets` | 生命周期 / 状态 / 刷新链 / 并排决策接线；`ESC_BUILD_TAG` R55→R56 |
+| `tests/dirname.test.mjs` | R56 断言组 +25 条；构建标记与旧包排除批量升级；两处计数型契约 5→6 |
+
+**未改**：`EntryAbility.ets`（`onForeground` / `onBackground` 仍只打日志）、
+`openFolder()` / `applyItems()` / `sameDirEntries()` / `loadRightPage()` 主体、
+预览区渲染布局、`AppScope/app.json5`（版本恒 `1.0.7 / versionCode 7`）。
+
+### 二、需求一：返回 APP 时左侧清单单次、非侵入刷新
+
+**信号选择**：ArkUI `onPageShow()` 与既有 `onPageHide()` 配对 —— `onPageHide` 的注释
+本就明确它覆盖「切后台 / 锁屏 / 被别的应用盖住」。`onPageHide()` 里新增置位
+`pageSuspended=true` 并重置 `resumeRefreshHandled=false`；首次进入 `pageSuspended`
+恒 false，**启动恢复链绝不会被这次刷新打断**。
+
+**决策真值源**（`ResumeRefresh.ts`：零 SDK / 零文件 IO / 零 `await` / 零 `throw`）：
+
+| 函数 | 作用 |
+|---|---|
+| `resumeRefreshAction(suspended, handled, busy, hasDir, ioOk)` | 五条件全满足才 `GO`，任一不满足 `SKIP`（保守、零副作用） |
+| `resumeSelectedIndex(prevUri, newUris)` | 按 uri 精确命中返回新下标；失效返回 `-1` |
+| `resumeDirKept(prevDir, dirExists)` | 目录仍存在才保留层级状态 |
+| `resumeRefreshHint(ok, dirKept, selKept, hadSelection)` | 成功 / 目录失效 / 选中失效 / 同步未完成四态文案 |
+
+**真正的列举**：复用既有 `openFolder(this.browseBase, false, false, true)`，与
+`pollMtimeOnce()` 的自动重扫**逐字同参**（第 4 参 `isRescan=true`）：
+
+- 真实 `fs.listFile()` 重列举 → `sameDirEntries(names)` 比对 → 有增删 / 改名 / 层级变动
+  才 `applyItems(..., preserveView=true)` 重建左栏；条目未变只更新 mtime 基准、视图零抖动。
+- `applyItems(preserveView)` 按 uri 保位，不恢复「上次位置」、不滚列表、不清预览缓存、
+  不关闭文本预览（`keepView` 时不调 `closeTextMode()`）。
+
+**不中断在途操作**：`busy = folderBusy || playing || mtimeBusy || pickerBusy || !pageAlive`，
+`ioOk = bulkIoAllowed(restoreMode)`；任一为真一律让路，最多按 400ms × 3 次延后重试
+（`RESUME_REFRESH_RETRY_MS / MAX`），绝不抢占用户导航。`openFolder` 自身对
+`isRescan===true && folderBusy` 也会直接 `return false`。重试 timer 在再次离开 APP 与
+`aboutToDisappear()` 时都清理。
+
+**只触发一次**：GO 分支**先**置 `resumeRefreshHandled=true; pageSuspended=false` 再发起
+列举，窗口状态变化导致 `onPageShow` / 前台回调重复到达时不会刷第二次。
+
+**状态对账**：列举完成后用 `resumeSelectedIndex(prevUri, 新 items uris)` 对账 ——
+仍存在则保留（`applyItems` 已按 uri 保位）；已删除 / 改名 / 移走则 `cur=-1` +
+`refreshSpread()` 收掉右页，**不会悄悄改选邻近的另一张图**。目录失效时清
+`inAppUpList` 与 `dirMtime` 基准；**刻意不清 `browseBase` / `browseDir`** —— 列举失败
+也可能是 NAS 未挂载 / 授权暂时失效（R44 有重连重试先例），误清会破坏 R36 的目录恢复；
+目录真实消失由既有 1.5s 轮询与用户主动导航纠正。失败时保留 `openFolder` 给出的明确
+错误串，不覆盖成泛泛提示。对账只清运行时视图态，不动 `posPending` / 快照写盘链。
+
+### 三、需求二：并排预览以左图比例为准
+
+**旧策略**（R55 及以前）：`refreshSpread()` 要求「左图竖 **且** 右图 `probeCache.get(b)`
+也为竖」才并排 —— 右图是横图 / 方图时整页消失。
+
+**新策略**：`ViewPlan.spreadRightWantedOf(leftW, leftH, hasNext, enabled)` 是唯一决策，
+**签名刻意不接收右图形态参数**，从类型上杜绝旧逻辑回潮：
+
+- 左图 portrait（`h>w`）→ 只要还有下一张就 `spreadB = cur+1`，右页显示；
+  右图 landscape / portrait / square 一律不参与判断。
+- 左图 landscape / square / 尺寸未知 → `spreadB=-1` + `clearRightPage()`，
+  既有渲染分支走「单页居中」，**布局代码一行未改**。
+
+`Index.ets` 新增 `leftImageSize(uri, seq)`：优先 `previewEntry()` 的已解码原图 `w/h`，
+其次 `probeSize` 元数据缓存，都没有才 `probeOne()` 异步探一次并由
+`probeOne → refreshSpread` 重算；`probeOne()` 成功 / 失败 / 抛异常三条路径都写
+`probeSize`，尺寸未知返回 `0×0` → 保守单页，绝不误开右页。
+`isPortrait()` 保留作单张形态查询 / 诊断，但**不再参与并排决策**；右页解码与重试链
+（`loadRightPage` / `RIGHT_PAGE_RETRY_DELAYS`）、翻页步长 `go(±1)`、放大镜、
+文本预览、目录恢复全部未动。
+
+### 四、验证结果（三类证据严格分开）
+
+| 证据 | 结果 |
+|---|---|
+| **静态契约 / 纯函数** | `node --experimental-strip-types tests/dirname.test.mjs` → **ALL PASS 1859 passed, 0 failed**（R55 基线 1834，新增 25 条 R56 断言）；`git diff --check` 通过 |
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **BUILD SUCCESSFUL in 17 s 869 ms**，`Finished :entry:default@CompileArkTS... after 11 s 54 ms`（**真实编译，非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（8 条 `preferences` 可能抛异常 + 1 条 `READ_IMAGEVIDEO` 权限 + 8 条 2in1 系统栏 API），与 R55 基线完全一致且全部落在本轮**未改动**区域 |
+| **产物核验** | 签名 HAP **1,210,826 B** / 未签名 **1,176,849 B** / `modules.abc` **695,704 B**（R55 为 1,195,104 B / 686,848 B）；`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 **`R56=1 / R55=0 / R54=0 / R38=0 / R37=0`**、**`1.0.7=1 / 1.0.6=0`** |
+| **真机验证** | ⚠️ **未做**，由使用者完成；**编译校验 ≠ 真机验证**。特别是 `onPageShow()` 在「切后台 / 锁屏 / 被覆盖」三条路径上是否都稳定回调、竖图右页是否按新策略显示，必须实机确认 |
+
+### 五、真机步骤（逐字取自 `tests/dirname.test.mjs` R56 组）
+
+> ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R56-A：打开任意含图目录 → 切到别的应用 / 锁屏再返回 → 左栏应只刷一次、
+>     与磁盘一致（期间新增 / 删除 / 改名 / 建子目录都能反映）；正在翻页 / 幻灯片时不打断。
+> ⚠️ 真机步骤 R56-B：原选中档案被删后返回 → 失效选中被清除且不自动改选别张；
+>     目录仍在则保留原目录层级；目录不可列时给明确提示且不误回默认目录。
+> ⚠️ 真机步骤 R56-C：左图为竖图且后面还有一张 → 无论第二张横 / 竖 / 方，右页都显示；
+>     左图为横图或方图 → 右页消失、左图单页居中；翻页 / 放大镜 / 文本预览不受影响。
+
+**边界**：`Ctrl+D` 诊断层角标必须是 **`R56`**；未跑 `build.sh`、未升版本、
+未把 HAP 放桌面；本轮**未推送**任何远端（等待使用者指示）。
 
 ---
 

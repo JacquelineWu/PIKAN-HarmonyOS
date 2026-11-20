@@ -221,6 +221,45 @@ export function viewHintOf(colorSpaceName: string, isHdr: boolean, exifDegrees: 
   return s;
 }
 
+/** 第五十六轮：图片显示形态三分类（按原始宽高比）。
+ *  portrait（竖图）h>w / landscape（横图）w>h / square（方形）w==h。
+ *  宽或高非正（尺寸未知 / 探测失败）一律按 landscape 处理，绝不当竖图去开右页。 */
+export const ORIENT_PORTRAIT: number = 1;
+export const ORIENT_LANDSCAPE: number = 2;
+export const ORIENT_SQUARE: number = 3;
+
+export function imageOrientationOf(w: number, h: number): number {
+  if (w <= 0 || h <= 0) {
+    return ORIENT_LANDSCAPE;
+  }
+  if (h > w) {
+    return ORIENT_PORTRAIT;
+  }
+  if (w > h) {
+    return ORIENT_LANDSCAPE;
+  }
+  return ORIENT_SQUARE;
+}
+
+/**
+ * 第五十六轮：并排预览「是否保留右页」的唯一决策 —— 只看左图比例。
+ *
+ *  用户规格：以左侧图片比例为准；
+ *    · 左图 portrait → 无论右图是 landscape / portrait / square，都保留右侧预览图并显示在右侧；
+ *    · 左图 landscape 或 square → 不显示右侧图片，仅将左图置于中间（单页居中）。
+ *
+ *  注意此函数**刻意不接收右图形态参数**：从签名上就杜绝「右图不竖就不并排」的旧逻辑，
+ *  右图比例完全不参与决策。`hasNext` 只保证右侧确实还有一张可显示，
+ *  `enabled` 是全局并排开关（SPREAD_PORTRAIT）。
+ */
+export function spreadRightWantedOf(leftW: number, leftH: number,
+  hasNext: boolean, enabled: boolean): boolean {
+  if (!enabled || !hasNext) {
+    return false;
+  }
+  return imageOrientationOf(leftW, leftH) === ORIENT_PORTRAIT;
+}
+
 /** 窗口级真全屏的步骤名（只喂 hilog 与静态契约测试，方便实机对照跑到哪一步）。
  *
  *  2026-11-11 ESC 修复：退出时不只要「恢复系统栏」，还得**撤销进入时设下的沉浸最大化形态**，

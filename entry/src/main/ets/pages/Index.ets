@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R55 组件化主线
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R56 主线（R39 起组件化）
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -89,7 +89,7 @@ import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { Size2, viewEdgeOf, preloadEdgeOf,
   displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
-  isWideGamutOf, fullscreenStepsOf } from '../common/ViewPlan';
+  isWideGamutOf, fullscreenStepsOf, spreadRightWantedOf } from '../common/ViewPlan';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
   packWindowRect, parseWindowRect, windowRectUsable,
   shouldSaveWindowRect, collapsedOf, windowModeFlagOf,
@@ -134,6 +134,10 @@ import { LANG_NONE, textLangOf, isTextFileName,
   TEXT_CONTENT_MAX_VP, textReadCapOf, textByteTruncatedOf, splitTextLines,
   lineNoWidthOf, textStatusOf, textContentWidthOf, TextToken, TextSplit,
   tokenColorOf, tokenizeLine, blockStartsOf } from '../common/TextDoc';
+// 第五十六轮：返回 APP 时左侧目录清单「单次、非侵入」刷新的决策真值源（零 SDK / 零 IO）。
+// 真正的重列举仍复用既有 openFolder(isRescan=true) 链，本文件只判断「该不该刷、刷完怎么对账」。
+import { RESUME_REFRESH_GO, resumeRefreshAction, resumeSelectedIndex,
+  resumeDirKept, resumeRefreshHint } from '../common/ResumeRefresh';
 // R39（Index.ets 拆分 Phase 1）：左栏行组件与解码服务迁出本文件 ——
 //   · components/ArchiveRow.ets：ArchiveRow 行组件 + ThumbLoader 悬停缩略图 + ROW_* 行种类
 //   · model/Preview.ets：PreviewEntry / RawStore / decodePx 解码链 + hilog TAG/DOMAIN
@@ -154,7 +158,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R55';
+const ESC_BUILD_TAG: string = 'R56';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -258,6 +262,10 @@ const MTIME_STAT_TIMEOUT_MS: number = 3000;
  *  零解码）；真解不开的坏文件快速失败两次后放弃，不无限重试。 */
 const RIGHT_PAGE_RETRY_DELAYS: number[] = [600, 1800];
 const DIR_RESCAN_DEBOUNCE_MS: number = 900;
+/** 第五十六轮：返回 APP 时若恰有在途操作，最多延后重试几次、每次间隔多久。
+ *  既不抢占用户操作，也不让「返回后自动同步」被一次瞬时忙状态永久吞掉。 */
+const RESUME_REFRESH_RETRY_MS: number = 400;
+const RESUME_REFRESH_RETRY_MAX: number = 3;
 
 /** 全屏时顶栏自动隐藏（Win64 4666 / 4670）：鼠标压到窗口最上面 TOPBAR_EDGE_PX 个像素
  *  才把顶栏浮出来，顶栏高度 52 + 下方 TOPBAR_KEEP_PX 之内保持显示。
@@ -1204,6 +1212,15 @@ struct Index {
    *  没有这个前置证据，进全屏后第一次 ESC 就会被误同步成 QUIT_APP 直接退出 APP。 */
   private sawWindowFull: boolean = false;
   private pageAlive: boolean = true;
+  /** 第五十六轮：返回 APP（onPageHide → onPageShow）时的「单次」目录刷新状态。
+   *   · pageSuspended：确实经历过离开 APP。首次进入恒 false —— 启动恢复链绝不被这次刷新打断。
+   *   · resumeRefreshHandled：本轮「离开→返回」是否已消费。窗口状态变化可能让
+   *     onPageShow / 前台回调多次到达，用它保证同一返回事件只触发一次 refresh。
+   *   · resumeRefreshTimer / Retry：在途操作时延后重试的句柄与次数（不抢占、有上限）。 */
+  private pageSuspended: boolean = false;
+  private resumeRefreshHandled: boolean = false;
+  private resumeRefreshTimer: number = -1;
+  private resumeRefreshRetry: number = 0;
   // ---- 第二十二轮：按键到达可观测（零按键到达是本轮要解决的唯一断点）----
   /** 任意键（不只 ESC）进入 onKey() 的累计次数。常显在右下角角标：
    *  keys=0 = 键盘事件根本没到 APP（焦点 / 系统消费）；keys>0 = 事件链路通。 */
@@ -1459,6 +1476,96 @@ struct Index {
     // 2026-11-12：窗口大小位置 + 左栏收起态也要同步落盘（进程被杀也不丢）。
     this.clearWinRectTimer();
     this.saveWindowRectSync();
+    // 第五十六轮：标记「确实离开过 APP」，并开启新的一轮返回刷新资格。
+    // 只在这里置位，首次进入 onPageShow 恒不刷 —— 启动恢复链绝不被打断。
+    this.pageSuspended = true;
+    this.resumeRefreshHandled = false;
+    this.resumeRefreshRetry = 0;
+    if (this.resumeRefreshTimer !== -1) {
+      clearTimeout(this.resumeRefreshTimer);
+      this.resumeRefreshTimer = -1;
+    }
+  }
+
+  /** 第五十六轮：从后台 / 锁屏 / 被别的应用盖住后恢复显示。
+   *  只做一次「当前目录真实重列举」，把左侧清单同步回磁盘：新增 / 删除 / 改名 /
+   *  层级变动都由既有 openFolder(isRescan=true) → sameDirEntries → applyItems(preserveView)
+   *  链路覆盖。同一返回事件只刷一次；在途操作一律让路（不抢占、不中断）。 */
+  onPageShow(): void {
+    this.tryRefreshOnResume();
+  }
+
+  /** 返回刷新的唯一决策落点。真值源是 ResumeRefresh.ts 的纯函数，
+   *  真正的磁盘列举 / 保位刷新全部复用既有链，本函数不另起一套 IO。 */
+  private tryRefreshOnResume(): void {
+    const busy: boolean = this.folderBusy || this.playing || this.mtimeBusy ||
+      this.pickerBusy || !this.pageAlive;
+    const hasDir: boolean = this.browseBase.length > 0;
+    const ioOk: boolean = bulkIoAllowed(this.restoreMode);
+    const act: number = resumeRefreshAction(this.pageSuspended,
+      this.resumeRefreshHandled, busy, hasDir, ioOk);
+    if (act !== RESUME_REFRESH_GO) {
+      // 在途操作不抢占：短延时后再判，最多 RESUME_REFRESH_RETRY_MAX 次。
+      // 这一轮「离开→返回」始终只算一次（handled 尚未消费）。
+      if (busy && hasDir && ioOk && this.pageSuspended && !this.resumeRefreshHandled &&
+          this.resumeRefreshRetry < RESUME_REFRESH_RETRY_MAX) {
+        this.resumeRefreshRetry++;
+        if (this.resumeRefreshTimer !== -1) {
+          clearTimeout(this.resumeRefreshTimer);
+        }
+        this.resumeRefreshTimer = setTimeout(() => {
+          this.resumeRefreshTimer = -1;
+          this.tryRefreshOnResume();
+        }, RESUME_REFRESH_RETRY_MS);
+      }
+      return;
+    }
+    if (this.resumeRefreshTimer !== -1) {
+      clearTimeout(this.resumeRefreshTimer);
+      this.resumeRefreshTimer = -1;
+    }
+    // 先消费资格：窗口状态变化可能让 onPageShow / 前台回调多次到达，绝不刷第二次。
+    this.resumeRefreshHandled = true;
+    this.pageSuspended = false;
+    const prevUri: string = (this.cur >= 0 && this.cur < this.items.length)
+      ? this.items[this.cur].uri : '';
+    const prevDir: string = this.browseBase;
+    const hadSelection: boolean = prevUri.length > 0;
+    const base: string = this.browseBase;
+    hilog.info(DOMAIN, TAG, 'resume refresh: relist %{public}s', base);
+    this.openFolder(base, false, false, true).then((ok: boolean) => {
+      if (!this.pageAlive) {
+        return;
+      }
+      const uris: Array<string> = [];
+      for (let i = 0; i < this.items.length; i++) {
+        uris.push(this.items[i].uri);
+      }
+      const selIdx: number = resumeSelectedIndex(prevUri, uris);
+      const selKept: boolean = selIdx >= 0;
+      const dirKept: boolean = resumeDirKept(prevDir, ok && this.browseBase.length > 0);
+      // 原选中档案已被删除 / 改名 / 移走：清掉失效选中引用，绝不让 keepView
+      // 悄悄把它夹到另一张图上。仍存在的选中由 applyItems 按 uri 保位完成。
+      // ⚠️ 只清运行时视图态，不动 posPending / 快照写盘链 —— 既有落盘语义零回归。
+      if (hadSelection && !selKept) {
+        this.cur = -1;
+        this.refreshSpread(); // cur<0 → spreadB=-1 + 收右页
+      }
+      // 目录层级已失效：清掉「APP 内自建清单态」与 mtime 基准，避免继续拿过期
+      // 快照当真值。⚠️ 不清 browseBase / browseDir —— 列举失败也可能是 NAS 未挂载 /
+      // 授权暂时失效（R44），误清会破坏 R36 的目录恢复，用户主动导航会自然纠正。
+      if (!dirKept) {
+        this.inAppUpList = false;
+        this.dirMtime = 0;
+        hilog.warn(DOMAIN, TAG, 'resume refresh: listing failed, keep ctx %{public}s', prevDir);
+      }
+      if (ok) {
+        this.status = resumeRefreshHint(true, dirKept, selKept, hadSelection);
+      }
+      // ok=false 时保留 openFolder 给出的明确错误串，不覆盖成泛泛提示。
+    }).catch(() => {
+      hilog.warn(DOMAIN, TAG, 'resume refresh: relist rejected');
+    });
   }
 
   aboutToDisappear(): void {
@@ -1499,6 +1606,10 @@ struct Index {
     if (this.resumeTimer !== -1) {
       clearTimeout(this.resumeTimer); // 别让恢复在页面已经销毁后还去改视图
       this.resumeTimer = -1;
+    }
+    if (this.resumeRefreshTimer !== -1) {
+      clearTimeout(this.resumeRefreshTimer); // 第五十六轮：页面销毁后不许再排返回刷新
+      this.resumeRefreshTimer = -1;
     }
     this.clearEnterWatchdog(); // 页面已销毁，超时也不该再弹选择文件夹
     this.giveUpDone = true;    // 页面已销毁：warm 回调也不许再对死路径发起同步 IO
@@ -5497,6 +5608,9 @@ struct Index {
   @State spreadB: number = -1;
   /** 竖图探测缓存：uri → 是否竖图。只读元数据，不解像素（Win64 ProbeOf 的对应物）。 */
   private probeCache: Map<string, boolean> = new Map<string, boolean>();
+  /** 第五十六轮：uri → 原始宽高。并排决策只看左图尺寸，右图尺寸不再参与；
+   *  探测回来后由 probeOne → refreshSpread 重算，尺寸未知一律保守单页。 */
+  private probeSize: Map<string, Size2> = new Map<string, Size2>();
   private spreadSeq: number = 0;
 
   /** 读回当前对开右页。pageLabel / UI 都从这里取，保证与 @State 一致。 */
@@ -5504,9 +5618,14 @@ struct Index {
     return this.spreadB;
   }
 
-  /** 重算对开配对（Win64 PairFor / bd5c73a）：
-   *  「点到 / 翻到哪张，哪张就在左边」—— 固定按 [0,1][2,3] 分组会让第 2 张永远选不中，
-   *  所以以当前落点为基准，下一张同为竖图才并排。翻页步长恒为一格（go(±1)）。 */
+  /** 重算对开配对（第五十六轮）：**以左侧图片比例为准**。
+   *   · 左图 portrait（h>w）→ 只要还有下一张，就保留右侧预览图并显示在右侧；
+   *     右图是 landscape / portrait / square 一律不参与判断。
+   *   · 左图 landscape / square / 尺寸未知 → 不显示右页，仅将左图置于中间（单页居中）。
+   *
+   *  真值源是 ViewPlan.spreadRightWantedOf()（签名刻意不接收右图形态参数）。
+   *  本函数只负责取左图尺寸、维护 spreadB 与右页解码链；既有翻页步长 go(±1)、
+   *  右页解码 / 重试、放大镜、文本预览、目录恢复全部不动。 */
   private refreshSpread(): void {
     // 只读名单态：不碰任何 uri（createImageSource / createPixelMap 都是跨进程 IO）。
     if (!bulkIoAllowed(this.restoreMode)) {
@@ -5521,31 +5640,38 @@ struct Index {
     }
     const seq: number = ++this.spreadSeq;
     const self: string = this.items[this.cur].uri;
-    const next: number = this.cur + 1;
-    if (next >= this.items.length || !this.isPortrait(self)) {
+    const hasNext: boolean = (this.cur + 1) < this.items.length;
+    const sz: Size2 = this.leftImageSize(self, seq);
+    if (!spreadRightWantedOf(sz.w, sz.h, hasNext, SPREAD_PORTRAIT)) {
       this.spreadB = -1;
       this.clearRightPage();
       return;
     }
-    const b: string = this.items[next].uri;
-    const known: boolean | undefined = this.probeCache.get(b);
-    if (known === undefined) {
-      // 还没探到 → 先单页，后台探测完成后再重算（不阻塞切图）
-      this.spreadB = -1;
-      this.clearRightPage();
-      this.probeOne(b, seq);
-      return;
-    }
-    if (!known) {
-      this.spreadB = -1;
-      this.clearRightPage();
-      return;
-    }
-    this.spreadB = next;
-    this.loadRightPage(b);
+    this.spreadB = this.cur + 1;
+    this.loadRightPage(this.items[this.spreadB].uri);
   }
 
-  /** 是否竖图：优先查缓存，再查已解码的预载缓存，都没有才异步探元数据。 */
+  /** 左图原始宽高：优先已解码条目（PreviewEntry.w/h 是原图像素），其次元数据探测缓存；
+   *  都没有时异步探一次，结果由 probeOne → refreshSpread 重算。本次返回 0×0，
+   *  spreadRightWantedOf 会把「尺寸未知」保守判成单页，绝不误开右页。 */
+  private leftImageSize(uri: string, seq: number): Size2 {
+    const e: PreviewEntry | undefined = this.previewEntry(uri);
+    if (e !== undefined && e.w > 0 && e.h > 0) {
+      const hit: Size2 = { w: e.w, h: e.h };
+      return hit;
+    }
+    const cached: Size2 | undefined = this.probeSize.get(uri);
+    if (cached !== undefined) {
+      return cached;
+    }
+    this.probeOne(uri, seq);
+    const unknown: Size2 = { w: 0, h: 0 };
+    return unknown;
+  }
+
+  /** 是否竖图（第五十六轮起**不参与并排决策**，仅保留作诊断 / 单张形态查询）。
+   *  优先查缓存，再查已解码的预载缓存，都没有才异步探元数据。
+   *  并排右页只由 refreshSpread → spreadRightWantedOf(左图尺寸) 决定，右图形态不再被查询。 */
   private isPortrait(uri: string): boolean {
     const hit: boolean | undefined = this.probeCache.get(uri);
     if (hit !== undefined) {
@@ -5579,6 +5705,8 @@ struct Index {
         .then((info: image.ImageInfo) => {
           const portrait: boolean = info.size.height > info.size.width;
           this.probeCache.set(uri, portrait);
+          const dim: Size2 = { w: info.size.width, h: info.size.height };
+          this.probeSize.set(uri, dim);
           try {
             src.release();
           } catch (e) {
@@ -5590,6 +5718,8 @@ struct Index {
         })
         .catch(() => {
           this.probeCache.set(uri, false);
+          const zeroDim: Size2 = { w: 0, h: 0 };
+          this.probeSize.set(uri, zeroDim);
           try {
             src.release();
           } catch (e) {
@@ -5601,6 +5731,8 @@ struct Index {
         });
     } catch (e) {
       this.probeCache.set(uri, false);
+      const zeroDim2: Size2 = { w: 0, h: 0 };
+      this.probeSize.set(uri, zeroDim2);
     }
   }
 
