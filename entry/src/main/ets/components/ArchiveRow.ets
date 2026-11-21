@@ -13,6 +13,8 @@ import hilog from '@ohos.hilog';
 import { textWidthVp } from '../common/DirName';
 // 第五十九轮：往上层后「返回前所在子目录」反色显示，常态逐字返回原配色。
 import { upReturnBgOf, upReturnFgOf } from '../common/UpReturn';
+// 第六十一轮：名称右侧符号列按行种类决定内容与宽度的纯函数真值源（零 SDK / 零 IO）。
+import { FG_COL_W, folderGlyphOf, folderGlyphWidthOf } from '../common/FolderGlyph';
 import { HoverGuard } from '../common/HoverGuard';
 import { decodePx, PreviewEntry, TAG, DOMAIN } from '../model/Preview';
 
@@ -389,10 +391,12 @@ export struct ArchiveRow {
 
   build() {
     Row() {
-      // 第五十九轮：名称文字统一紧贴列表最左边缘 —— 行首 18vp 图标列改置于名称之后，
-      // List / Row / Text 三层的 left padding 一律清零，所有档案与目录名都从 x=0 起。
-      // ↑ / ▣ 导航符号本身保留（.width(18) / .height(26) 不变），只是不再占名称左侧；
-      // 悬停缩略图仍只在 mouse over 整行时由 bindPopup 浮出（见 hoverThumb）。
+      // 第五十九轮：名称文字统一紧贴列表最左边缘，List / Row / Text 三层 left padding 清零。
+      // 第六十一轮：名称右侧符号列改为按行种类决定内容与宽度 —— 目录类行不再显示
+      // 正方形方格，列宽归零（占位一并移除）；「往上层」↑ 与其余行逐字不变。
+      // 归零的 18vp 由上方名称文字的 layoutWeight(1) 弹性吸收，字节 66 / 日期 88
+      // 两列靠右固定宽度，三栏起始位置与下方 .height(26) 行高完全不变，
+      // 不新增任何空白或偏移；悬停缩略图仍只在 mouse over 整行时由 bindPopup 浮出。
       Text(this.name)
         .fontSize(12)
         .fontColor(this.labelColor())
@@ -404,10 +408,10 @@ export struct ArchiveRow {
         .constraintSize({ minWidth: textWidthVp(this.name, 12) })
         .layoutWeight(1)
 
-      Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : ''))
+      Text(folderGlyphOf(this.kind, ROW_UP))
         .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
         .fontColor(this.iconColor())
-        .width(18)
+        .width(folderGlyphWidthOf(this.kind, ROW_FOLDER, ROW_OTHER, FG_COL_W))
         .height(26)   // 11-10 起压缩行高：42 → 26，配合下方 padding 把每行从 54vp 收到 30vp
         .textAlign(TextAlign.Center)
 
