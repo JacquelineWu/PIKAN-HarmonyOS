@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R57 主线（R39 起组件化）· 冷启动补刷
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R58 主线（R39 起组件化）· 视窗缩放护栏
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -89,7 +89,8 @@ import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { Size2, viewEdgeOf, preloadEdgeOf,
   displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
-  isWideGamutOf, fullscreenStepsOf, spreadRightWantedOf } from '../common/ViewPlan';
+  isWideGamutOf, fullscreenStepsOf, spreadRightWantedOf,
+  chromeSampleOf, canvasResizeAcceptOf } from '../common/ViewPlan';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
   packWindowRect, parseWindowRect, windowRectUsable,
   shouldSaveWindowRect, collapsedOf, windowModeFlagOf,
@@ -159,7 +160,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R57';
+const ESC_BUILD_TAG: string = 'R58';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -456,6 +457,15 @@ const RESIZE_RELOAD_THROTTLE_MS: number = 140;
 /** resize 重解的最小累积尺寸变化（vp）：相对「上次真正重解时的画布」比较，
  *  不能用相邻两帧之差（拖窗口每帧只变 1~3vp，永远够不到阈值）。 */
 const RESIZE_MIN_DELTA_PX: number = 8;
+/** 第五十八轮：固定栏偏移 chrome 自洽采样的容差（vp）与「固定栏占根尺寸」上限。
+ *  chrome 是左栏 + 顶栏等固定占用，resize 时恒定；采样值超过基准 + 容差即判为
+ *  跨帧污染（用旧根尺寸减新画布），保持原基准。maxRatio 兜住「chrome 吃掉大半个屏」。 */
+const CHROME_SAMPLE_TOL: number = 2;
+const CHROME_SAMPLE_MAX_RATIO: number = 0.6;
+/** 第五十八轮：根容器反推画布覆盖 canvasW/canvasH 前的塌缩护栏 —— 画布至少占
+ *  根尺寸的这个比例；低于它（或超过根尺寸）一律判为塌缩 / 越界反推值，拒绝覆盖，
+ *  保留当前可信画布。真实画布通常占根 70%~100%，0.4 只挡极端塌缩，不误伤正常布局。 */
+const CANVAS_MIN_ROOT_RATIO: number = 0.4;
 /** 全屏态下画布缩到「全屏基准」的这个比例以下，判定系统已自行退出沉浸。
  *  真全屏下 ESC 常被窗口管理器消费，APP 收不到按键；此时窗口会缩小，
  *  据此自愈退出 APP 全屏态、恢复完整界面（与双击退出对齐）。
@@ -6479,6 +6489,11 @@ struct Index {
         break;
       case 'collapse':
         this.listCollapsed = !this.listCollapsed;
+        // 第五十八轮：左栏收起 / 展开会改变固定栏结构，chrome 基准失效。
+        //  置 -1 让下一轮 onAreaChange 重新自洽采样；不置位的话展开时 chrome
+        //  由小变大，会被 chromeSampleOf 当成跨帧污染拒绝，画布随之偏大。
+        this.chromeW = -1;
+        this.chromeH = -1;
         this.markWindowRect(); // 记住左栏收起态，重启前后界面状态一致
         break;
       // 11-10 起「回到上次」按钮取消，'resume' 分支一并移除；
@@ -7612,6 +7627,9 @@ struct Index {
     // Ctrl+B：收起 / 展开左栏（Win64 c38318f）。必须放在通用分支之前，避免 B 被吞掉。
     if (this.ctrlDown && code === KeyCode.KEYCODE_B) {
       this.listCollapsed = !this.listCollapsed;
+      // 第五十八轮：同上，左栏结构变化后固定栏偏移必须重新采样。
+      this.chromeW = -1;
+      this.chromeH = -1;
       this.markWindowRect();
       this.status = this.listCollapsed ? '已收起左栏（Ctrl+B 展开）' : '已展开左栏';
       return;
@@ -8329,6 +8347,9 @@ struct Index {
               .padding(0)
               .onClick(() => {
                 this.listCollapsed = !this.listCollapsed;
+                // 第五十八轮：同上，左栏结构变化后固定栏偏移必须重新采样。
+                this.chromeW = -1;
+                this.chromeH = -1;
                 this.markWindowRect();
                 this.status = this.listCollapsed ? '已收起左栏（Ctrl+B / » 展开）' : '已展开左栏';
               })
@@ -8596,12 +8617,17 @@ struct Index {
             }
             this.canvasW = w;
             this.canvasH = h;
-            // ② 同步「根尺寸 → 画布」的固定栏偏移：根 Stack 的 onAreaChange 兜底要用。
-            //    全屏 / 收起左栏会改变栏结构，届时 chrome 由 setFull() 重置后在这里重建。
-            if (this.lastRootW > 0 && this.lastRootH > 0) {
-              this.chromeW = this.lastRootW - w;
-              this.chromeH = this.lastRootH - h;
-            }
+            // ② 第五十八轮：固定栏偏移改走 chromeSampleOf 自洽采样。
+            //    旧写法 `chrome = lastRootW - w` 用「上一帧根尺寸」减「本帧画布」，
+            //    PC 拖窗口 / 缩小视窗时两个 onAreaChange 异步交错，会把窗口缩小量
+            //    错算进 chrome（稳态 300 → 缩小瞬间 900），根回调随后反推出塌缩画布
+            //    覆盖实测值，实机即「预览图只占预览框很小面积」。现在基准一旦建立，
+            //    chrome 异常变大一律判污染、保持原值；全屏 / 收起左栏由外部置 -1 重建。
+            const chrome: Size2 = chromeSampleOf(this.chromeW, this.chromeH,
+              this.lastRootW, this.lastRootH, w, h,
+              CHROME_SAMPLE_TOL, CHROME_SAMPLE_MAX_RATIO);
+            this.chromeW = chrome.w;
+            this.chromeH = chrome.h;
             // ③ 记录全屏期间的画布基准（取最大值），供 ① 判定「缩小」；纯比对，不触发解码。
             if (this.fullscreen && (w > this.fullCanvasW || h > this.fullCanvasH)) {
               this.fullCanvasW = Math.max(this.fullCanvasW, w);
@@ -8784,11 +8810,18 @@ struct Index {
       if (changed) {
         this.markWindowRect(); // 拖窗口时也记住当前尺寸（防抖），强杀进程不丢
       }
-      // 两个回调谁先到不确定：根先到时直接用当前画布反算一次基准，别等下一次预览回调。
-      if (this.chromeW < 0 && this.canvasW > 0 && this.canvasH > 0 &&
-        rw >= this.canvasW && rh >= this.canvasH) {
-        this.chromeW = rw - this.canvasW;
-        this.chromeH = rh - this.canvasH;
+      // 两个回调谁先到不确定：根先到时也要能建基准，别等下一次预览回调。
+      //  第五十八轮：只在「基准未就绪 且 根尺寸确实变化」时 seed，走 chromeSampleOf
+      //  自洽采样，避免「新根尺寸 − 旧画布」跨帧错配污染基准。
+      //  关键：收起 / 展开左栏时根尺寸不变（changed=false），此时绝不 seed —— 否则会用
+      //  旧画布把小 chrome 写成基准，随后预览回调里「展开 → chrome 变大」被误判为污染。
+      //  基准已就绪时根回调也绝不改写 chrome —— 固定栏的维护权只归预览回调。
+      if (changed && (this.chromeW < 0 || this.chromeH < 0)) {
+        const chromeSeed: Size2 = chromeSampleOf(this.chromeW, this.chromeH,
+          rw, rh, this.canvasW, this.canvasH,
+          CHROME_SAMPLE_TOL, CHROME_SAMPLE_MAX_RATIO);
+        this.chromeW = chromeSeed.w;
+        this.chromeH = chromeSeed.h;
       }
       if (!changed || this.chromeW < 0 || this.chromeH < 0) {
         return; // 基准未就绪（首帧 / 刚进出全屏），等预览 Stack 那边重建
@@ -8796,6 +8829,14 @@ struct Index {
       const box: Size2 = canvasFromRootOf(rw, rh, this.chromeW, this.chromeH);
       if (box.w <= 0 || box.h <= 0 || (box.w === this.canvasW && box.h === this.canvasH)) {
         return; // 预览 Stack 已经报过同样的尺寸，别重复触发重解
+      }
+      // 第五十八轮：反推值只是 R5 兜底，绝不能把塌缩 / 越界值覆盖到画布上。
+      //  缩小视窗时若 chrome 仍被跨帧污染，反推 box 会远小于真实预览框；这里保守拒绝，
+      //  保留当前可信画布（通常是预览回调刚写的实测值），保证图片始终按预览框合理适配。
+      if (!canvasResizeAcceptOf(rw, rh, box.w, box.h, CANVAS_MIN_ROOT_RATIO)) {
+        hilog.info(DOMAIN, TAG, 'canvas resize: reject shrunk box %{public}d×%{public}d vs root %{public}d×%{public}d',
+          box.w, box.h, rw, rh);
+        return;
       }
       this.canvasW = box.w;
       this.canvasH = box.h;

@@ -107,7 +107,8 @@ import { exifTransformOf, exifSizeOf, viewEdgeOf, preloadEdgeOf, displayEdgeOf,
   shouldReloadOnResize, shouldExitFullOnResize, canvasFromRootOf,
   colorSpaceNameOf, isWideGamutOf, viewHintOf, fullscreenStepsOf,
   ORIENT_PORTRAIT, ORIENT_LANDSCAPE, ORIENT_SQUARE,
-  imageOrientationOf, spreadRightWantedOf } from '../entry/src/main/ets/common/ViewPlan.ts';
+  imageOrientationOf, spreadRightWantedOf,
+  chromeSampleOf, canvasResizeAcceptOf } from '../entry/src/main/ets/common/ViewPlan.ts';
 // 第五十六轮：返回 APP 单次刷新决策 / 目录与选中对账的纯函数真值源。
 import { RESUME_REFRESH_SKIP, RESUME_REFRESH_GO, resumeRefreshAction,
   resumeSelectedIndex, resumeDirKept, resumeRefreshHint } from '../entry/src/main/ets/common/ResumeRefresh.ts';
@@ -1336,7 +1337,7 @@ check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
 check('缩放百分比只在诊断层角标显示（R55 起正式版右下角无常显项）；构建标记与 keys=N 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -1772,9 +1773,12 @@ check('⑤ 根因 C：根 Stack 也挂 onAreaChange，用 chrome 偏移反推画
   /private lastRootW: number = 0;/.test(INDEX) &&
   /\.onAreaChange\(\(o: Area, n: Area\)/.test(INDEX) &&
   /this\.canvasW = box\.w;\s*this\.canvasH = box\.h;\s*this\.armResizeReload\(\);/.test(INDEX), true);
-check('⑤ 根因 C：栏偏移基准由两处回调共同维护，进出全屏重置',
-  /this\.chromeW = this\.lastRootW - w;/.test(INDEX) &&
-  /this\.chromeW = rw - this\.canvasW;/.test(INDEX) &&
+check('⑤ 根因 C：栏偏移基准由两处回调共同维护，进出全屏 / 收起展开左栏重置（R58 改走自洽采样）',
+  /const chrome: Size2 = chromeSampleOf\(this\.chromeW, this\.chromeH,/.test(INDEX) &&
+  /const chromeSeed: Size2 = chromeSampleOf\(this\.chromeW, this\.chromeH,/.test(INDEX) &&
+  /if \(changed && \(this\.chromeW < 0 \|\| this\.chromeH < 0\)\) \{/.test(INDEX) &&
+  /this\.chromeW = this\.lastRootW - w;/.test(INDEX) === false &&
+  /this\.chromeW = rw - this\.canvasW;/.test(INDEX) === false &&
   /this\.chromeW = -1;\s*this\.chromeH = -1;/.test(INDEX), true);
 check('⑤ 根因 D：节流而非防抖 + refreshForCanvasResize 也记累积基准',
   /const RESIZE_RELOAD_THROTTLE_MS: number = 140;/.test(INDEX) &&
@@ -3816,7 +3820,7 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
 check('③ 诊断层展开时可见 R38 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3904,7 +3908,7 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
 check('④ R38 构建标记已升级（R33 / R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4005,7 +4009,7 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
 check('⑤ R38 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4084,7 +4088,7 @@ check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
 check('④ R38 构建标记且 R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4139,7 +4143,7 @@ check('② 诊断层切换入口：Ctrl+D + 展开时点全字段角标收起（
 
 console.log('--- 第二十五轮 ③：R38 构建标记 + 既有链路零回归 ---');
 check('③ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4223,8 +4227,8 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
 
 console.log('--- 第二十六轮 ④：R38 构建标记 + 既有链路零回归 ---');
 check('④ ESC_BUILD_TAG=R35，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
   escActionByState(true, false) === ESC_ACT_EXIT_FULL &&
@@ -4339,8 +4343,8 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 check('⑤ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
 console.log('  ⚠️ 编译校验 ≠ 真机验证：本会话无法安装 HAP / 打开 NAS 目录 / 读取 hilog。');
@@ -4463,8 +4467,8 @@ check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
 check('R38 构建标记，R33 及更早旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX) &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX) &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十八轮 ⑥：其它导航 / 历史修复零回归 ---');
@@ -4660,8 +4664,8 @@ check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧�
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
   /this\.pickRootUri = '';/.test(UP_FN), true);
 check('R38 构建标记且 R33 及更早旧包全部可从截图排除',
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX) &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX) &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 console.log('--- 第二十九轮 ⑥：目录结构 / 命名 / 导航行为零回归 ---');
@@ -4861,7 +4865,7 @@ check('R30 零回归：R27 真异步 / R26 翻页 / R25 诊断开关 / 版本守
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX) &&
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机重启验证。');
 console.log('  ⚠️ 真机步骤：装 R38 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
 
@@ -4919,7 +4923,7 @@ console.log('--- 第三十一轮 ②：Index.ets 静态接线（隔离 / 编码 
 check('R31 接线：DirName import 三个新函数',
   /prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache/.test(INDEX), true);
 check('R35 接线：ESC_BUILD_TAG 升 R38 且源码不再有 R34 定义',
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX) &&
   /const ESC_BUILD_TAG: string = 'R35';/.test(INDEX) === false &&
   /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) === false, true);
 check('R31 接线：readLastPos 主 try 只 await readBrowseExtras（增强 key 不再内联）',
@@ -5461,8 +5465,8 @@ check('R35 零回归：版本 1.0.7 / 诊断默认关闭 / 往上层恒亮不禁
   /\.enabled\(/.test(CODE_LINES) === false &&
   /isStrictParentOf\(target, current\)/.test(UP_FN), true);
 check('R38 构建标记升 R38，R34 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX) &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX) &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
 console.log('  ⚠️ 真机步骤：装 R38 包 → 进入深层目录 → 点「往上层」→ 应列出该层全部子目录（含非当前目录的兄弟目录）。');
@@ -5581,8 +5585,8 @@ check('R36 接线：目录态持久化 key + 全量探索夹界常量',
   /const POS_KEY_DIRCTX: string = 'lastDirCtx';/.test(INDEX) &&
   /const UP_EXPLORE_MAX_FORMS: number = 64;/.test(INDEX), true);
 check('R38 构建标记升 R38，R35 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX) &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX) &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('R36 根因护栏 A：markPos 无图片时不再直接 return，仍排一次写盘',
   /private markPos\(\): void \{[\s\S]{0,700}dirContextSaveWanted\(this\.browseBase, this\.items\.length, false\)[\s\S]{0,160}this\.scheduleFlush\(\);/.test(INDEX), true);
@@ -5899,7 +5903,7 @@ check('R37 TextDoc.ts 纯函数导出齐全（59 个 export）',
   (TEXTDOC.match(/^export (const|function|interface)/gm) || []).length, 59);
 check('R38 Index import TextDoc 真值源，且构建标记升 R38',
   INDEX.includes("from '../common/TextDoc';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';"), true);
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';"), true);
 check('R37 新增 ROW_TEXT=4，文本行只进 rows 不进 items',
   /const ROW_TEXT: number = 4;/.test(ARCHIVE) &&
   INDEX.includes('texts.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_TEXT, itemIndex: -1 });') &&
@@ -6020,8 +6024,8 @@ check('R37 零回归：往上层主链 / R36 目录态 / ESC 严格两态 / 诊�
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   INDEX.includes('escActionByState(this.fullscreen, this.pendingSystemEcho);'), true);
 check('R38 构建标记 R38，R37 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
     'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
@@ -6135,10 +6139,10 @@ check('R38 既有往上层主链 / 全量探索 / R36 目录态 / R37 文本态�
   INDEX.includes("if (this.textMode) {"), true);
 check('R38 版本恒定 1.0.7 / 7，构建标记 R38',
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") === false, true);
 check('R38 旧包排除：R37 及更早旧标记全不在源码里',
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28',
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28',
     'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('R38 DirName.ts 新纯函数零 SDK import / 零文件 IO / 零 await / 零 throw 语句',
@@ -6447,7 +6451,7 @@ check('R55 全屏退出提示保留（唯一指引，仅全屏出现，样式带
 check('R55 右下角百分比方块取消：无常显分支，缩放百分比只在诊断层（Ctrl+D）角标里出现',
   /Text\(this\.zoomPercentText\(\)\)/.test(INDEX) === false &&
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R57';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R58';/.test(INDEX), true);
 check('R55 诊断层入口与内容不变：Ctrl+D 切换、退出 APP 按钮、全字段角标、diagLine 赋值链全保留',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_D) {') &&
   /Text\('退出 APP'\)/.test(INDEX) &&
@@ -6478,9 +6482,9 @@ const RESUME56_FN = INDEX.slice(r56Start, r56End > r56Start ? r56End : r56Start 
 const spread56Start = INDEX.indexOf('private refreshSpread(): void {');
 const SPREAD56_FN = INDEX.slice(spread56Start, spread56Start + 1800);
 
-check('R57 构建标记 R57，R56 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
-  ['R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
+check('R58 构建标记 R58，R57 及更早旧包可从截图一眼排除',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
+  ['R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
 // —— 需求一：返回 APP 时左侧目录清单单次、非侵入刷新 ——
@@ -6583,7 +6587,7 @@ check('R56 既有翻页 / 右页重试 / 文本预览 / 往上层 / 版本守卫
   /if \(this\.textMode\) \{/.test(INDEX) &&
   /private async browseUp\(\): Promise<void> \{/.test(INDEX) &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';"), true);
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';"), true);
 
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
 console.log('  ⚠️ 真机步骤 R56-A：打开任意含图目录 → 切到别的应用 / 锁屏再返回 → 左栏应只刷一次、');
@@ -6602,9 +6606,9 @@ const boot57End = INDEX.indexOf('  aboutToDisappear(): void {');
 const BOOT57_FN = INDEX.slice(boot57Start, boot57End > boot57Start ? boot57End : boot57Start + 7000);
 const RESUME56_DECISION_FN = INDEX.slice(r56Start, boot57Start);
 
-check('R57 构建标记 R57，旧包排除数组首位补 R56（R56 旧包截图可一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") &&
-  /\['R56', 'R55', 'R54'/.test(TEST_SELF) === true, true);
+check('R58 构建标记 R58，旧包排除数组首位补 R57（R57 旧包截图可一眼排除）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
+  /\['R57', 'R56', 'R55', 'R54'/.test(TEST_SELF) === true, true);
 
 // —— 冷启动补刷的独立纯函数决策（R56 决策零回归） ——
 check('R57 bootRefreshAction 七条件全满足才 GO',
@@ -6684,6 +6688,111 @@ console.log('     期间新增 / 删除 / 改名 / 建子目录都能反映；Ct
 console.log('  ⚠️ 真机步骤 R57-B：重启后原选中档案仍在则保留选中；已被删则清除失效选中且不自动改选别张。');
 console.log('  ⚠️ 真机步骤 R57-C：重启落在空目录 / 无图片目录也要恢复并同步；切后台再返回仍只刷一次，');
 console.log('     正在翻页 / 幻灯片 / 选文件夹时不打断；只读名单态（授权失效）不强行刷、等后台自愈。');
+
+// ==================== 第五十八轮：视窗缩放时右侧预览图不再被过度缩小（R58） ====================
+console.log('--- 第五十八轮：resize 画布尺寸护栏（chrome 自洽采样 + 反推塌缩拒绝） ---');
+const VIEWPLAN58_SRC = readFileSync(new URL('../entry/src/main/ets/common/ViewPlan.ts', import.meta.url), 'utf8');
+const vp58Start = VIEWPLAN58_SRC.indexOf('// ==================== 第五十八轮');
+const VP58 = VIEWPLAN58_SRC.slice(vp58Start);
+const s2 = (o) => o.w + '×' + o.h;
+
+// —— 纯函数真值源：固定栏偏移 chrome 的自洽采样 ——
+check('R58 chromeSampleOf 首帧自洽采样建立 300×80 基准',
+  s2(chromeSampleOf(-1, -1, 1600, 900, 1300, 820, 2, 0.6)) === '300×80', true);
+check('R58 chromeSampleOf 稳态一致采样不漂移',
+  s2(chromeSampleOf(300, 80, 1600, 900, 1300, 820, 2, 0.6)) === '300×80', true);
+check('R58 chromeSampleOf 缩小视窗跨帧污染被挡（旧根 1600 − 新画布 700 = 900 判污染）',
+  s2(chromeSampleOf(300, 80, 1600, 900, 700, 520, 2, 0.6)) === '300×80', true);
+check('R58 chromeSampleOf 放大视窗时「画布大于根」同样判跨帧错配，保持原基准',
+  s2(chromeSampleOf(300, 80, 1000, 600, 1300, 820, 2, 0.6)) === '300×80', true);
+check('R58 chromeSampleOf 非正值 / chrome 吃掉大半个屏一律拒绝采样',
+  s2(chromeSampleOf(300, 80, 0, 600, 700, 520, 2, 0.6)) === '300×80' &&
+  s2(chromeSampleOf(300, 80, 1000, 600, 700, -1, 2, 0.6)) === '300×80' &&
+  s2(chromeSampleOf(-1, -1, 1000, 600, 300, 200, 2, 0.6)) === '-1×-1', true);
+check('R58 chromeSampleOf 固定栏合法变小（收起左栏）被采信，可变大只挡异常污染',
+  s2(chromeSampleOf(300, 80, 1600, 900, 1500, 820, 2, 0.6)) === '100×80' &&
+  s2(chromeSampleOf(300, 80, 1600, 900, 1299, 820, 2, 0.6)) === '301×80' &&
+  s2(chromeSampleOf(300, 80, 1600, 900, 1300, 700, 2, 0.6)) === '300×80', true);
+
+// —— 纯函数真值源：根回调反推画布覆盖前的塌缩护栏 ——
+check('R58 canvasResizeAcceptOf 正常反推画布 700×520 / 1000×600 放行',
+  canvasResizeAcceptOf(1000, 600, 700, 520, 0.4) === true, true);
+check('R58 canvasResizeAcceptOf 旧链路塌缩值 100×220 拒绝覆盖',
+  canvasResizeAcceptOf(1000, 600, 100, 220, 0.4) === false, true);
+check('R58 canvasResizeAcceptOf 越界 / 非正值一律拒绝',
+  canvasResizeAcceptOf(1000, 600, 1200, 520, 0.4) === false &&
+  canvasResizeAcceptOf(1000, 600, 0, 520, 0.4) === false &&
+  canvasResizeAcceptOf(0, 600, 700, 520, 0.4) === false, true);
+check('R58 canvasResizeAcceptOf minRatio 下界边界与非法参数回退 0.4',
+  canvasResizeAcceptOf(1000, 600, 400, 240, 0.4) === true &&
+  canvasResizeAcceptOf(1000, 600, 399, 240, 0.4) === false &&
+  canvasResizeAcceptOf(1000, 600, 500, 300, 0.8) === false &&
+  canvasResizeAcceptOf(1000, 600, 500, 300, 0) === true, true);
+
+// —— 数值复现：把「缩小视窗 → 图片只占 6% 面积」的旧链路与修复后链路逐值钉死 ——
+const polluted58 = canvasFromRootOf(1000, 600, 900, 380);
+const clean58 = canvasFromRootOf(1000, 600, 300, 80);
+const oldArea58 = (polluted58.w / clean58.w) * (polluted58.h / clean58.h);
+check('R58 数值复现：旧写法 chrome 被污染成 900×380，画布塌缩 100×220，图片框仅占 6% 面积',
+  polluted58.w === 100 && polluted58.h === 220 &&
+  clean58.w === 700 && clean58.h === 520 &&
+  oldArea58 > 0.05 && oldArea58 < 0.07, true);
+const guardedChrome58 = chromeSampleOf(300, 80, 1600, 900, 700, 520, 2, 0.6);
+const fixed58 = canvasFromRootOf(1000, 600, guardedChrome58.w, guardedChrome58.h);
+check('R58 数值复现：护栏后 chrome 保持 300×80，反推画布 = 实测 700×520（100% 适配预览框）',
+  s2(guardedChrome58) === '300×80' && fixed58.w === 700 && fixed58.h === 520 &&
+  canvasResizeAcceptOf(1000, 600, fixed58.w, fixed58.h, 0.4) === true, true);
+
+// —— Index.ets 接线：两处回调都改走护栏，旧污染写法彻底消失 ——
+check('R58 预览回调改走 chromeSampleOf，旧「lastRoot − 画布」污染写法已移除',
+  /const chrome: Size2 = chromeSampleOf\(this\.chromeW, this\.chromeH,/.test(INDEX) &&
+  /this\.chromeW = chrome\.w;\s*this\.chromeH = chrome\.h;/.test(INDEX) &&
+  INDEX.includes('this.chromeW = this.lastRootW - w;') === false, true);
+check('R58 根回调 seed 只在 changed 且基准未就绪时执行，不再用 rw − canvasW',
+  /if \(changed && \(this\.chromeW < 0 \|\| this\.chromeH < 0\)\) \{/.test(INDEX) &&
+  /const chromeSeed: Size2 = chromeSampleOf\(/.test(INDEX) &&
+  INDEX.includes('this.chromeW = rw - this.canvasW;') === false, true);
+check('R58 根回调反推画布覆盖前加塌缩护栏，canvasFromRootOf 兜底链仍在',
+  /if \(!canvasResizeAcceptOf\(rw, rh, box\.w, box\.h, CANVAS_MIN_ROOT_RATIO\)\) \{/.test(INDEX) &&
+  /const box: Size2 = canvasFromRootOf\(rw, rh, this\.chromeW, this\.chromeH\);/.test(INDEX) &&
+  /this\.canvasW = box\.w;\s*this\.canvasH = box\.h;\s*this\.armResizeReload\(\);/.test(INDEX), true);
+check('R58 三个护栏常量与 ViewPlan import 接线齐备',
+  /const CHROME_SAMPLE_TOL: number = 2;/.test(INDEX) &&
+  /const CHROME_SAMPLE_MAX_RATIO: number = 0\.6;/.test(INDEX) &&
+  /const CANVAS_MIN_ROOT_RATIO: number = 0\.4;/.test(INDEX) &&
+  /chromeSampleOf, canvasResizeAcceptOf \} from '\.\.\/common\/ViewPlan';/.test(INDEX), true);
+check('R58 左栏收起 / 展开三处 + setFull 共四处重置 chrome 基准（结构变化合法重建）',
+  (INDEX.match(/this\.chromeW = -1;\s*this\.chromeH = -1;/g) || []).length === 4, true);
+check('R58 ViewPlan 新增两纯函数零 SDK / 零 IO / 零 await / 零 throw',
+  vp58Start > 0 &&
+  /export function chromeSampleOf\(prevW: number, prevH: number,/.test(VP58) &&
+  /export function canvasResizeAcceptOf\(rootW: number, rootH: number,/.test(VP58) &&
+  /^\s*import\s/m.test(VP58) === false &&
+  /@ohos\.|\bfs\./.test(VP58) === false &&
+  /\bawait\s|\bthrow\s+/.test(VP58) === false, true);
+check('R58 构建标记 R58 且 R57 / R56 旧标记定义全清除（截图一眼排除旧包）',
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R57';") === false &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R56';") === false &&
+  /\['R57', 'R56', 'R55', 'R54'/.test(TEST_SELF) === true, true);
+check('R58 其它界面布局零回归：Contain / 并排策略 / 放大镜 / 文本预览 / 目录恢复 / 版本守卫全未动',
+  /\.objectFit\(ImageFit\.Contain\)/.test(INDEX) &&
+  /\.width\(this\.viewBoxW\(half\)\)/.test(INDEX) &&
+  /\.height\(this\.frameH\(\)\)/.test(INDEX) &&
+  /spreadRightWantedOf\(sz\.w, sz\.h, hasNext, SPREAD_PORTRAIT\)/.test(INDEX) &&
+  /if \(this\.textMode\) \{/.test(INDEX) &&
+  /private async browseUp\(\): Promise<void> \{/.test(INDEX) &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  /"versionCode":\s*7/.test(APP_JSON) &&
+  /"versionName":\s*"1\.0\.7"/.test(APP_JSON), true);
+
+console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
+console.log('  ⚠️ 真机步骤 R58-A：正常视窗打开图片 → 把窗口拖小到约一半 → 右侧（并排右页）预览图应始终');
+console.log('     按预览框合理适配、占据大部分面积，不得缩成预览框角落里的一小块；Ctrl+D 角标必须是 R58。');
+console.log('  ⚠️ 真机步骤 R58-B：缓慢来回拖动窗口边框连续改变尺寸 → 过程中图片不应突然塌缩；');
+console.log('     松手后稳定态与同尺寸直接打开的显示比例一致（无残留脏基准）。');
+console.log('  ⚠️ 真机步骤 R58-C：放大视窗 / 进出全屏 / Ctrl+B 或 » 收起再展开左栏后，');
+console.log('     预览图仍按预览框适配；单页 / 并排、放大镜、文本预览、目录恢复均不受影响。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

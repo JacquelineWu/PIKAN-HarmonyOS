@@ -274,3 +274,76 @@ export function fullscreenStepsOf(on: boolean): Array<string> {
       'layout-fullscreen-off', 'immersive-mode-off', 'recover',
       'exit-immersive', 'decor-on', 'title-dock-hover-on'];
 }
+
+// ==================== 第五十八轮：resize 画布尺寸护栏 ====================
+
+/**
+ * 第五十八轮：resize 期间「固定栏偏移 chrome」的自洽采样（零 IO，可 Node 单测）。
+ *
+ * 根因（数值可复现）：`chrome = 根尺寸 − 预览画布尺寸`，是左栏 + 顶栏等固定占用，
+ * 正常 resize 时是**常量**。但根 Stack 与深层预览 Stack 的两个 onAreaChange 异步交错，
+ * 若用「上一帧的根尺寸 lastRootW」减「本帧的画布 w」就会把「窗口缩小量」错算进 chrome：
+ *   稳态 根1600×900 / 画布1300×820 / chrome300×80；
+ *   缩到 根1000×600 时，预览回调先到（w=700）而 lastRoot 还是旧1600 → chrome=900×380；
+ *   根回调再用脏 chrome 反推 1000−900=100，覆盖实测 700 → objectFit(Contain) 的图片框
+ *   塌缩到真实预览框的 6% 面积，实机即「缩小视窗 / 尺寸变化中预览图被过度缩小，
+ *   只占预览框很小面积比例」。
+ *
+ * 契约：
+ *  · 自洽性：root / canvas 必须为正、canvas 不得超过 root、chrome=root−canvas 必须落在
+ *    [0, root*maxRatio] 内（像固定栏，不会吃掉大半个屏）；不自洽 → 判跨帧错配，保持 prev。
+ *  · 基准未就绪（prev<0）：自洽即采信，建立基准。
+ *  · 基准已就绪（prev>=0）：chrome **异常变大**（> prev+tol）判为污染，保持原基准；
+ *    一致 / 合法变小 / 向更合理值收敛则采信。固定栏不随窗口大小变大，只在全屏切换 /
+ *    收起或展开左栏时变化 —— 这些布局结构变化由调用方先把 chrome 置 -1 来合法重建。
+ *
+ * 返回 Size2：本次应写入的固定栏偏移（w=宽偏移，h=高偏移）。
+ */
+export function chromeSampleOf(prevW: number, prevH: number,
+  rootW: number, rootH: number, canvasW: number, canvasH: number,
+  tol: number, maxRatio: number): Size2 {
+  // 数据不全 / 画布比根还大（跨帧错配的典型表现）→ 绝不改写基准
+  if (rootW <= 0 || rootH <= 0 || canvasW <= 0 || canvasH <= 0 ||
+      canvasW > rootW || canvasH > rootH) {
+    return { w: prevW, h: prevH };
+  }
+  const cw: number = rootW - canvasW;
+  const ch: number = rootH - canvasH;
+  const ratio: number = (maxRatio > 0 && maxRatio <= 1) ? maxRatio : 0.6;
+  if (cw < 0 || ch < 0 || cw > rootW * ratio || ch > rootH * ratio) {
+    return { w: prevW, h: prevH };
+  }
+  // 基准未就绪：自洽即建立
+  if (prevW < 0 || prevH < 0) {
+    return { w: cw, h: ch };
+  }
+  // 基准已就绪：只挡「异常变大」的污染值，允许一致 / 变小 / 收敛
+  const t: number = tol > 0 ? tol : 2;
+  if (cw > prevW + t || ch > prevH + t) {
+    return { w: prevW, h: prevH };
+  }
+  return { w: cw, h: ch };
+}
+
+/**
+ * 第五十八轮：根回调「反推画布」覆盖 canvasW/canvasH 之前的塌缩护栏。
+ *
+ * 反推值 box 只是 R5「深层预览 Stack 收不到 onAreaChange」时的兜底，绝不能把一个
+ * 远小于真实预览框的值覆盖上去。真实画布 = 根尺寸 − 固定栏，通常占根尺寸 70%~100%
+ * （全屏时 100%）。若 box 塌缩到 root 的 minRatio 以下，或超过 root（画布是根的子区域，
+ * 不可能更大），一律判为脏 chrome 反推出的塌缩 / 越界值，**拒绝覆盖**，保留当前可信
+ * 画布（通常是预览回调刚写的实测值）。保守拒绝而非猜测改写，所以永不写错值。
+ *
+ * 返回 true = 允许覆盖；false = 保留当前 canvasW/canvasH。
+ */
+export function canvasResizeAcceptOf(rootW: number, rootH: number,
+  boxW: number, boxH: number, minRatio: number): boolean {
+  if (rootW <= 0 || rootH <= 0 || boxW <= 0 || boxH <= 0) {
+    return false;
+  }
+  if (boxW > rootW || boxH > rootH) {
+    return false; // 画布不可能比根容器还大
+  }
+  const r: number = (minRatio > 0 && minRatio < 1) ? minRatio : 0.4;
+  return boxW >= rootW * r && boxH >= rootH * r;
+}
