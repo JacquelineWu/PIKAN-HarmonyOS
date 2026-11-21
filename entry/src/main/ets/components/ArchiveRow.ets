@@ -11,6 +11,8 @@
 import image from '@ohos.multimedia.image';
 import hilog from '@ohos.hilog';
 import { textWidthVp } from '../common/DirName';
+// 第五十九轮：往上层后「返回前所在子目录」反色显示，常态逐字返回原配色。
+import { upReturnBgOf, upReturnFgOf } from '../common/UpReturn';
 import { HoverGuard } from '../common/HoverGuard';
 import { decodePx, PreviewEntry, TAG, DOMAIN } from '../model/Preview';
 
@@ -218,6 +220,9 @@ export struct ArchiveRow {
   @Prop kind: number = 0;       // 0=图片 1=上级 2=目录 3=不支持预览
   @Prop idx: number = 0;
   @Prop selected: boolean = false;
+  /** 第五十九轮：往上层后「返回前所在子目录」的反色标记。与 selected 完全独立：
+   *  不参与 cur / select() / onRowTap / 目录切换，只由 SidebarView 按名字 + 行种类算出。 */
+  @Prop inverted: boolean = false;
   @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
   /** 只读名单态：快照 uri 的授权已失效，悬停时**绝不**发起 384px 缩略图解码
    *  （ThumbLoader 走 decodePx → await fs.open；虽已异步，死 uri 仍会白等一次
@@ -250,6 +255,9 @@ export struct ArchiveRow {
   /** Win64 bac9ff9：图片粉、目录粉蓝、不支持预览的文件灰；上级行用中性色 */
   /** 行首类型标记的颜色（不是缩略图，只是 18vp 的小符号）。 */
   private iconColor(): string {
+    if (this.inverted) {
+      return upReturnFgOf(true, '#8fb8e8');
+    }
     if (this.kind === ROW_OTHER) {
       return '#4b5260';
     }
@@ -264,6 +272,9 @@ export struct ArchiveRow {
   }
 
   private labelColor(): string {
+    if (this.inverted) {
+      return upReturnFgOf(true, '#8fb8e8');
+    }
     if (this.selected) {
       return '#e8ecf4';
     }
@@ -281,6 +292,9 @@ export struct ArchiveRow {
 
   /** 「梅花间竹」交替底色：选中态优先，其余按 idx 奇偶两色成格（2026-11-11）。 */
   private rowBgColor(): string {
+    if (this.inverted) {
+      return upReturnBgOf(true, ROW_STRIPE_EVEN);
+    }
     if (this.selected) {
       return ROW_SELECTED_BG;
     }
@@ -375,17 +389,10 @@ export struct ArchiveRow {
 
   build() {
     Row() {
-      // 左栏不再常驻缩略图：统一只给一个 18vp 的类型标记，档案名多出 38vp。
-      // 缩略图只在 mouse over 整行时由 bindPopup 浮出（见 hoverThumb）。
-      // 第七轮：移除档案行最左侧的「圆点」标记（图片行 / 灰行留空），
-      // 上层 / 目录行仍保留 ↑ / ▣ 导航符号，行内各列对齐不变。
-      Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : ''))
-        .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
-        .fontColor(this.iconColor())
-        .width(18)
-        .height(26)   // 11-10 起压缩行高：42 → 26，配合下方 padding 把每行从 54vp 收到 30vp
-        .textAlign(TextAlign.Center)
-
+      // 第五十九轮：名称文字统一紧贴列表最左边缘 —— 行首 18vp 图标列改置于名称之后，
+      // List / Row / Text 三层的 left padding 一律清零，所有档案与目录名都从 x=0 起。
+      // ↑ / ▣ 导航符号本身保留（.width(18) / .height(26) 不变），只是不再占名称左侧；
+      // 悬停缩略图仍只在 mouse over 整行时由 bindPopup 浮出（见 hoverThumb）。
       Text(this.name)
         .fontSize(12)
         .fontColor(this.labelColor())
@@ -394,21 +401,27 @@ export struct ArchiveRow {
         // 左栏已按最长档案名自适应（listWidthForNames），这里再兜一层：
         // layoutWeight 分配宽度时至少给到名字内容宽，长名字不会被压出省略号；
         // 极少数超过 LIST_MAX_W 的超长名才由 Ellipsis 截断。
-        .constraintSize({ minWidth: textWidthVp(this.name, 12) + 8 })
+        .constraintSize({ minWidth: textWidthVp(this.name, 12) })
         .layoutWeight(1)
-        .padding({ left: 8 })
+
+      Text(this.kind === ROW_UP ? '↑' : (this.kind === ROW_FOLDER ? '▣' : ''))
+        .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
+        .fontColor(this.iconColor())
+        .width(18)
+        .height(26)   // 11-10 起压缩行高：42 → 26，配合下方 padding 把每行从 54vp 收到 30vp
+        .textAlign(TextAlign.Center)
 
       // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
       if (!this.collapsed) {
         Text(fmtBytes(this.bytes))
           .fontSize(10)
-          .fontColor('#7f88a8')
+          .fontColor(upReturnFgOf(this.inverted, '#7f88a8'))
           .width(66)
           .textAlign(TextAlign.End)
           .maxLines(1)
         Text(this.mtime > 0 ? fmtDate(this.mtime) : '--')
           .fontSize(10)
-          .fontColor('#6b7385')
+          .fontColor(upReturnFgOf(this.inverted, '#6b7385'))
           .width(88)
           .textAlign(TextAlign.End)
           .maxLines(1)
@@ -418,7 +431,7 @@ export struct ArchiveRow {
     .width('100%')
     // 11-11 起继续压缩：上下 padding 2 → 1，配合 List space=1 把两行缝压到约 1mm。
     // 行背景改为「梅花间竹」交替色格子（奇偶两色），选中行仍是高亮色。
-    .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+    .padding({ right: 6, top: 1, bottom: 1 })
     .borderRadius(3)
     .backgroundColor(this.rowBgColor())
     // hover 绑在整行而不是档案名 Text 上：鼠标划过图标 / 字节 / 日期列也能出图，

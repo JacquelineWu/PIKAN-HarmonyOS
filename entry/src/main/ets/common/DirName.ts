@@ -253,8 +253,12 @@ export function textWidthVp(text: string, fontSize: number): number {
  *  名字长 → 放宽到能完整显示（不再出现省略号）；超过 maxWidth 才截断，
  *  避免个别超长名字把右侧预览区压没。
  *
- *  固定开销（vp）= 行首图标 18 + 名字左 padding 8 + 体积列 66 + 日期列 88
- *    + 日期列 margin 6 + 行 padding 12 + 列表 padding 16 + 度量余量 12 = 226。 */
+ *  固定开销（vp）= 名称后图标 18 + 体积列 66 + 日期列 88 + 日期列 margin 6
+ *    + 行右 padding 6 + 列表右 padding 8 + 度量余量 12 = 204。
+ *    第五十九轮把名称 / 行 / 列表三层的**左侧** padding 与缩进全部清零，
+ *    文字紧贴列表最左边缘（见 ArchiveRow / SidebarView）；这里仍按 226 估算，
+ *    刻意保留 22vp 余量、不收窄列宽 —— 免得长名字刚好顶到宽度边界被 Ellipsis
+ *    截断，属于纯保守余量，不参与任何目录 / 选中逻辑。 */
 export function listWidthForNames(names: string[], minWidth: number, maxWidth: number): number {
   let maxText: number = 0;
   for (let i = 0; i < names.length; i++) {

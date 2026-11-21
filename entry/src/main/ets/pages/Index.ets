@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R58 主线（R39 起组件化）· 视窗缩放护栏
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R59 主线（R39 起组件化）· 往上层反色 + 名称贴左
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -74,6 +74,10 @@ import { upFullExploreWanted, upExploreFormsOf, upExploreCapOf,
   upExploreNeedFallback } from '../common/DirName';
 // 第三十八轮：用户主目录（用户卷根）重新可选择 / 可真实列举。
 import { rootReenterWantedOf, rootReenterFormsOf } from '../common/DirName';
+// 第五十九轮：往上层后「返回前所在子目录」反色标记的真值源。
+// 纯视觉标记，与 cur / select() / 目录链完全隔离；只在 browseUp 落地时设置。
+import { UPRET_NONE, upReturnMarkOf, upReturnRefreshOf,
+  upReturnClearOf } from '../common/UpReturn';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
   shouldResetPreloadChain, fullCacheTargetOf,
@@ -160,7 +164,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R58';
+const ESC_BUILD_TAG: string = 'R59';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1063,6 +1067,11 @@ struct Index {
   @State dirHint: string = '';
   @State source: string = '尚未打开';
   @State cur: number = -1;          // 当前选中索引；-1 表示空
+  /** 第五十九轮：往上层落地后「返回前所在子目录名」的反色标记（空串 = 无反色）。
+   *  ⚠️ 与 cur / selected / dataSource 的常规选中链完全隔离：不参与点选、目录切换、
+   *  翻页、预载；只由 browseUp() 成功落地时设置，由 applyItems / showUpListInApp 收口，
+   *  再经 SidebarView → ArchiveRow 按「名字严格相等 + 目录类行」逐行判定反色。 */
+  @State upReturnName: string = UPRET_NONE;
   /** 当前浏览目录的完整路径（Win64 07c1eee：搬到标题栏）。鸿蒙没有 setWindowTitle，
    *  就放在顶栏 PIKAN 右边，显示时中间省略保住末尾目录名。 */
   @State titlePath: string = '';
@@ -2553,6 +2562,8 @@ struct Index {
     this.source = label;
     this.itemCount = 0;
     this.rowCount = rows.length;
+    // 第五十九轮：冷启动恢复是全新会话，绝不带入任何「往上层」反色标记。
+    this.upReturnName = upReturnClearOf(this.upReturnName, false);
     const rowNames: string[] = [];
     for (let r = 0; r < rows.length; r++) {
       rowNames.push(rows[r].name);
@@ -3617,6 +3628,10 @@ struct Index {
     // 不滚动列表、不清预览缓存、不重解大图。否则 hover 解码让目录 mtime 抖动后，
     // 一次自动重扫就会把用户视图整个拉回「上次档案 / 目录」。
     const keepView: boolean = preserveView === true;
+    // 第五十九轮：换源 / 进子目录 / 恢复（keepView=false）必须清掉「往上层」反色标记，
+    // 否则上一层的名字会错误地染到新清单里同名的行；自动重扫 / 保位刷新（keepView=true）
+    // 保留标记，避免 1.5s 轮询把刚显示出来的反色抹掉。browseUp 落地后会在本函数之外重设。
+    this.upReturnName = upReturnClearOf(this.upReturnName, keepView);
     // ⚠️ 必须**先**落地恢复模式：下面 showPreviewOf / fillSizes / schedulePreload /
     //    refreshSpread 全都要读它。只读名单态时它们会被闸门挡住，主线程保持空闲。
     this.applyPendingRestore(list.length, src);
@@ -4319,6 +4334,10 @@ struct Index {
       return;
     }
     if (kind === ROW_FOLDER) {
+      // 第五十九轮：进入子目录是「换层」，反色标记必须作废。显式清一次，
+      // 覆盖 openFolder 命中整表缓存 → applyItems(keepView=true) 会保留标记的分支；
+      // 常规选中 / 目录切换逻辑本身一行未动。
+      this.upReturnName = upReturnClearOf(this.upReturnName, false);
       // APP 内清单态：第三参 false 禁掉「目录内多选」兜底选择器 ——
       // 用户点清单里的目录名只应在 APP 内继续列目录，绝不弹任何系统 dialog。
       this.openFolder(r.uri, true, !this.inAppUpList);
@@ -6823,6 +6842,10 @@ struct Index {
    *    · 成功后 openFolder → applyItems 统一刷新当前路径 / 目录展示 / 按钮状态，
    *      并清掉 pickRootUri 这个与层级无关的旧锚点，三者不可能各说各话。 */
   private async browseUp(): Promise<void> {
+    // 第五十九轮：一次「往上层」开始 —— 先清掉上一次的反色标记，保证失败 / 早退 /
+    // 只读名单态 / 层级校验不过时绝不残留陈旧高亮；每个真正落地分支再按本次
+    // 「返回前所在子目录名」重设。整体替换而非追加，连续返回不会叠加。
+    this.upReturnName = upReturnClearOf(this.upReturnName, false);
     // 第三十七轮：往上层是目录导航，先把文本预览态收掉，别让右栏挂着旧文件。
     if (this.textMode) {
       this.closeTextMode();
@@ -6841,6 +6864,10 @@ struct Index {
     }
     // 唯一的当前路径：目录浏览态就是实测能列的真实路径；非目录浏览态为空。
     const current: string = this.browseBase;
+    // 第五十九轮：记下「返回前所在子目录」的显示名。与左栏 rows 里的 name 同源
+    // （都是 baseName），因此落地后能按名字严格相等命中那一行；空 / '..' / 兜底名
+    // 由 upReturnMarkOf 统一过滤，绝不产生误命中。
+    const fromName: string = current.length > 0 ? baseName(current) : '';
     // 第三十四轮：缓存父子索引**只作优先候选佐证**，绝不再做 browseUp 的闸门。
     // R33 曾把它提升为唯一真值源：upParentBuilt 一旦置 true（恢复链 / 任一次
     // openFolder 成功后都会置，且全文没有复位路径）就恒真，闸门内 TOP / MISS /
@@ -6915,6 +6942,12 @@ struct Index {
         const reenterOk: boolean = await this.openFolder(current, false, false, false,
           reenterForms, true);
         if (reenterOk) {
+          // 第五十九轮：卷根原地重列举**不是**「从子目录上移一层」，canUp=false
+          // 让 upReturnMarkOf 返回空标记；显式刷新一次，保证旧反色不残留、其余行
+          // 默认样式不变。R28 越级护栏与 R38 重列举行为逐字不改。
+          this.upReturnName = upReturnRefreshOf(this.upReturnName,
+            upReturnMarkOf(fromName, true, false));
+          this.dataSource.reload(this.rows);
           this.status = '已进入「' + baseName(this.browseBase) + '」· 真实列举 ' +
             this.lastUpExploreNames + ' 项 · 点目录名进入';
           this.diagLine = 'up ROOT OK | ' + UP_NAV_TAG + ' | L' +
@@ -6995,6 +7028,13 @@ struct Index {
     const ok: boolean = await this.openFolder(landUri, false, false, false,
       allForms, wantFull);
     if (ok) {
+      // 第五十九轮：真正落到父层后才把「返回前所在子目录名」交给左栏反色。
+      // applyItems 已在 openFolder 内 reload 过一次（那时标记仍为空），这里按本次
+      // 落地结果整体替换标记并再 reload 一遍，保证 LazyForEach 的可见行都用新标记
+      // 重建 —— 不依赖 @Prop 对虚拟化节点的刷新时机，确定性更强。
+      this.upReturnName = upReturnRefreshOf(this.upReturnName,
+        upReturnMarkOf(fromName, true, canUp));
+      this.dataSource.reload(this.rows);
       // 旧「最初选择」锚点作废：它指向好几层之前，留着会让下一次往上层越级。
       this.pickRootUri = '';
       // 第三十四轮：缓存父子关系在此只作**落地一致性诊断**，不再是闸门。
@@ -7093,6 +7133,13 @@ struct Index {
       rowNames.push(rows[i].name);
     }
     this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
+    // 第五十九轮：APP 内上层清单同样是「往上层」落地 —— 把返回前所在子目录名
+    // （curName）交给左栏反色。**必须在 dataSource.reload 之前**设好，让本次
+    // LazyForEach 建出来的可见行就带上新标记；清单里该行名字与 curName 严格相等、
+    // 种类优先取快照真实种类（带点目录名可能是 ROW_OTHER，upReturnInvertOf 同样认），
+    // 其余行（'..' / 伪说明 / 兄弟目录）逐字保持默认样式。
+    this.upReturnName = upReturnRefreshOf(this.upReturnName,
+      upReturnMarkOf(curName, true, true));
     this.dataSource.reload(this.rows);
     this.browseBase = target;
     this.browseDir = parents.length > 0 ? parents[0] : target;
@@ -8308,6 +8355,8 @@ struct Index {
             rowCount: this.rowCount,
             resumeHint: this.resumeHint,
             cur: this.cur,
+            // 第五十九轮：往上层落地后的反色标记（空串 = 无反色），与 cur 并列下传。
+            upReturnName: this.upReturnName,
             listCollapsed: this.listCollapsed,
             listW: this.listW,
             scroller: this.scroller,

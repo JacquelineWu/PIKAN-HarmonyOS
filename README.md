@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R58`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R59`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -548,16 +548,15 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > 「R39–R55 实现说明（依据测试断言名与源码）」章节，该章以测试断言名与
 > `Index.ets` / `components/` / `model/` 源码为准，与本章的真机步骤一一对应。
 > **R56（返回 APP 自动同步目录 / 并排只看左图比例）、R57（重启 APP 后左侧列表补刷）、
-> R58（视窗缩放护栏：右侧预览图不再被过度缩小）见下方三个独立章节**，
-> 其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R58（视窗缩放护栏：右侧预览图不再被过度缩小）、R59（往上层后子目录反色 / 左栏名称紧贴最左边缘）
+> 见下方四个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R58`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R58` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R59`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R59` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3849`；R58 新增 1 行 import 并改写 1 组 R5 断言（+3 行），
-  行号由 3845 顺延 4 行）
+  （`tests/dirname.test.mjs:3854`；R59 新增 1 行 import + 一批 R59 断言，行号由 3849 顺延 5 行）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -1047,6 +1046,103 @@ PC 拖窗口时两个 `onAreaChange` 异步交错，缩小视窗瞬间预览回�
 
 **边界**：未跑 `build.sh`、未升版本、未把 HAP 放桌面；本轮**未推送**任何远端。
 R57 遗留的 GitHub 同步仍需使用者重新提供 PAT（此前 PAT 为进程级临时注入、不落盘）。
+
+---
+
+## 第五十九轮：往上层后返回前子目录反色 + 左栏名称紧贴最左边缘（2026-11-21，R59）
+
+> 使用者要求：**「① 执行『回上层』后，在左侧列表中将返回前所在的子目录名称以反色状态显示；
+> 每次返回均需正确更新该状态，且不改变其他列表项的默认样式。② 移除左侧列表中所有档案与
+> 目录名称文字的左侧留白（含内边距及缩进），使文字统一紧贴列表最左边缘对齐；
+> 上述调整不得影响原有的目录切换与常规选中逻辑」**。本章只新增一条**纯视觉标记链** +
+> 调整三层左缘留白，`cur` / `select()` / `dataSource.reload()` / 目录切换主链一行未动。
+
+### 一、两条需求分别落在哪条链
+
+- **反色标记是纯视觉态，不能混进常规选中态**。左栏由 `SidebarView` 的 `LazyForEach`
+  渲染 `ArchiveRow`，常规选中由 `@Prop cur` 决定
+  （`selected: (item.itemIndex ?? idx) === this.cur`）。若把「往上层后高亮」也塞进
+  `cur`，会连带改掉点选 / 翻页 / 预载 / 目录切换。因此 R59 新建**独立**的
+  `@State upReturnName`，与 `cur` 并列下传 `SidebarView` → 逐行算 `inverted` →
+  `ArchiveRow` 的**独立** `@Prop inverted` 只驱动配色函数，完全不参与任何导航 / 选中逻辑。
+- **反色判定抽成零 SDK / 零 IO 纯函数真值源** `common/UpReturn.ts`，可被
+  `node --experimental-strip-types` 直接回归：
+  `upReturnMarkOf()`（只有真正上移落地 + 能取到合法子目录名才产生标记，过滤 `..` / `.` /
+  未命名兜底）、`upReturnRefreshOf()`（每次返回**整体替换**，连续返回不叠加、失败值不残留）、
+  `upReturnClearOf()`（换源 / 进子目录 / 恢复清空；自动重扫与保位刷新**保留**）、
+  `upReturnInvertOf()`（标记非空 + **名字严格相等** + **目录类行**才反色；
+  `ROW_FOLDER` 与 `ROW_OTHER` 都认，图片 / 文本 / `..` 行一律不反色）、
+  `upReturnBgOf()` / `upReturnFgOf()`（非命中行逐字返回原配色，亮底沿用奇数条纹、
+  深字沿用选中文字色，保持既有色系）。
+
+### 二、反色标记的生命周期（每次返回都正确更新，失败不残留）
+
+| 环节 | 处理 |
+|---|---|
+| `browseUp()` 入口 | 先 `upReturnClearOf(..., false)` **清掉上一次标记**，保证失败 / 早退 / 只读名单态 / 层级校验不过绝不残留陈旧高亮；同时用 `baseName(current)` 记下 `fromName`（与 `rows.name` 同源，落地后按名字严格相等命中） |
+| 正常全量探索落地 `openFolder(...)` 成功 | 真正落到父层后才 `upReturnMarkOf(fromName, true, canUp)` 整体替换标记，并**再 `dataSource.reload(this.rows)` 一遍** —— `applyItems` 已 reload 过一次（那时标记仍为空），不依赖 `@Prop` 对虚拟化节点的刷新时机，确定性更强 |
+| R38 卷根原地重列举成功 | 这是「原地重新列举」**不是**上移一层，`canUp=false` 让 `upReturnMarkOf` 返回空标记，显式刷一次清掉旧反色，R28 越级护栏 / R38 行为逐字不改 |
+| `showUpListInApp()` APP 内上层清单 | `upReturnMarkOf(curName, true, true)`，**必须在 `dataSource.reload` 之前**设好，让本次 `LazyForEach` 建出来的可见行就带上新标记；带点真实目录名可能是 `ROW_OTHER`，`upReturnInvertOf` 同样认 |
+| `applyItems(keepView)` | `keepView=false`（换源 / 进子目录 / 恢复）清标记，避免上一层名字染到新清单里的同名行；`keepView=true`（1.5s 自动重扫 / 保位刷新）**保留**，避免轮询把刚显示的反色抹掉 |
+| `onRowTap(ROW_FOLDER)` 进子目录 | 显式清一次，覆盖 `openFolder` 命中整表缓存 → `applyItems(keepView=true)` 会保留标记的分支 |
+| `restoreDirContextOnly()` 冷启动恢复 | 全新会话，显式清一次，绝不带入任何反色 |
+
+### 三、名称文字左侧留白清零（三层 left padding + 图标列位置）
+
+原先名称左缘被四层叠加：`SidebarView` 的 `List.padding({ left: 8 })`、
+`ArchiveRow` 外层 `Row.padding({ left: 6 })`、行首 18vp 图标列、以及
+`Text(this.name).padding({ left: 8 })` + `constraintSize(minWidth: ... + 8)`。R59：
+
+- `List.padding({ left: 8, right: 8 })` → `.padding({ right: 8 })`；
+- 外层 `Row.padding({ left: 6, ... })` → `.padding({ right: 6, top: 1, bottom: 1 })`；
+- **`Text(this.name)` 移到 `Row()` 第一个子组件**，删掉其 `.padding({ left: 8 })`，
+  `minWidth` 去掉 `+8` 补偿（仍由 `layoutWeight(1)` 撑开长名）；
+- **18vp 图标列移到名称之后**，`↑` / `▣` 导航符号与 `.width(18)` / `.height(26)`
+  静态锚点全部保留；字节 / 日期三栏的列宽与对齐不受影响；
+- `DirName.ts` 的 `listWidthForNames()` 固定开销注释按新布局订正为约 **204vp**，
+  但估算值**刻意仍按 226 保留 22vp 保守余量、不收窄列宽**，免得长名字刚好顶到
+  边界被 `Ellipsis` 截断 —— 纯余量，不参与任何目录 / 选中逻辑。
+
+> **跨文件计数契约**：测试里 `((INDEX + ARCHIVE).match(/Text\(this\.name\)/g)).length === 1`，
+> 因此名称仍保持**单个** `Text(this.name)`，只是移动位置 + 改 `.fontColor()` /
+> `.backgroundColor()`，不新增第二个名称节点。历史契约还要求 `INDEX` 中不出现旧按钮
+> 文案「回上层」，故本轮注释统一用工程术语「往上层」。
+
+### 四、改动范围（5 个代码 / 测试文件 + README）
+
+| 文件 | 改动 |
+|---|---|
+| `common/UpReturn.ts` | **新建**：11 个导出（5 常量 `UPRET_*` + 6 纯函数）零 SDK / 零 IO / 零 `await` / `throw` / 零全局可变状态 |
+| `pages/Index.ets` | import 4 个符号（`UPRET_NONE` + `upReturnMarkOf/RefreshOf/ClearOf`）；新增独立 `@State upReturnName`；`applyItems` 按 `keepView` 清 / 留；`browseUp()` 入口清 + 记 `fromName` + 三个落地分支重设并 reload；`onRowTap(ROW_FOLDER)` / `restoreDirContextOnly()` 显式清；`SidebarView` 并列下传；`ESC_BUILD_TAG` R58→R59、文件头改 R59 主线 |
+| `components/SidebarView.ets` | 新增 `@Prop upReturnName`；`ArchiveRow` 调用加 `inverted: upReturnInvertOf(...)`；`List` 左 padding 清零 |
+| `components/ArchiveRow.ets` | 新增独立 `@Prop inverted`；`rowBgColor()` / `labelColor()` / `iconColor()` + 字节 / 日期列走 `upReturnBgOf/FgOf`；名称移到行首、图标列后移、三层左缘清零、`minWidth` 去 `+8` |
+| `common/DirName.ts` | 仅订正 `listWidthForNames()` 固定开销注释，函数实现一字未改 |
+| `tests/dirname.test.mjs` | 新增 32 条 R59 断言（纯函数 / 真值源零依赖 / 全链路接线 / 三层留白 / 静态锚点 / 零回归）；批量升级 22 处构建标记 R58→R59、2 处 `TEST_SELF` 正则、9 组旧包排除数组首位补 `R58`、3 条标题、2 条旧标记定义；新增 R59 真机步骤 |
+
+未动 `AppScope/app.json5`（恒 `1.0.7 / versionCode 7`）、`EntryAbility.ets`、
+`model/` 组件化文件、任何目录浏览 / 恢复 / 返回刷新 / 文本预览 / 并排 / 视窗护栏代码。
+
+### 五、验证结果（三类证据严格分开）
+
+| 证据 | 结果 |
+|---|---|
+| **静态契约 / 纯函数** | `ALL PASS 1931 passed, 0 failed`（R58 基线 1899，+32）；`git diff --check` 通过；本章真机步骤与测试逐字比对缺失 0 |
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **`BUILD SUCCESSFUL in 16 s 808 ms`**，日志 **`Finished :entry:default@CompileArkTS... after 10 s 44 ms`**（**非 UP-TO-DATE**，首轮即为真编译）；**0 ERROR / 17 WARN**（8 条 `preferences` 可能抛异常 + 8 条 2in1 系统栏 API + 1 条 `READ_IMAGEVIDEO` 权限，与 R58 基线一致且全部落在未改动区域） |
+| **产物核验** | 签名 HAP **1,237,669 B**（R58 为 1,224,068 B）/ 未签名 **1,201,732 B** / `modules.abc` **709,816 B**；产物 mtime 23:11 晚于源码 22:59；`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 **`R59=1 / R58=0 / R57=0 / R56=0 / R55=0 / R38=0 / R37=0`**、**`1.0.7=1 / 1.0.6=0`**，且 `upReturnMarkOf` / `upReturnInvertOf` / `upReturnClearOf` 各 2 处（定义 + 调用点）、`UPRET_INVERT_BG` 1 处进入产物 |
+| **真机验证** | ⚠️ **未做，由使用者完成**。**编译校验 ≠ 真机验证** —— 反色是否只命中「刚离开的子目录名」、连续返回是否只剩当前高亮、所有档案名是否真的紧贴最左边缘，必须实机截图确认 |
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs` R59 组）
+
+> ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R59-A：进入任意子目录后点「往上层」→ 上层清单里**返回前所在的那个子目录名**
+>     整行反色（亮底深字），其余目录 / 档案行保持原有条纹与配色；Ctrl+D 角标必须是 R59。
+> ⚠️ 真机步骤 R59-B：连续多层往上层 → 每次只反色「刚离开的子目录名」，上一层的高亮必须消失；
+>     进入子目录 / 重选文件夹 / 只读恢复态下不应残留任何反色行。
+> ⚠️ 真机步骤 R59-C：左栏所有档案名（图片 / 目录 / 文本 / .. 行）文字统一紧贴列表最左边缘，
+>     无任何左内边距或缩进；↑ / ▣ 符号改在名称右侧显示，三栏的字节 / 日期列仍对齐。
+> ⚠️ 真机步骤 R59-D：常规点选、双击全屏、翻页、排序、目录切换与悬停缩略图行为均与 R58 一致。
+
+**边界**：未跑 `build.sh`、未升版本、未把 HAP 放桌面；本轮**未推送**任何远端。
 
 ---
 

@@ -9,9 +9,11 @@
  *  依赖方向：pages/Index.ets → 本组件 → components/ArchiveRow + model/，无环。
  */
 
-import { ArchiveRow, ROW_IMAGE } from './ArchiveRow';
+import { ArchiveRow, ROW_IMAGE, ROW_FOLDER, ROW_OTHER } from './ArchiveRow';
 import { ToolButton } from './ToolButton';
 import { GalleryDataSource, ImageItem } from '../model/GalleryData';
+// 第五十九轮：往上层后反色标记的行级命中判定（名字严格相等 + 目录类行）。
+import { upReturnInvertOf } from '../common/UpReturn';
 
 /** 收起态固定宽（只留档案名一列），保持原有交互不变；原 Index.ets 同值迁入。 */
 const LIST_COLLAPSED_W: number = 224;
@@ -28,6 +30,9 @@ export struct SidebarView {
   @Prop rowCount: number = 0;
   @Prop resumeHint: string = '';
   @Prop cur: number = -1;
+  /** 第五十九轮：Index 下传的「返回前所在子目录名」；空串表示没有行反色。
+   *  与 cur / selected 完全独立，不参与常规选中与目录切换。 */
+  @Prop upReturnName: string = '';
   @Prop listCollapsed: boolean = false;
   @Prop listW: number = 280;   // 默认值与 Index 的 LIST_W 同值，仅作初始化兜底
   // ---- 共享对象引用（非状态：scroller 供翻页滚动判定，dataSource 供 LazyForEach）----
@@ -128,6 +133,9 @@ export struct SidebarView {
                 kind: item.kind ?? ROW_IMAGE,
                 idx: idx,
                 selected: (item.itemIndex ?? idx) === this.cur,
+                // 第五十九轮：只对「返回前所在子目录」那一行反色，其余行默认样式不变。
+                inverted: upReturnInvertOf(item.name, this.upReturnName,
+                  item.kind ?? ROW_IMAGE, ROW_FOLDER, ROW_OTHER),
                  collapsed: this.listCollapsed,
                  thumbDisabled: this.restoreReadonly(),
                  onTap: (i: number) => {
@@ -143,7 +151,8 @@ export struct SidebarView {
         .layoutWeight(1)
         .width('100%')
         .scrollBar(BarState.Auto)
-        .padding({ left: 8, right: 8 })
+        // 第五十九轮：名称文字紧贴列表最左边缘 —— 去掉 List 左内边距，右侧留白保留。
+        .padding({ right: 8 })
         .cachedCount(6)
         // 第十三轮：记录左栏可见范围，供点选 / 翻页的滚动判定使用。
         // 只读数值、不驱动 UI，故直接写普通字段（不进状态系统）。
