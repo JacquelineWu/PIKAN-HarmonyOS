@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R61 主线（R39 起组件化）· 目录行移除方格与占位
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R62 主线（R39 起组件化）· 主预览 resize 画质（动态插值 + AA）
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -160,6 +160,9 @@ import { PreviewEntry, decodePx, rawStore, RAW_CACHE_MAX_COUNT, TAG, DOMAIN } fr
 import { SidebarView } from '../components/SidebarView';
 import { ToolButton } from '../components/ToolButton';
 import { ImageItem, GalleryDataSource } from '../model/GalleryData';
+// 第六十二轮：主预览 resize 画质的纯函数真值源（零 SDK / 零 IO）。
+import { RQ_MIPMAP, RQ_LOW, RQ_NEAR_ONE_TOL, RQ_MIPMAP_FLOOR,
+  rqScaleOf, rqInterpolationOf, rqAntialiasOf } from '../common/ResizeQuality';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -169,7 +172,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R61';
+const ESC_BUILD_TAG: string = 'R62';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -5431,6 +5434,34 @@ struct Index {
       VIEW_EDGE_FACTOR, FULLSCREEN_VIEW_EDGE_FACTOR, VIEW_EDGE_MIN, VIEW_EDGE_MAX);
   }
 
+  /** 第六十二轮：主预览的有效 GPU 缩放比 = (画布长边 / 解码长边) × zoom。
+   *  viewEdge() 是 1.5×（普通）/ 2.0×（全屏）oversampling 档位，所以 zoom=1 时
+   *  实际比例约 0.67 / 0.50 —— GPU 一直在**缩小**，正是 Cubic 负 lobe 振铃的输入条件。 */
+  private previewScale(): number {
+    return rqScaleOf(this.viewEdge(), this.canvasW, this.canvasH, this.zoom);
+  }
+
+  /** 第六十二轮：按有效比例动态选插值档（三处清晰图源共用的唯一画质出口）。
+   *  放大 / 1:1 → High(Cubic)；轻微缩小 → Low(双线性，无负 lobe，消波纹且不发糊)；
+   *  极端缩小（<0.4×）→ Medium(MipMap 预滤波)。放大镜层的 loupeInterpolation() 逐字未动。 */
+  private previewInterpolation(): ImageInterpolation {
+    const tier: number = rqInterpolationOf(this.previewScale(),
+      RQ_NEAR_ONE_TOL, RQ_MIPMAP_FLOOR);
+    if (tier === RQ_MIPMAP) {
+      return ImageInterpolation.Medium;
+    }
+    if (tier === RQ_LOW) {
+      return ImageInterpolation.Low;
+    }
+    return ImageInterpolation.High;
+  }
+
+  /** 第六十二轮：PixelMap 边缘 AA 默认关闭（since 23），主预览四个图源统一开启。
+   *  只改 GPU 采样属性，不改尺寸 / 位置 / 解码档位 / 缓存，无新增解码，无位置偏移。 */
+  private previewAntialias(): boolean {
+    return rqAntialiasOf(this.previewScale());
+  }
+
   /** 左右页共用的显示档位判据（纯函数在 ViewPlan，可 Node 单测）。
    *  srcLong = 原图长边；<= 0 表示未知。左右页、全清升级、尺寸变化重解全部走这里，
    *  从根上杜绝「一边 1536、一边 1800」的档位差。 */
@@ -8255,10 +8286,12 @@ struct Index {
       if (this.viewPixelMap !== undefined) {
         Image(this.viewPixelMap!)          // 自解码结果：清晰，且一定是当前这张
           .objectFit(ImageFit.Contain)
-          // ImageInterpolation.High = Cubic，SDK 明确写「highest possible quality」——
-          // 这是平台上最高画质的 resample 档；autoResize(false) 不让组件解码时再降采样损信息。
-          // 配合全屏后按新画布尺寸重解码，全程不把小图拉大。
-          .interpolation(ImageInterpolation.High)
+          // 第六十二轮：不再无条件 High(Cubic)。viewEdge() 是 1.5×/2.0× oversampling，
+          // zoom=1 时 GPU 实际在缩小 0.67×/0.50×，Cubic 负 lobe 产生过冲 / 振铃（波纹）；
+          // 现在按有效缩放比动态选档 + 全源开 PixelMap 边缘 AA。
+          // autoResize(false) 不让组件解码时再降采样损信息，配合全屏按新画布重解码。
+          .interpolation(this.previewInterpolation())
+          .antialiased(this.previewAntialias())
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
@@ -8270,7 +8303,8 @@ struct Index {
         // 不能在解码期间就画 Image(uri) —— 那正是「上一张还留在屏幕上」的来源。
         Image(uri)
           .objectFit(ImageFit.Contain)
-          .interpolation(ImageInterpolation.High)
+          .interpolation(this.previewInterpolation())
+          .antialiased(this.previewAntialias())
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
@@ -8296,6 +8330,7 @@ struct Index {
         Image(this.lowPixelMap!)
           .objectFit(ImageFit.Contain)
           .interpolation(ImageInterpolation.Medium)
+          .antialiased(this.previewAntialias())
           .draggable(false)
           .width(this.viewBoxW(half))
           .height(this.frameH())
@@ -8330,7 +8365,8 @@ struct Index {
       if (this.rightPixelMap !== undefined) {
         Image(this.rightPixelMap!)
           .objectFit(ImageFit.Contain)
-          .interpolation(ImageInterpolation.High)
+          .interpolation(this.previewInterpolation())
+          .antialiased(this.previewAntialias())
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
