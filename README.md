@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R59`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R60`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -548,15 +548,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > 「R39–R55 实现说明（依据测试断言名与源码）」章节，该章以测试断言名与
 > `Index.ets` / `components/` / `model/` 源码为准，与本章的真机步骤一一对应。
 > **R56（返回 APP 自动同步目录 / 并排只看左图比例）、R57（重启 APP 后左侧列表补刷）、
-> R58（视窗缩放护栏：右侧预览图不再被过度缩小）、R59（往上层后子目录反色 / 左栏名称紧贴最左边缘）
-> 见下方四个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R58（视窗缩放护栏：右侧预览图不再被过度缩小）、R59（往上层后子目录反色 / 左栏名称紧贴最左边缘）、
+> R60（高亮项恒定完整可见：不被滚动条 / 滚动位置 / 尺寸变化裁剪）
+> 见下方五个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R59`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R59` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R60`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R60` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3854`；R59 新增 1 行 import + 一批 R59 断言，行号由 3849 顺延 5 行）
+  （`tests/dirname.test.mjs:3859`；R60 新增 5 行 import，行号由 3854 顺延 5 行）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -1143,6 +1144,89 @@ R57 遗留的 GitHub 同步仍需使用者重新提供 PAT（此前 PAT 为进�
 > ⚠️ 真机步骤 R59-D：常规点选、双击全屏、翻页、排序、目录切换与悬停缩略图行为均与 R58 一致。
 
 **边界**：未跑 `build.sh`、未升版本、未把 HAP 放桌面；本轮**未推送**任何远端。
+
+---
+
+## 第六十轮：高亮项恒定完整可见（2026-11-22，R60）
+
+> 需求（逐字）：请修复档案/目录列表中高亮项被隐藏的问题……当前高亮的档案或目录
+> 必须始终完整显示在容器可视区域内，不会因 scrollbar 偏移、滚动位置变化，或滚动条
+> 出现/消失造成的布局变化而被裁剪、遮挡或移出视区。保持现有高亮状态、选中交互、
+> 列表顺序和滚动体验不变……不引入额外偏移或布局跳动。
+
+### 一、问题定位（按事件响应链，不凭缓存猜）
+
+| 环节 | 现状 | 后果 |
+| --- | --- | --- |
+| `SidebarView` 的 `List` | `.scrollBar(BarState.Auto)` + `.padding({ right: 8 })`，`.onScrollIndex((first,last,center)=>…)` 把可见范围上报 `Index.listFirstRow/lastRow` | `BarState.Auto` 滚动条出现 / 消失、容器尺寸变化、目录换源都会改变可见范围，但没有任何路径在范围重新上报后复查高亮行 |
+| 滚动出口 | 全源码仅 3 处裸 `this.scroller.scrollToIndex(row, false)`（换源定位 / `scrollOnTap` / `scrollOnStep`），默认 `ScrollAlign.START` | `stepScrollAction` 把「目标行 == 可见首 / 末行」判为已在范围内而不滚 → 卡在视区边缘只露半行的高亮永远不会被校正 |
+| 两套高亮态 | 常规 `selected`（`cur`）+ R59 `inverted`（`upReturnName`） | `showUpListInApp()` 里 `cur = -1`、反色行是唯一高亮，且该函数**完全没有定位入口**；长清单里反色行靠下就直接藏在视区外 |
+| SDK 能力 | `ScrollAlign.AUTO` = 「Scroll the minimum distance to fully display the specified item」 | 最小位移完整显示，已完整可见时不产生位移 → 不引入额外偏移 / 布局跳动 |
+
+### 二、实现
+
+1. **新建纯函数真值源 `common/HighlightVisible.ts`**（零 SDK / 零文件 IO /
+   零 `await` / `throw` / 零全局可变状态）：
+   - `highlightRowOf()`：主高亮行，常规选中行优先，`cur=-1` 时退回反色行；
+   - `highlightSafeOf()`：安全可见区取 `(first, last)` **开区间** —— `onScrollIndex`
+     上报的首末行含仅部分可见的边缘行，一律不算完整可见；
+   - `highlightGuardKeyOf()` / `highlightGuardActionOf()`：把 `(row, first, last, total)`
+     编成自锁 key；**`pending=false`（纯滚动过程）恒 `HV_NONE`**，绝不把用户正在滚走的
+     高亮拉回；可见范围未上报时返回 `HV_NONE` 但**不消费挂起**，等下一次上报；
+   - `highlightScrollAlignOf()`：只有 `HV_REVEAL` 才给 `HV_ALIGN_AUTO`（`ScrollAlign.AUTO`）；
+   - `highlightResizeOf()`：宽 / 高任一 ≥1vp 变化才挂起，脏值 / 无变化不误触发。
+2. **`Index.ets` 接线**（既有 3 处滚动调用**逐字未动**）：
+   - 新增 4 个普通字段：`highlightRevealPending` / `highlightGuardKey` /
+     `highlightRootW` / `highlightRootH`（不进状态系统、不驱动 UI）；
+   - `highlightRowNow()` 同时按 `cur → rowOfItem()` 与 `upReturnName → upReturnInvertOf()`
+     找主高亮行，覆盖 APP 内上层清单 `cur=-1` 的独有场景；
+   - `armHighlightReveal()` 只翻挂起位 + 清自锁 key；`guardHighlightVisible()` 是
+     **唯一新增滚动收口**，用 `ScrollAlign.AUTO` 做一次最小位移，随后立即清 `pending` ——
+     `onScrollIndex` 回调递归回来时 `guard` 恒 `HV_NONE`，无抖动；
+   - 四个挂起点：`applyItems()` 的 `!keepView` 分支（自动重扫不挂起）、
+     `showUpListInApp()`（作废旧可见范围 + 挂起）、`onScrollIndex`（消费挂起）、
+     根 `Stack.onAreaChange`（尺寸真变化才挂起，放在所有 early return 之前）。
+3. **不引入任何额外偏移**：`SidebarView` 的 List / Row / Text 三层左缘留白、
+   `.padding({ right: 8 })`、`.scrollBar(BarState.Auto)`、`.cachedCount(6)` 逐字未动；
+   不加 `offset` / `margin` / `padding`。
+
+### 三、改动范围
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/HighlightVisible.ts` | **新增**：4 常量 + 6 纯函数，R60 全部判定的唯一真值源 |
+| `pages/Index.ets` | import `HighlightVisible` 十个符号 + `upReturnInvertOf`；文件头 / `ESC_BUILD_TAG` R59→R60；新增 4 字段与 3 方法；4 处挂起 / 消费接线；既有 3 处 `scrollToIndex` 逐字未动 |
+| `tests/dirname.test.mjs` | 新增 **29 条** R60 断言（纯函数 / 零依赖 / 全链路接线 / 零回归）；批量升级 23 处构建标记 R59→R60、12 组旧包排除数组首位补 `R59`、4 条标题、2 条旧标记定义；3 处 `scrollToIndex` 计数契约 3→4（3 既有收口 + 1 护栏收口）；放宽 1 条 R59 import 断言以兼容追加的 `upReturnInvertOf`；新增 R60 真机步骤 |
+| `README.md` | 本章 + 抬头 / 章节列表 / 「使用前必读」构建标记与测试行号同步 |
+
+### 四、验证结果
+
+| 类型 | 结果 |
+| --- | --- |
+| **静态契约 / 纯函数** | `ALL PASS 1960 passed, 0 failed`（R59 基线 1931，+29）；`git diff --check` 通过；本章真机步骤与测试逐字比对缺失 0 |
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **`BUILD SUCCESSFUL in 14 s 588 ms`**，日志 **`Finished :entry:default@CompileArkTS... after 8 s 322 ms`**（**非 UP-TO-DATE**，首轮即为真编译）；**0 ERROR / 17 WARN**（与 R59 基线一致，全部落在未改动的 `preferences` / 2in1 系统栏 / `READ_IMAGEVIDEO` 区域） |
+| **产物核验** | 签名 HAP **1,255,259 B**（R59 为 1,237,669 B）/ 未签名 **1,214,767 B** / `modules.abc` **716,804 B**；产物 mtime 00:38 晚于源码 00:34；`modules.abc` 与 HAP 内 `ets/modules.abc` 均检出 **`R60=1 / R59=0 / R58=0 / R57=0 / R56=0 / R55=0 / R38=0 / R37=0`**、**`1.0.7=1 / 1.0.6=0`**，且 `highlightGuardActionOf` / `highlightSafeOf` / `highlightResizeOf` 各 2 处（定义 + 调用点）进入产物 |
+
+> **编译校验 ≠ 真机验证**。真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
+
+### 五、真机步骤（逐字取自 `tests/dirname.test.mjs:7079` R60 组）
+
+> ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R60-A：打开一个长目录（列表出现滚动条）→ 滚轮 / 键盘翻页到中部，
+>     当前高亮的档案行必须整行完整可见，不得只露半行、被滚动条盖住或跑出视区；Ctrl+D 角标必须是 R60。
+> ⚠️ 真机步骤 R60-B：连续多层往上层 → APP 内上层清单里反色的子目录名必须完整可见；
+>     即使该行排在长清单靠下位置，也会自动滚到完整显示，不再藏在视区外。
+> ⚠️ 真机步骤 R60-C：缓慢拖动窗口边框改变尺寸 / 进出全屏 / 收起再展开左栏，
+>     过程中高亮行不应被裁剪或跳动；滚动条出现 / 消失时列表不发生横向位移。
+> ⚠️ 真机步骤 R60-D：用户主动把列表滚到远离高亮项的位置时，滚动体验与 R59 一致
+>     （不会被强行拉回）；常规点选、目录切换、排序、文本预览、并排预览均不受影响。
+
+### 六、边界
+
+- 纯滚动过程 `pending=false`，护栏**不介入**，用户主动滚走高亮不被强行拉回；
+- 自动重扫（`keepView=true`）不挂起，不产生任何位移；
+- 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
+  本轮**未推送**任何远端。
 
 ---
 

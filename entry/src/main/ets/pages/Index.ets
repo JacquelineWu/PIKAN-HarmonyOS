@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R59 主线（R39 起组件化）· 往上层反色 + 名称贴左
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R60 主线（R39 起组件化）· 高亮项恒定完整可见
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -77,7 +77,12 @@ import { rootReenterWantedOf, rootReenterFormsOf } from '../common/DirName';
 // 第五十九轮：往上层后「返回前所在子目录」反色标记的真值源。
 // 纯视觉标记，与 cur / select() / 目录链完全隔离；只在 browseUp 落地时设置。
 import { UPRET_NONE, upReturnMarkOf, upReturnRefreshOf,
-  upReturnClearOf } from '../common/UpReturn';
+  upReturnClearOf, upReturnInvertOf } from '../common/UpReturn';
+// 第六十轮：左栏「高亮项恒定完整可见」的纯函数真值源（零 SDK / 零 IO / 纯数值判定）。
+import { HV_NONE, HV_REVEAL, HV_KEY_INVALID, HV_ALIGN_AUTO,
+  highlightRowOf, highlightSafeOf, highlightGuardKeyOf,
+  highlightGuardActionOf, highlightScrollAlignOf,
+  highlightResizeOf } from '../common/HighlightVisible';
 import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
   fullPreloadIndex, preloadConcurrencyOf, preloadBatchOf,
   shouldResetPreloadChain, fullCacheTargetOf,
@@ -164,7 +169,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R59';
+const ESC_BUILD_TAG: string = 'R60';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1099,6 +1104,14 @@ struct Index {
    *  只作点选 / 翻页的滚动判据，不参与 UI 渲染，故不用 @State。 */
   private listFirstRow: number = -1;
   private listLastRow: number = -1;
+  /** 第六十轮：挂起的「最小位移完整显示」定位请求。只在状态落地 / 容器尺寸变化时
+   *  置 true，纯滚动过程恒 false —— 护栏绝不在用户滚动时把高亮拉回，滚动体验不变。 */
+  private highlightRevealPending: boolean = false;
+  /** 第六十轮：上次校正的 (row, 可见范围, 总行数) 自锁 key；相同态不重复校正。 */
+  private highlightGuardKey: number = HV_KEY_INVALID;
+  /** 第六十轮：根容器上一次有效尺寸，供 highlightResizeOf 判定是否真变化。 */
+  private highlightRootW: number = -1;
+  private highlightRootH: number = -1;
   /** 第十五轮：放大镜总开关，预设关闭（鼠标右键 toggle 开启 / 关闭）。
    *  关闭时仍照常维护 loupePane / loupeHover / 坐标，只是不绘制浮层，
    *  因此右键开启后无需重新移入即可立即显示当前页放大内容。 */
@@ -3720,6 +3733,10 @@ struct Index {
     if (!keepView) {
       this.clearPreviews();
       this.failed.clear();   // 换了图片源，上一批的「解不开」黑名单作废
+      // 第六十轮：换源 / 恢复后挂起一次「高亮项完整可见」定位请求。此时可见范围已作废，
+      // guard 返回 HV_NONE 并保留挂起，等新 List 的首个 onScrollIndex 上报再消费；
+      // 自动重扫（keepView）走不到这里 —— 保持用户当前视图、不产生任何位移。
+      this.armHighlightReveal('applyItems');
     }
     // 接上启动预热的那张：此刻列表已有、cur 已定，交给缓存后 showPreviewOf 会直接命中。
     // 若它不属于这一批（用户换了别的来源），schedulePreload → evictOutside 会顺手释放掉。
@@ -4067,6 +4084,61 @@ struct Index {
    *  第十四轮起这是「单页 / 并排左页」的判定，右页由 hasLoupeImage 分支处理。 */
   private hasPreviewImage(): boolean {
     return this.viewPixelMap !== undefined || this.lowPixelMap !== undefined || this.viewFailed;
+  }
+
+  /** 第六十轮：当前主高亮行。常规选中行优先；APP 内上层清单 cur=-1 时，
+   *  按 upReturnName 在 rows 里找第五十九轮的反色行（名字严格相等 + 目录类行）。 */
+  private highlightRowNow(): number {
+    let sel: number = -1;
+    if (this.cur >= 0 && this.cur < this.items.length) {
+      sel = this.rowOfItem(this.cur);
+    }
+    let inv: number = -1;
+    if (this.upReturnName.length > 0) {
+      for (let i = 0; i < this.rows.length; i++) {
+        if (upReturnInvertOf(this.rows[i].name, this.upReturnName,
+          this.rows[i].kind ?? ROW_IMAGE, ROW_FOLDER, ROW_OTHER)) {
+          inv = i;
+          break;
+        }
+      }
+    }
+    return highlightRowOf(sel, inv, this.rows.length);
+  }
+
+  /** 第六十轮：状态落地 / 尺寸变化后挂起一次「最小位移完整显示」定位请求。
+   *  不直接改滚动位置：换源时可见范围尚未上报，guard 会返回 HV_NONE 保留挂起，
+   *  等首个有效 onScrollIndex 再消费，避免在布局回调里同步滚动造成跳动。 */
+  private armHighlightReveal(scene: string): void {
+    this.highlightRevealPending = true;
+    this.highlightGuardKey = HV_KEY_INVALID;
+    this.guardHighlightVisible(scene);
+  }
+
+  /** 第六十轮：高亮项恒定完整可见的唯一收口。
+   *  只在 pending 且主高亮行不落在安全可见区时，用 ScrollAlign.AUTO 做一次
+   *  「滚动最小距离使该行完整显示」；AUTO 在已完整可见时不产生位移，因此不引入
+   *  额外偏移、padding 或布局跳动，也不改列表顺序 / 高亮态 / 选中交互。
+   *  校正后立即清 pending —— onScrollIndex 回调递归回来时 guard 恒返回 HV_NONE。 */
+  private guardHighlightVisible(scene: string): void {
+    const row: number = this.highlightRowNow();
+    const total: number = this.rows.length;
+    const action: number = highlightGuardActionOf(row, this.listFirstRow, this.listLastRow,
+      total, this.highlightGuardKey, this.highlightRevealPending);
+    if (action === HV_NONE) {
+      return;
+    }
+    const alignCode: number = highlightScrollAlignOf(action);
+    if (alignCode === HV_KEY_INVALID) {
+      return;
+    }
+    this.highlightGuardKey = highlightGuardKeyOf(row, this.listFirstRow, this.listLastRow, total);
+    this.highlightRevealPending = false;
+    const align: ScrollAlign = alignCode === HV_ALIGN_AUTO ? ScrollAlign.AUTO : ScrollAlign.START;
+    this.scroller.scrollToIndex(row, false, align);
+    hilog.info(DOMAIN, TAG,
+      'highlight guard: %{public}s row=%{public}d first=%{public}d last=%{public}d total=%{public}d',
+      scene, row, this.listFirstRow, this.listLastRow, total);
   }
 
   /** 第十四轮：按 pane 判定该页是否有可放大内容。
@@ -7169,6 +7241,12 @@ struct Index {
       ' | chain=' + chain.length + ' | no-picker | v' + APP_VERSION;
     hilog.info(DOMAIN, TAG, 'up list in app: %{public}d rows target=%{public}s cached=%{public}s',
       rows.length, target, cached ? '1' : '0');
+    // 第六十轮：APP 内上层清单同样换源 —— 可见范围作废并挂起定位请求。
+    // 这里 cur=-1，主高亮行由 upReturnName 反色行充当，护栏会把它滚到完整可见；
+    // 长清单里反色行靠下时也不会再被藏在视区外。
+    this.listFirstRow = -1;
+    this.listLastRow = -1;
+    this.armHighlightReveal('upList');
   }
 
   /** 切换全屏：只翻状态位，真正的重解码等 onAreaChange 把新画布尺寸报上来再做 */
@@ -8379,6 +8457,10 @@ struct Index {
             onScrollIndex: (first: number, last: number): void => {
               this.listFirstRow = first;
               this.listLastRow = last;
+              // 第六十轮：可见范围重新上报（滚动 / scrollbar 出现消失 / 尺寸变化 / 换源）
+              // 后消费挂起的定位请求；纯滚动过程 pending=false，护栏恒不动作，
+              // 绝不把用户正在滚走的高亮拉回，也不改变既有滚动体验。
+              this.guardHighlightVisible('onScrollIndex');
             }
           })
 
@@ -8858,6 +8940,14 @@ struct Index {
       this.lastRootH = rh;
       if (changed) {
         this.markWindowRect(); // 拖窗口时也记住当前尺寸（防抖），强杀进程不丢
+      }
+      // 第六十轮：根容器尺寸真变化（含 scrollbar 出现 / 消失引起的布局变化）时，
+      // 重新挂起一次「高亮项完整可见」定位请求；只翻状态位，不加 padding / offset。
+      // 放在所有 early return 之前，保证基准未就绪 / 画布未变时也能挂起。
+      if (highlightResizeOf(this.highlightRootW, this.highlightRootH, rw, rh)) {
+        this.highlightRootW = rw;
+        this.highlightRootH = rh;
+        this.armHighlightReveal('resize');
       }
       // 两个回调谁先到不确定：根先到时也要能建基准，别等下一次预览回调。
       //  第五十八轮：只在「基准未就绪 且 根尺寸确实变化」时 seed，走 chromeSampleOf
