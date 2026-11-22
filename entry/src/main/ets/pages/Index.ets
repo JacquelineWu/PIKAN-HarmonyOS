@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R63 主线（R39 起组件化）· 文本预览 scrollbar 恢复显示
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R64 主线（R39 起组件化）· 左栏目录内容量统计与展示
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -167,6 +167,14 @@ import { RQ_MIPMAP, RQ_LOW, RQ_NEAR_ONE_TOL, RQ_MIPMAP_FLOOR,
 // 内容驱动写 @State，UI 的 if 只直读它；不再把非 @State 的 textLines 塞进条件。
 import { TSB_CHROME_H_VP, textViewportHOf,
   textBarVisibleSafeOf } from '../common/TextScrollBar';
+// 第六十四轮：左栏目录内容量的统计口径 / TTL / 空闲闸门 / 四态展示纯函数真值源。
+// 真异步 fs.listFile、preferences 小 key、定时器与 LRU 全在本文件，模块零 SDK / 零 IO。
+import { DC_PENDING, DC_FAIL, DC_LABEL_PENDING, DC_TTL_DEFAULT_MS,
+  DC_IDLE_MS, DC_SCAN_PER_TICK, DC_SCAN_TIMEOUT_MS, DC_CACHE_MAX,
+  DC_ENTRY_CAP, DC_SCAN_GO, DirCountEntry, dcTtlClampOf, dcRefreshTickOf,
+  dcIdleOf, dcAppIdleOf, dcScanActionOf, dcCountOf, dcImageCountOf,
+  dcStateOf, dcEntryLabelOf, dcNeedRescanOf, dcEvictCountOf,
+  dcTtlHintOf, dcTtlLabelOf } from '../common/DirCount';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -176,7 +184,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R63';
+const ESC_BUILD_TAG: string = 'R64';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -888,6 +896,12 @@ const POS_KEY_UPCACHE: string = 'lastUpCache';
  *  只存一个字符 '1' / ''，绝不引入 XML 非法控制字符（R31 教训）。
  *  目录位置是独立于图片的纯字符串信息：整条落盘 / 恢复链都不该挂靠 LastPos。 */
 const POS_KEY_DIRCTX: string = 'lastDirCtx';
+/** 第六十四轮：目录「内容量」缓存有效期（ms）的独立小 key。
+ *  读回后经 dcTtlClampOf 夹界；缺省 / 脏值一律用 DC_TTL_DEFAULT_MS。
+ *  ⚠️ 只存一个整数，不碰既有位置记忆 / 快照 key，启动读 prefs 的量不变。 */
+const POS_KEY_DC_TTL: string = 'dirCountTtlMs';
+/** Ctrl+D 诊断层里循环切换的 TTL 预设档（毫秒）：1 分 / 5 分 / 15 分 / 1 小时。 */
+const DC_TTL_PRESETS: number[] = [60000, 300000, 900000, 3600000];
 /** 用户主动「往上层」时最多真实列举多少个同层 URI 写法。
  *  dirCandidates 每个父级约 6 种写法、同层候选通常数个，64 已远超实际规模；
  *  这里只是 NAS 上的无界放大护栏，绝不截掉真实存在的兄弟目录。 */
@@ -1070,6 +1084,15 @@ struct Index {
   /** 第四十三轮：目录列举的代际号。每次真正开始列目录 +1；在途列举完成后
    *  若发现自己的代际号已过期，说明被更新的用户导航抢占，结果整段丢弃。 */
   private openEpoch: number = 0;
+  // 第六十四轮：目录内容量的会话内缓存 / TTL 设置 / 空闲闸门 / 心跳（全部普通字段，
+  // 只有展示用的 dirCountLabels / dirCountVersion / dirCountTtlLabel 进状态系统）。
+  private dirCountCache: Map<string, DirCountEntry> = new Map();
+  private dirCountOrder: string[] = [];
+  private dirCountTtlMs: number = DC_TTL_DEFAULT_MS;
+  private dirCountTimer: number = -1;
+  private dirCountScanBusy: boolean = false;
+  private dirCountScanToken: number = 0;
+  private lastInputAt: number = 0;
   @State itemCount: number = 0;
   /** 左栏实际行数（含「..」/ 子文件夹 / 灰行），与 itemCount（只算图片）分开。
    *  判空态必须用 rowCount：像「人像」这种全是子文件夹、零图片的目录，
@@ -1077,6 +1100,13 @@ struct Index {
   @State rowCount: number = 0;
   /** 目录态零图片时的一行说明，显示在列表上方，避免用户以为又是空白 / 出错。 */
   @State dirHint: string = '';
+  /** 第六十四轮：与 this.rows 同下标的目录内容量文案（非目录行为空串）。
+   *  每次整份换新引用，SidebarView 的 @Prop 才会重渲染可见行。 */
+  @State dirCountLabels: string[] = [];
+  /** 展示版本号：统计落地 / 失效时 +1，供 SidebarView 建立 V1 依赖。 */
+  @State dirCountVersion: number = 0;
+  /** Ctrl+D 诊断层显示的当前 TTL 文案（@State，设置变更即时刷新）。 */
+  @State dirCountTtlLabel: string = dcTtlLabelOf(DC_TTL_DEFAULT_MS);
   @State source: string = '尚未打开';
   @State cur: number = -1;          // 当前选中索引；-1 表示空
   /** 第五十九轮：往上层落地后「返回前所在子目录名」的反色标记（空串 = 无反色）。
@@ -1518,6 +1548,10 @@ struct Index {
     hilog.info(DOMAIN, TAG,
       'PIKAN %{public}s start · preload %{public}d fwd / %{public}d max · spread=%{public}d · dirPoll=%{public}d',
       APP_VERSION, PRELOAD_FWD, PRELOAD_COUNT, SPREAD_PORTRAIT ? 1 : 0, DIR_POLL_MS);
+    // 第六十四轮：只登记空闲时间戳并起一个纯内存心跳（首个 tick 在数秒后，
+    // 且被 resumeDone / idle / 在途闸门挡住）——启动关键路径零 IO 防线逐字保留。
+    this.lastInputAt = Date.now();
+    this.startDirCountScheduler();
     this.readLastPos(); // 异步读几个小 key，不阻塞首帧；恢复排到首帧之后（见 scheduleShowLast）
     // 第二十一轮：注册窗口状态监听（窗口管理器直发，不经 ESC 按键 / 焦点），
     // 并在首帧后抢一次键盘焦点 —— 不再等 setFull 被调用才抢。
@@ -1558,6 +1592,12 @@ struct Index {
   onPageShow(): void {
     this.tryRefreshOnResume();
     this.tryBootRefresh(); // 第五十七轮：冷启动补刷兜底（主触发在 markRestoreEntered）
+    // 第六十四轮：返回前台先重置空闲时钟，并让上一轮统计失效 —— 离开期间
+    // 目录 / 内容可能被别的应用改过，展示必须与真实内容重新对账。
+    // 刻意排在 R56/R57 双入口之后：既不改这两个既有入口的顺序与单次消费语义，
+    // 也不抢恢复期 IO（本方法只改内存标记 + 文案数组，零磁盘 IO）。
+    this.markUserActive();
+    this.invalidateDirCounts();
   }
 
   /** 返回刷新的唯一决策落点。真值源是 ResumeRefresh.ts 的纯函数，
@@ -1693,6 +1733,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.stopSlide();
+    this.stopDirCountScheduler(); // 第六十四轮：页面销毁时停心跳、作废在途扫描
     this.clearKeyRefocusTimer();
     this.pageAlive = false;
     if (this.quitFallbackTimer !== -1) {
@@ -1924,6 +1965,18 @@ struct Index {
       this.savedDirCtx = '';
       hilog.warn(DOMAIN, TAG, 'read browse extras failed (ignored): %{public}s', JSON.stringify(e));
     }
+    // 第六十四轮：TTL 是新增的独立小 key，读失败只回默认值，绝不影响上面既有恢复链。
+    try {
+      const rawDcTtl = await p.get(POS_KEY_DC_TTL, 0);
+      if (typeof rawDcTtl === 'number') {
+        this.dirCountTtlMs = dcTtlClampOf(rawDcTtl);
+        this.dirCountTtlLabel = dcTtlLabelOf(this.dirCountTtlMs);
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'read dirCount ttl failed, use default');
+    }
+    // 按读回的设定周期重建心跳（幂等：先清再起；这里仍无任何文件 IO）。
+    this.startDirCountScheduler();
   }
 
   /** 只探最多 RESTORE_PROBE_LIMIT 张 uri 能否 open —— 判断快照授权在重启后是否还在。
@@ -2595,6 +2648,9 @@ struct Index {
     }
     this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
     this.dataSource.reload(this.rows);
+    // 第六十四轮：APP 内清单态同样接入目录内容量统计链（零 IO，只建 PENDING 条目）。
+    this.syncDirCountTargets();
+    this.rebuildDirCountLabels();
     this.titlePath = base;
     this.canGoUp = canGoUpFrom(base);
     this.cur = -1;
@@ -3693,6 +3749,15 @@ struct Index {
     }
     this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
     this.dataSource.reload(this.rows);
+    // 第六十四轮：清单落地后把目录行接进统计链。keepView=自动重扫且条目已变，
+    // 说明本层内容真的动过 → 整层缓存失效；普通换源按 uri 保留命中缓存，
+    // 新目录行先显示「…」，等空闲心跳补扫，展示始终与真实内容对账。
+    this.syncDirCountTargets();
+    if (keepView) {
+      this.invalidateDirCounts();
+    } else {
+      this.rebuildDirCountLabels();
+    }
     // 标题栏路径：目录浏览态用当前目录；否则取首批 uri 的父目录
     // 目录态优先显示真实路径（原始 uri 常是 file://docs/... 或 %XX 编码，读起来像乱码）
     this.titlePath = this.browseBase.length > 0 ? this.browseBase :
@@ -4408,6 +4473,7 @@ struct Index {
   /** 点左栏某一行：按行的种类分发（图片 / 上级 / 子文件夹 / 文本 / 不支持预览的文件）。
    *  对应 Win64 FsEntry 的 ItemIndex 单向挂钩。 */
   private onRowTap(rowIdx: number): void {
+    this.markUserActive();   // 第六十四轮：点左栏档案行不算空闲
     if (rowIdx < 0 || rowIdx >= this.rows.length) {
       return;
     }
@@ -4478,6 +4544,7 @@ struct Index {
   }
 
   private go(delta: number): void {
+    this.markUserActive();   // 第六十四轮：翻页 / 滚轮也算用户操作
     // 第三十七轮：文本预览态下方向键改为滚动文本，绝不偷偷翻动图片序列。
     if (this.textMode) {
       this.textScroller.scrollBy(0, delta * TEXT_WHEEL_LINES * TEXT_ROW_H_VP);
@@ -4576,6 +4643,7 @@ struct Index {
   }
 
   private toggleSlide(): void {
+    this.markUserActive();   // 第六十四轮：幻灯片开关也算用户操作
     if (this.playing) {
       this.stopSlide();
       return;
@@ -6485,6 +6553,8 @@ struct Index {
       const m: number = await this.tryMtimeAsync(this.browseBase);
       if (m > 0 && this.dirMtime > 0 && m !== this.dirMtime) {
         this.dirMtime = m;
+        // 第六十四轮：本层目录 mtime 变了 = 条目增删 / 改名，旧内容量立即失效。
+        this.invalidateDirCounts();
         if (this.rescanTimer !== -1) {
           clearTimeout(this.rescanTimer);
         }
@@ -6576,6 +6646,7 @@ struct Index {
   // ------------------------------------------------------------------
 
   private doAction(act: string): void {
+    this.markUserActive();   // 第六十四轮：任何工具动作都算用户输入，空闲闸门重新计时
     switch (act) {
       // 11-10 起左下角 4×2 共 8 个视图按钮已按用户要求取消，对应分支一并移除。
       // zoomBy / resetView / zoomPixelPerfect / rotateBy / toggleFlipH / toggleFlipV
@@ -6631,6 +6702,11 @@ struct Index {
       // resumeLast() / loadAllGallery() 本体保留（启动自动恢复与内部降级仍复用）。
       case 'full':
         this.toggleFull();
+        break;
+      // 第六十四轮：内容量缓存有效期设置入口（Ctrl+D 诊断层内循环切换）。
+      // 正式界面三个工具按钮 / 三栏 / 行高逐字不变，不新增常显控件。
+      case 'dcTtl':
+        this.cycleDirCountTtl();
         break;
       default:
         break;
@@ -7535,6 +7611,7 @@ struct Index {
    *    留着 SHOW_FULLSCREEN_CHROME 开关：改回 true 就能恢复旧的唤出式工具条。
    *  y 是相对根 Stack 的坐标。 */
   private onRootMouse(event: MouseEvent): void {
+    this.markUserActive();   // 第六十四轮：鼠标一动就不算空闲（零 IO、零状态写入量）
     // 第十五轮：右键 toggle 放大镜（非预览区的兜底，左栏 / 空白处也能切换）。
     // 预览区右键 Press 已被 onMouseButton 的 stopPropagation 拦下，只由它自己的
     // Release 分支翻转一次；根容器只认 Press，故两处不会重复翻转。
@@ -8482,6 +8559,9 @@ struct Index {
             upReturnName: this.upReturnName,
             listCollapsed: this.listCollapsed,
             listW: this.listW,
+            // 第六十四轮：目录内容量文案 + 版本号下传（@Prop，统计落地即刷新可见行）。
+            dirCountLabels: this.dirCountLabels,
+            dirCountVersion: this.dirCountVersion,
             scroller: this.scroller,
             dataSource: this.dataSource,
             restoreReadonly: (): boolean => this.restoreMode === RESTORE_READONLY,
@@ -8714,6 +8794,11 @@ struct Index {
                 .onClick(() => {
                   this.quitApp();
                 })
+              // 第六十四轮：内容量缓存有效期设置只在 Ctrl+D 诊断层出现。
+              // 用既有 ToolButton 组件（同款式）循环切换 TTL，正式界面零新增控件。
+              // 刻意排在「退出 APP」之后：不改诊断层 if 与既有角标的既有相对顺序。
+              ToolButton({ label: '内容量 ' + this.dirCountTtlLabel, act: 'dcTtl', flex: false,
+                onAction: (a: string): void => { this.doAction(a); } })
               Text(this.zoomPercentText() + ' · ' + ESC_BUILD_TAG +
                 ' · full=' + (this.fullscreen ? 'T' : 'F') +
                 ' · win=' + (this.winFullBySystem ? 'T' : 'F') +
@@ -9551,5 +9636,305 @@ struct Index {
     .width('100%')
     .height('100%')
     .backgroundColor('#12161c')
+  }
+
+  // ==================================================================
+  // 第六十四轮：左栏目录内容量统计 / 展示 / 缓存 / 空闲调度
+  //
+  // 只在这里碰磁盘：真异步 fs.listFile（非递归、listNum:0），与 openFolder
+  // 同一套 URI 候选 + mergeExploreNames 合并口径；绝不 statSync、绝不递归、
+  // 绝不在主线程做批量 IO。真值源全部在 common/DirCount.ts。
+  // ==================================================================
+
+  /** 记一次用户输入。空闲闸门只认这个时刻，绝不让后台扫描抢正常操作。 */
+  private markUserActive(): void {
+    this.lastInputAt = Date.now();
+  }
+
+  /** 启动 / TTL 变更后重建心跳（幂等：先清再起）。只排一个定时器，不碰磁盘。 */
+  private startDirCountScheduler(): void {
+    if (this.dirCountTimer !== -1) {
+      clearInterval(this.dirCountTimer);
+    }
+    this.dirCountTimer = setInterval(() => {
+      this.tickDirCount();
+    }, dcRefreshTickOf(this.dirCountTtlMs));
+  }
+
+  /** 页面销毁：停心跳、作废在途扫描的迟到结果。 */
+  private stopDirCountScheduler(): void {
+    if (this.dirCountTimer !== -1) {
+      clearInterval(this.dirCountTimer);
+      this.dirCountTimer = -1;
+    }
+    this.dirCountScanToken++;
+    this.dirCountScanBusy = false;
+  }
+
+  /** 心跳：只在应用空闲时按预算扫描「缺失 / 过期 / 失败待重试」的目录行。
+   *  一次最多 DC_SCAN_PER_TICK 个、串行真异步；任何在途操作一律让路。 */
+  private tickDirCount(): void {
+    if (!this.pageAlive || this.pageSuspended || this.dirCountScanBusy) {
+      return;
+    }
+    const now: number = Date.now();
+    const idle: boolean = dcIdleOf(this.lastInputAt, now, DC_IDLE_MS);
+    const idleOk: boolean = dcAppIdleOf(this.folderBusy, this.playing,
+      this.mtimeBusy, this.pickerBusy, this.pageAlive, this.resumeDone, idle,
+      bulkIoAllowed(this.restoreMode), this.browseBase.length > 0);
+    // 新目录行先建 PENDING：纯内存，零 IO；缓存命中的条目保留不动。
+    this.syncDirCountTargets();
+    if (!idleOk) {
+      return;
+    }
+    const targets: string[] = this.pickDirCountTargets(now);
+    if (targets.length === 0) {
+      return;
+    }
+    if (dcScanActionOf(idleOk, this.dirCountScanBusy, true) !== DC_SCAN_GO) {
+      return;
+    }
+    const token: number = ++this.dirCountScanToken;
+    this.dirCountScanBusy = true;
+    this.runDirCountBatch(targets, token, 0);
+  }
+
+  /** 串行跑完一批；代际号过期（换源 / 失效 / 销毁）就静默退出，不碰闸门。
+   *  超时兜底用 setTimeout 推进代际号，不引入竞速等待 / 不占着 scanBusy。 */
+  private runDirCountBatch(targets: string[], token: number, i: number): void {
+    if (token !== this.dirCountScanToken || !this.pageAlive) {
+      return;
+    }
+    if (i >= targets.length) {
+      this.dirCountScanBusy = false;
+      return;
+    }
+    const uri: string = targets[i];
+    // 挂住的 listFile 到点按「失败」落地并放闸；迟到的真实结果因代际号已推进被丢弃。
+    const watchdog: number = setTimeout(() => {
+      if (token !== this.dirCountScanToken || !this.pageAlive) {
+        return;
+      }
+      const fail: DirCountEntry = { state: DC_FAIL, count: 0, images: 0, at: Date.now() };
+      this.settleDirCount(uri, fail);
+      this.dirCountScanToken++;
+      this.dirCountScanBusy = false;
+      hilog.warn(DOMAIN, TAG, 'dirCount: listFile timeout, mark failed: %{public}s',
+        baseName(uri));
+    }, DC_SCAN_TIMEOUT_MS);
+    this.listDirCount(uri).then((entry: DirCountEntry) => {
+      if (token !== this.dirCountScanToken || !this.pageAlive) {
+        return;   // 已被超时 / 换源 / 失效作废
+      }
+      clearTimeout(watchdog);
+      this.applyDirCount(uri, token, entry);
+      this.runDirCountBatch(targets, token, i + 1);
+    }).catch(() => {
+      if (token !== this.dirCountScanToken || !this.pageAlive) {
+        return;
+      }
+      clearTimeout(watchdog);
+      const fail: DirCountEntry = { state: DC_FAIL, count: 0, images: 0, at: Date.now() };
+      this.applyDirCount(uri, token, fail);
+      this.runDirCountBatch(targets, token, i + 1);
+    });
+  }
+
+  /** 挑本层需要重扫的目录行（按左栏顺序，最多 DC_SCAN_PER_TICK 个）。 */
+  private pickDirCountTargets(now: number): string[] {
+    const out: string[] = [];
+    for (let i: number = 0; i < this.rows.length; i++) {
+      const r: ImageItem = this.rows[i];
+      if ((r.kind ?? ROW_IMAGE) !== ROW_FOLDER || r.uri.length === 0) {
+        continue;
+      }
+      const e: DirCountEntry | undefined = this.dirCountCache.get(r.uri);
+      if (e !== undefined && dcNeedRescanOf(e, now, this.dirCountTtlMs)) {
+        out.push(r.uri);
+        if (out.length >= DC_SCAN_PER_TICK) {
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  /** 单个目录的真实列举：多个 URI 写法逐个试，成功结果按现有口径合并去重。
+   *  首个非空列举即可代表这一层（与 openFolder 非全量探索同口径），
+   *  全程 await fs.listFile，绝不 statSync / 绝不递归 / 绝不阻塞主线程。 */
+  private async listDirCount(uri: string): Promise<DirCountEntry> {
+    const candidates: string[] = dirCandidates(uri);
+    const groups: Array<Array<string>> = [];
+    let ok: boolean = false;
+    for (let i: number = 0; i < candidates.length; i++) {
+      try {
+        const names: string[] = await fs.listFile(candidates[i],
+          { recursion: false, listNum: 0 });
+        groups.push(names);
+        ok = true;
+        if (names.length > 0) {
+          break;
+        }
+      } catch (e) {
+        // 逐 URI 授权下某个写法列不出是常态，继续试下一个
+      }
+    }
+    const merged: string[] = mergeExploreNames(groups);
+    const total: number = dcCountOf(merged, HIDE_DOT_FILES, DC_ENTRY_CAP);
+    const images: number = dcImageCountOf(merged, HIDE_DOT_FILES, IMAGE_SUFFIXES);
+    const entry: DirCountEntry = {
+      state: dcStateOf(total, ok), count: total, images: images, at: Date.now()
+    };
+    return entry;
+  }
+
+  /** 保位落地：目录已切走 / 该行已不在本层 / 代际已过期 → 迟到结果整段丢弃。 */
+  private applyDirCount(uri: string, token: number, entry: DirCountEntry): void {
+    if (token !== this.dirCountScanToken || !this.pageAlive) {
+      return;
+    }
+    this.settleDirCount(uri, entry);
+  }
+
+  /** 统计结果落地的唯一收口：写缓存 + 重算展示 + 只刷这一行。 */
+  private settleDirCount(uri: string, entry: DirCountEntry): void {
+    const idx: number = this.dirCountRowIndexOf(uri);
+    if (idx < 0) {
+      return;   // 目录已切走：迟到的旧结果绝不盖回新清单
+    }
+    this.putDirCountCache(uri, entry);
+    this.rebuildDirCountLabels();
+    this.dataSource.notifyRowChanged(idx);
+    hilog.info(DOMAIN, TAG,
+      'dirCount: %{public}s st=%{public}d n=%{public}d img=%{public}d ttl=%{public}d',
+      baseName(uri), entry.state, entry.count, entry.images, this.dirCountTtlMs);
+  }
+
+  /** 目录行 uri → 当前行下标；-1 = 已不在本层清单。 */
+  private dirCountRowIndexOf(uri: string): number {
+    if (uri.length === 0) {
+      return -1;
+    }
+    for (let i: number = 0; i < this.rows.length; i++) {
+      if (this.rows[i].uri === uri && (this.rows[i].kind ?? ROW_IMAGE) === ROW_FOLDER) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** 给本层每个目录行建 PENDING 条目（缓存命中则保留），并做 LRU 淘汰。 */
+  private syncDirCountTargets(): void {
+    for (let i: number = 0; i < this.rows.length; i++) {
+      const r: ImageItem = this.rows[i];
+      if ((r.kind ?? ROW_IMAGE) !== ROW_FOLDER || r.uri.length === 0) {
+        continue;
+      }
+      if (!this.dirCountCache.has(r.uri)) {
+        const pending: DirCountEntry = {
+          state: DC_PENDING, count: 0, images: 0, at: 0
+        };
+        this.dirCountCache.set(r.uri, pending);
+        this.dirCountTouch(r.uri);
+      }
+    }
+    this.trimDirCountCache();
+  }
+
+  /** 目录 / 内容变化后让缓存与展示回到真实：本层全部标记失效，等空闲重扫。
+   *  同时作废在途扫描的迟到结果，避免旧数字盖回新清单。 */
+  private invalidateDirCounts(): void {
+    for (let i: number = 0; i < this.rows.length; i++) {
+      const r: ImageItem = this.rows[i];
+      if ((r.kind ?? ROW_IMAGE) !== ROW_FOLDER || r.uri.length === 0) {
+        continue;
+      }
+      const e: DirCountEntry | undefined = this.dirCountCache.get(r.uri);
+      if (e !== undefined) {
+        e.at = 0;
+        e.state = DC_PENDING;
+        e.count = 0;
+        e.images = 0;
+      }
+    }
+    this.dirCountScanToken++;
+    this.dirCountScanBusy = false;
+    this.rebuildDirCountLabels();
+  }
+
+  /** 重算与 this.rows 同下标的展示数组：新建引用 + 版本号 +1，触发左栏重绘。
+   *  缓存缺失 / 过期显示「…」；空目录「空」；失败「失败」；正常「N 项」。 */
+  private rebuildDirCountLabels(): void {
+    const labels: string[] = [];
+    const now: number = Date.now();
+    for (let i: number = 0; i < this.rows.length; i++) {
+      const r: ImageItem = this.rows[i];
+      if ((r.kind ?? ROW_IMAGE) !== ROW_FOLDER || r.uri.length === 0) {
+        labels.push('');
+        continue;
+      }
+      const e: DirCountEntry | undefined = this.dirCountCache.get(r.uri);
+      labels.push(e === undefined ? DC_LABEL_PENDING
+        : dcEntryLabelOf(e, now, this.dirCountTtlMs));
+    }
+    this.dirCountLabels = labels;
+    this.dirCountVersion = this.dirCountVersion + 1;
+  }
+
+  /** LRU 写入 / 提升最近使用。 */
+  private putDirCountCache(uri: string, e: DirCountEntry): void {
+    this.dirCountCache.set(uri, e);
+    this.dirCountTouch(uri);
+    this.trimDirCountCache();
+  }
+
+  private dirCountTouch(uri: string): void {
+    const i: number = this.dirCountOrder.indexOf(uri);
+    if (i >= 0) {
+      this.dirCountOrder.splice(i, 1);
+    }
+    this.dirCountOrder.push(uri);
+  }
+
+  /** 超出 DC_CACHE_MAX 时按「最久没用」淘汰，淘汰量由 dcEvictCountOf 判定。 */
+  private trimDirCountCache(): void {
+    const drop: number = dcEvictCountOf(this.dirCountOrder.length, DC_CACHE_MAX);
+    for (let k: number = 0; k < drop; k++) {
+      const oldest: string = this.dirCountOrder[0];
+      this.dirCountOrder.splice(0, 1);
+      this.dirCountCache.delete(oldest);
+    }
+  }
+
+  /** 缓存有效期设置：夹界 → 落 preferences 小 key → 重建心跳 → 立即失效重算。
+   *  写盘失败只降级为「本次会话有效」，绝不抛到 UI。 */
+  private setDirCountTtl(ms: number): void {
+    const safe: number = dcTtlClampOf(ms);
+    this.dirCountTtlMs = safe;
+    this.dirCountTtlLabel = dcTtlLabelOf(safe);
+    this.status = dcTtlHintOf(safe);
+    const store: preferences.Preferences | undefined = this.prefs;
+    if (store !== undefined) {
+      try {
+        store.putSync(POS_KEY_DC_TTL, safe);
+        store.flushSync();
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'dirCount: ttl persist failed, keep in-memory setting');
+      }
+    }
+    this.startDirCountScheduler();
+    this.invalidateDirCounts();
+  }
+
+  /** Ctrl+D 诊断层单击循环切换预设档（1 分 / 5 分 / 15 分 / 1 小时）。 */
+  private cycleDirCountTtl(): void {
+    let next: number = DC_TTL_PRESETS[0];
+    for (let i: number = 0; i < DC_TTL_PRESETS.length; i++) {
+      if (DC_TTL_PRESETS[i] === this.dirCountTtlMs) {
+        next = DC_TTL_PRESETS[(i + 1) % DC_TTL_PRESETS.length];
+        break;
+      }
+    }
+    this.setDirCountTtl(next);
   }
 }

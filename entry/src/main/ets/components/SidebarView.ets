@@ -35,6 +35,10 @@ export struct SidebarView {
   @Prop upReturnName: string = '';
   @Prop listCollapsed: boolean = false;
   @Prop listW: number = 280;   // 默认值与 Index 的 LIST_W 同值，仅作初始化兜底
+  /** 第六十四轮：与 Index 的 rows 同下标的目录内容量文案（非目录行为空串）。
+   *  @Prop 数组每次整份换新引用；读它的方法同时读 dirCountVersion 建立 V1 依赖。 */
+  @Prop dirCountLabels: Array<string> = [];
+  @Prop dirCountVersion: number = 0;
   // ---- 共享对象引用（非状态：scroller 供翻页滚动判定，dataSource 供 LazyForEach）----
   scroller: Scroller = new Scroller();
   dataSource: GalleryDataSource = new GalleryDataSource();
@@ -48,6 +52,17 @@ export struct SidebarView {
   };
   onScrollIndex: (first: number, last: number) => void = (first: number, last: number): void => {
   };
+
+  /** 第六十四轮：取某一行的内容量文案。读两个 @Prop 建立 V1 依赖，
+   *  统计落地换数组 / 版本号 +1 时可见行随之重算；非目录行返回空串。 */
+  private dirCountLabelOf(idx: number): string {
+    const v: number = this.dirCountVersion;
+    const labels: Array<string> = this.dirCountLabels;
+    if (v < 0 || idx < 0 || idx >= labels.length) {
+      return '';
+    }
+    return labels[idx];
+  }
 
   build() {
     Column() {
@@ -136,6 +151,7 @@ export struct SidebarView {
                 // 第五十九轮：只对「返回前所在子目录」那一行反色，其余行默认样式不变。
                 inverted: upReturnInvertOf(item.name, this.upReturnName,
                   item.kind ?? ROW_IMAGE, ROW_FOLDER, ROW_OTHER),
+                 countText: this.dirCountLabelOf(idx),
                  collapsed: this.listCollapsed,
                  thumbDisabled: this.restoreReadonly(),
                  onTap: (i: number) => {

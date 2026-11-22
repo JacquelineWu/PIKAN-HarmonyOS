@@ -55,4 +55,16 @@ export class GalleryDataSource implements IDataSource {
       this.listeners[i].onDataReloaded();
     }
   }
+
+  /** 第六十四轮：单个目录行的内容量落地后只刷新这一行。
+   *  与 reload 的区别：不整表重建、不重置滚动位置、不碰 items / rows，
+   *  只发 onDataChange(index) 让 LazyForEach 重跑这一行的 builder。 */
+  notifyRowChanged(index: number): void {
+    if (index < 0 || index >= this.items.length) {
+      return;
+    }
+    for (let i = 0; i < this.listeners.length; i++) {
+      this.listeners[i].onDataChange(index);
+    }
+  }
 }

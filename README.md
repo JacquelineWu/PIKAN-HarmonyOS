@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R63`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R64`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -552,15 +552,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R60（高亮项恒定完整可见：不被滚动条 / 滚动位置 / 尺寸变化裁剪）、
 > R61（所有层级目录项不再显示正方形方格及其占位）、
 > R62（主预览 resize 画质：动态插值 + AA，消波纹与锯齿）、
-> R63（文本预览 scrollbar 恢复显示：内容驱动 @State + 视口高兜底）
-> 见下方八个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R63（文本预览 scrollbar 恢复显示：内容驱动 @State + 视口高兜底）、
+> R64（左栏目录内容量统计与展示：空闲扫描 + TTL 缓存 + 四态显示）
+> 见下方九个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R63`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R63` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R64`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R64` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3876`；R63 新增 4 行 import，行号由 3872 顺延 4 行）
+  （`tests/dirname.test.mjs:3886`；R64 新增 10 行 import，行号由 3876 顺延 10 行）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -1584,6 +1585,146 @@ R57 遗留的 GitHub 同步仍需使用者重新提供 PAT（此前 PAT 为进�
   不是回退到 R37 的原生 `BarState.Auto` —— 后者会重现「长行时看不见」且改变布局；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   本轮**未推送**任何远端。
+
+---
+
+## 第六十四轮：左栏目录内容量统计与展示 —— 空闲扫描 + TTL 缓存 + 四态显示（2026-11-22，R64）
+
+> 需求（逐字）：请在现有项目中实现左侧列表目录的内容量统计与展示：按项目现有口径统计
+> 各目录内容量，并在对应目录项上显示结果。仅在应用空闲时自动触发扫描，避免阻塞界面和
+> 影响正常操作。为统计结果建立缓存以减少重复扫描，支持缓存有效期设置与按设定周期自动
+> 刷新，并在目录或内容变化后使缓存和展示结果与目录实际内容量保持一致。请处理空目录、
+> 扫描失败、缓存缺失或过期时的显示状态，保持现有界面风格与交互行为一致。
+
+### 一、口径定义（按 `openFolder()` 现有口径，不另造概念）
+
+「按项目现有口径统计」= 该目录**下一层**由 `fs.listFile(cand, { recursion: false, listNum: 0 })`
+列出的**可见条目数**，与 `openFolder()` 建 `rows` 用的是同一套过滤：
+
+| 环节 | 现有口径 | R64 是否沿用 |
+| --- | --- | --- |
+| URI 写法 | `dirCandidates(uri)` 逐个尝试，结果用 `mergeExploreNames()` 合并去重 | ✅ 完全沿用 |
+| 过滤 | 空名 / `.` / `..` / `HIDE_DOT_FILES` 隐藏点文件不计 | ✅ `dcVisibleNamesOf()` |
+| 计数 | 图片 / 子目录 / 文本 / 其它各算 **1 项**；恒列的 `..` 行不计 | ✅ 等价于 `rows.length - 1` |
+| 范围 | **不递归、不逐个 `statSync`** | ✅ 后台扫描必须非阻塞 |
+| 附加 | `dcImageCountOf()` 按 `IMAGE_SUFFIXES` 数「可预览图片张数」 | 仅 hilog 诊断，不改展示主口径 |
+
+数字落在目录行**既有的「字节」列位**（`.width(66)` / `.fontSize(10)` /
+`.textAlign(TextAlign.End)` / `.maxLines(1)`），非目录行仍 `fmtBytes(this.bytes)`；
+**不新增列、不改行高、不改三栏布局与点击 / 双击 / hover 行为**，正式界面零新增常显控件。
+TTL 设置入口只放在既有 `Ctrl+D` 诊断层。
+
+### 二、实现
+
+1. **新建纯函数真值源 `common/DirCount.ts`**（零 SDK / 零文件 IO / 零异步 / 零异常 /
+   零全局可变状态；与 `ResumeRefresh` / `TextScrollBar` / `ResizeQuality` 同一条边界）：
+   - 四态 `DC_PENDING / DC_OK / DC_EMPTY / DC_FAIL`，文案 `…` / `N 项` / `空` / `失败`；
+   - TTL 与调度常量：默认 `300000`（5 分）、夹界 `[30000, 86400000]`（30 秒 ~ 24 小时）、
+     心跳 `[1500, 3000]`、空闲阈值 `1500`、单次预算 `2` 个目录、单次超时 `4000`、
+     缓存上限 `256`、单目录计数封顶 `4000`；
+   - 18 个纯函数 + `DirCountEntry` 接口：TTL 夹界 / 过期 / 空闲九条件 / 放行扫描 /
+     可见名过滤 / 计数 / 图片张数 / 四态 / 文案 / 端到端展示 / 是否重扫 / LRU 淘汰量 /
+     TTL 文案，全部决策集中在此，UI 里不散落判断。
+2. **`Index.ets` 接线（唯一碰磁盘的地方）**：
+   - 新增 `POS_KEY_DC_TTL = 'dirCountTtlMs'` 独立 preferences 小 key、
+     `DC_TTL_PRESETS = [60000, 300000, 900000, 3600000]`；读入用 `dcTtlClampOf()` 夹界，
+     写入前只接受合法区间。
+   - 缓存 `Map<string, DirCountEntry>` + `dirCountOrder` LRU（上限 `DC_CACHE_MAX`）；
+     三个展示状态 `@State dirCountLabels` / `dirCountVersion` / `dirCountTtlLabel`。
+   - 空闲闸门：`markUserActive()` 在根鼠标 / 工具动作 / 点行 / 翻页 / 幻灯片 /
+     返回前台等入口打点；`tickDirCount()` 里 `dcIdleOf()`（1.5s 无输入）+
+     `dcAppIdleOf()` 九条件（无 `folderBusy` / `playing` / `mtimeBusy` / `pickerBusy`、
+     页面存活、恢复完成、`bulkIoAllowed(restoreMode)`、当前有目录态、未切后台）全满足才动手。
+   - 非阻塞扫描：每次心跳最多 `DC_SCAN_PER_TICK = 2` 个目录，串行真异步
+     `await fs.listFile`、多 URI 写法逐个尝试、不递归不 `statSync`；4 秒挂起用
+     `setTimeout` watchdog 推进代际号按「失败」落地，**不新增 `Promise.race`**。
+   - 一致性：`onPageShow`、mtime 变化、`applyItems(keepView=true)`、TTL 变更四处调用
+     `invalidateDirCounts()`；迟到结果用 `dirCountScanToken` 代际号丢弃，避免旧数字盖回新清单。
+   - 生命周期：`aboutToAppear()` 起心跳、`aboutToDisappear()` 停心跳并作废在途结果；
+     TTL 变更 / preferences 读回后重建心跳（心跳只排一个 `setInterval`，不碰磁盘）。
+3. **展示链路**：`SidebarView` 新增 `@Prop dirCountLabels` / `@Prop dirCountVersion`，
+   `dirCountLabelOf(idx)` 按行下标取文案下传 `ArchiveRow` 的 `@Prop countText`；
+   `ArchiveRow` 目录行在既有字节列位画内容量（配色复用 `labelColor()`，
+   `upReturnFgOf()` 调用数保持 4 不变）、非目录行 `fmtBytes()` 逐字保留。
+4. **单行落地**：`GalleryData.notifyRowChanged(index)` 走 `onDataChange(index)`，
+   扫描结果只刷对应目录行，不整表 reload、不破坏滚动位置与高亮态。
+5. **TTL 设置**：`Ctrl+D` 诊断层 `内容量 N 分钟` 按钮循环
+   `1 分 / 5 分 / 15 分 / 1 小时`，状态栏给出「目录内容量缓存有效期：… · 空闲时按此周期
+   自动刷新」提示；`dcNeedRescanOf()` 按 TTL 决定是否重扫 —— **周期由有效期设定决定**，
+   心跳只决定多久检查一次。
+
+### 三、验证用例与决策表（由 `tests/dirname.test.mjs` R64 组当场重算，非抄表）
+
+常量 `now = 1000000`；四态 → 展示文案 → 是否需要重扫的端到端结果：
+
+| 场景 | 态 | 标签 | 重扫 |
+| --- | --- | --- | --- |
+| 刚统计 10s / TTL 5min | OK(1) | `12 项` | 否 |
+| 统计 4min59s / TTL 5min | OK(1) | `12 项` | 否 |
+| **统计满 5min / TTL 5min** | OK(1) | **`…`** | **是** |
+| **统计 1min / TTL 30s** | OK(1) | **`…`** | **是** |
+| 空目录刚统计 | EMPTY(2) | `空` | 否 |
+| **空目录已过期** | EMPTY(2) | **`…`** | **是** |
+| 列举失败刚记录 | FAIL(3) | `失败` | 否 |
+| **缓存缺失** | PENDING(0) | **`…`** | **是** |
+
+结论（已写成静态契约断言）：
+
+- 缓存**缺失 / 过期**时成功态与空目录的旧数字都不再当权威展示，统一回到 `…`，
+  等空闲重扫后显示真实 `N 项`；
+- **空目录** `空`、**列举失败** `失败` 各有独立文案；失败态在 TTL 内保留、到期才重试；
+- TTL 越短越早重扫 —— 这就是「按设定周期自动刷新」，心跳恒夹在 `[1.5s, 3s]`，
+  TTL 设到 24 小时也不会让检查节奏越界。
+
+> 上述是**纯函数 + 决策表数值验证**，不是真机像素 / 文件系统 IO 验证；口径见第五节。
+
+### 四、改动范围
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/DirCount.ts` | **新增**：4 态 / 3 文案 / 12 项调度常量 / `DirCountEntry` 接口 / 18 个纯函数，统计口径与全部决策的唯一真值源 |
+| `pages/Index.ets` | import + 文件头 / `ESC_BUILD_TAG` R63→R64；新增 3 个 `@State`、TTL 小 key 与预设、缓存 / 代际号 / 定时器字段、19 个私有方法；`aboutToAppear` / `onPageShow`（保留 R56/R57 双入口在前）/ `aboutToDisappear` / `applyItems` / `pollMtimeOnce` / `doAction` / `readBrowseExtras` / 多处输入打点接线；诊断层新增 TTL 按钮 |
+| `components/ArchiveRow.ets` | 新增 `@Prop countText`；目录行在既有字节列位画内容量，非目录行 `fmtBytes()` 链路逐字保留 |
+| `components/SidebarView.ets` | 新增 2 个 `@Prop` + `dirCountLabelOf(idx)`；`ArchiveRow` 调用新增 `countText` |
+| `model/GalleryData.ets` | 新增 `notifyRowChanged()`：`onDataChange(index)` 单行刷新 |
+| `tests/dirname.test.mjs` | 新增 **31 条** R64 断言 + 8 行决策表 + 真机步骤 R64-A~D；构建标记 R63→R64（26 处）、12 组旧包排除数组首位补 `R63`、2 组 `TEST_SELF` 正则同步、2 处旧标记负检查补 `R63` |
+| `README.md` | 本章 + 抬头 / 章节列表（九个独立章节）/「使用前必读」构建标记与测试行号同步 |
+| `AppScope/app.json5` | **未改动**：`versionCode 7` / `versionName "1.0.7"` |
+
+### 五、验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+| --- | --- |
+| **静态契约 / 纯函数 / 决策表** | `ALL PASS 2044 passed, 0 failed`（R63 基线 2013，+31）；`git diff --check` 通过；决策表由 R64 组当场重算打印；本章真机步骤与测试逐字比对 |
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **`BUILD SUCCESSFUL in 32 s 299 ms`**，日志 **`Finished :entry:default@CompileArkTS... after 11 s 998 ms`**（**CompileArkTS 非 UP-TO-DATE**，首轮即为真编译；日志里 `UP-TO-DATE` 只出现在 MergeProfile / ProcessResource 等资源类任务）；**0 ERROR / 17 WARN**（与 R63 基线一致，全部为既有全屏 `setWindowSystemBarEnable` / `setSpecificSystemBarEnabled` 的 2in1 不可用提示，R64 新增方法段无 WARN） |
+| **产物核验** | 签名 HAP **1,350,282 B**（R63 为 1,277,828 B）/ 未签名 **1,314,839 B**（R63 为 1,241,401 B）/ `modules.abc` **781,524 B**（R63 为 731,100 B）；产物 mtime 13:01 晚于源码 12:35–12:49；三件产物均检出 **`R64=1 / R63=0`**、**`1.0.7=1`**，且 `dirCountLabels`(6) / `dcEntryLabelOf`(2) / `dirCountTtlMs`(1) 进入产物 |
+
+> **编译校验 ≠ 真机验证**；纯函数 / 决策表数值模型也 **≠** 真机文件系统与像素验证。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:7727` R64 组）
+
+> ⚠️ 本组是静态契约 + 纯函数 + 决策表数值验证，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R64-A：装新包后 Ctrl+D 角标必须是 R64；打开含多个子文件夹的目录，
+>    停手约 2 秒后各行「字节」列位依次从「…」变成「N 项」，期间界面不卡、翻页/滚轮照常。
+> ⚠️ 真机步骤 R64-B：确认空目录显示「空」；无权/掉线目录显示「失败」；
+>    Ctrl+D 诊断层点「内容量 N 分钟」循环切 1分/5分/15分/1小时，状态栏给出有效期提示。
+> ⚠️ 真机步骤 R64-C：往子目录里增删文件后返回上层，等一个 TTL 周期（或按有效期设短），
+>    该行数字应与目录实际条目数一致；缓存数字不会停留在旧值，也不会在内容变动后串位。
+> ⚠️ 真机步骤 R64-D：排序 / 往上层 / 选择文件夹 / 悬停缩略图 / 文本预览 scrollbar /
+>    并排预览 / 全屏 / 放大镜 / R61 目录行三栏宽度与行高均与 R63 一致，无新增占位或跳动。
+
+### 七、边界
+
+- 统计是**会话内内存缓存**（`Map` + LRU），只有 TTL 设置本身落 preferences 小 key；
+  重启不复用旧数字，进目录后先 `…` 再空闲补扫，不把过期数字当权威展示；
+- 「按设定周期自动刷新」= TTL 到期 + 空闲心跳共同决定，不是无条件定时全量重扫；
+  任何在途列举 / 幻灯片 / mtime 探测 / picker / 恢复期 / 切后台一律让路；
+- 图片张数只作诊断，不参与展示；不递归、不 `statSync`、单目录封顶 4000 项；
+- 正式界面零新增常显控件：三个工具按钮、三栏、行高、hover 缩略图、点击 / 双击、
+  文本预览 scrollbar、并排预览 / 全屏 / 放大镜、R61 目录行宽度全部零回归；
+- 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
+  **本轮未 push**（R63 本地提交 `0b3416f` 亦未推送）。
 
 ---
 

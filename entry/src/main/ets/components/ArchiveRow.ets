@@ -15,6 +15,8 @@ import { textWidthVp } from '../common/DirName';
 import { upReturnBgOf, upReturnFgOf } from '../common/UpReturn';
 // 第六十一轮：名称右侧符号列按行种类决定内容与宽度的纯函数真值源（零 SDK / 零 IO）。
 import { FG_COL_W, folderGlyphOf, folderGlyphWidthOf } from '../common/FolderGlyph';
+// 第六十四轮：目录行「内容量」四态文案的兜底常量（零 SDK / 零 IO 的真值源）。
+import { DC_LABEL_PENDING } from '../common/DirCount';
 import { HoverGuard } from '../common/HoverGuard';
 import { decodePx, PreviewEntry, TAG, DOMAIN } from '../model/Preview';
 
@@ -226,6 +228,9 @@ export struct ArchiveRow {
    *  不参与 cur / select() / onRowTap / 目录切换，只由 SidebarView 按名字 + 行种类算出。 */
   @Prop inverted: boolean = false;
   @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
+  /** 第六十四轮：目录行内容量展示文案（由 SidebarView 按行下标下传）。
+   *  非目录行恒不读它；缓存缺失 / 过期的「…」也由它带下来，本组件只负责画。 */
+  @Prop countText: string = '';
   /** 只读名单态：快照 uri 的授权已失效，悬停时**绝不**发起 384px 缩略图解码
    *  （ThumbLoader 走 decodePx → await fs.open；虽已异步，死 uri 仍会白等一次
    *  跨进程往返并挤占 IO 队列，故继续在入口短路）。 */
@@ -416,13 +421,27 @@ export struct ArchiveRow {
         .textAlign(TextAlign.Center)
 
       // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
+      // 第六十四轮：目录行在既有「字节」列位改画内容量统计结果 —— 同字号 10 /
+      // 同颜色 / 同宽 66 / 同右对齐，不新增列、不改行高、不改三栏起始位置。
+      // 非目录行（图片 / 文本 / 灰行 / 上层）的 fmtBytes 链路逐字保留，交互零回归。
       if (!this.collapsed) {
-        Text(fmtBytes(this.bytes))
-          .fontSize(10)
-          .fontColor(upReturnFgOf(this.inverted, '#7f88a8'))
-          .width(66)
-          .textAlign(TextAlign.End)
-          .maxLines(1)
+        if (this.kind === ROW_FOLDER) {
+          Text(this.countText.length > 0 ? this.countText : DC_LABEL_PENDING)
+            .fontSize(10)
+            // 复用既有目录行名称配色（含反色 / 选中态），不新增 upReturnFgOf 调用点，
+            // 目录行内容量与目录名同色，反色行仍清晰可读；非目录行仍走原字节列配色。
+            .fontColor(this.labelColor())
+            .width(66)
+            .textAlign(TextAlign.End)
+            .maxLines(1)
+        } else {
+          Text(fmtBytes(this.bytes))
+            .fontSize(10)
+            .fontColor(upReturnFgOf(this.inverted, '#7f88a8'))
+            .width(66)
+            .textAlign(TextAlign.End)
+            .maxLines(1)
+        }
         Text(this.mtime > 0 ? fmtDate(this.mtime) : '--')
           .fontSize(10)
           .fontColor(upReturnFgOf(this.inverted, '#6b7385'))
