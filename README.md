@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R62`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R63`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -551,15 +551,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R58（视窗缩放护栏：右侧预览图不再被过度缩小）、R59（往上层后子目录反色 / 左栏名称紧贴最左边缘）、
 > R60（高亮项恒定完整可见：不被滚动条 / 滚动位置 / 尺寸变化裁剪）、
 > R61（所有层级目录项不再显示正方形方格及其占位）、
-> R62（主预览 resize 画质：动态插值 + AA，消波纹与锯齿）
-> 见下方七个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R62（主预览 resize 画质：动态插值 + AA，消波纹与锯齿）、
+> R63（文本预览 scrollbar 恢复显示：内容驱动 @State + 视口高兜底）
+> 见下方八个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R62`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R62` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R63`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R63` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3872`；R62 新增 4 行 import 与画质契约改写，行号由 3862 顺延 10 行）
+  （`tests/dirname.test.mjs:3876`；R63 新增 4 行 import，行号由 3872 顺延 4 行）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -1447,7 +1448,142 @@ R57 遗留的 GitHub 同步仍需使用者重新提供 PAT（此前 PAT 为进�
 - 放大场景仍用 `High`(Cubic)，与第十七轮放大镜口径一致；Cubic 放大的轻微锐化过冲
   在新旧策略中**完全相同**（表中 2.0× 细线 0.1875），属既有行为、非本轮回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
-  **本轮未推送**任何远端。
+  本轮未推送任何远端（用户后续另行要求「推送gitee和github」时，R61+R62 已同步）。
+
+---
+
+## 第六十三轮：文本预览 scrollbar 恢复显示（2026-11-22，R63）
+
+> 需求（逐字）：请修复文本档案预览中 scrollbar 消失的问题，恢复原有的 scrollbar
+> 显示和滚动行为；确保内容超出预览区域时 scrollbar 可见且可正常使用，同时保持
+> 文本档案预览的内容、布局和其他交互不变。
+
+### 一、问题定位（按渲染链与 V1 状态依赖，不凭截图猜）
+
+现状是「视口右缘自绘纵向滚动条」，它是 R37 → R52 → R53 三步演化出来的：
+
+| 轮次 | 形态 | 为什么改 |
+| --- | --- | --- |
+| R37 初版 | 内层 `List` + 外层横向 `Scroll` 双 `BarState.Auto`（平台原生条） | 初始实现 |
+| R51 | 原生条设常显 | 想让条一直可见 |
+| R52 | 内层原生条改 `BarState.Off`，`Stack(TopEnd)` 视口右缘**自绘**轨道 + 滑块 | 原生条画在**全宽 `List` 右缘**（x = `textContentW`），长行把横向 `Scroll` 撑宽后它永远在可视区外 |
+| R53 | 自绘条真机不显示 → 修 `if` 条件为「全直读 @State」 | `if` 里藏方法调用（`textVBarThumbH()`）时 V1 依赖收集认不出来 |
+
+**本轮的根因（R53 修法里遗留的两个洞）**：
+
+| 环节 | 现状 | 后果 |
+| --- | --- | --- |
+| `if` 条件 | `this.textVpH > 0 && this.textLines.length > Math.round(this.textVpH / TEXT_ROW_H_VP)` | `textLines` 是**刻意不加 `@State` 的普通字段**（十几万行进状态系统会逐层建代理），V1 依赖收集只追踪 `@State` 的 `textVpH`；文本解码落地填充 `textLines` **不会触发 `if` 重评** |
+| `textVpH` 回填 | 只靠 `Scroll.onAreaChange` 的 `Number(n.height)`，外加 `onScrollIndex` 兜底 | 文本态从图片态切过来时**预览区尺寸不变**，`onAreaChange` 可能不回调；`textVpH` 保持 0 → `if` 恒 `false` → **自绘条永久不显示** |
+| 叠加 | 两个洞同时存在 | 内容超出一屏也看不到条；`onScrollIndex` 兜底同样依赖事件回调，真机不保证触发 |
+
+> 注意：不能简单把内层 `List` 改回 `BarState.Auto`。那会重现 R52 已定位的「原生条
+> 在全宽 List 右缘、长行横向滚出视口后看不见」，且原生条占位会改变布局（违反
+> 「保持布局不变」）。正解是保留自绘条结构、修好它的显示判定。
+
+### 二、实现
+
+1. **新建纯函数真值源 `common/TextScrollBar.ts`**（零 SDK / 零文件 IO / 零异步 /
+   零异常 / 零全局可变状态）：
+   - `textViewportHOf(areaH, canvasH, chromeH)`：`onAreaChange` 实测面积高优先；
+     未回填（0 / NaN / 负 / 异常大）时用「画布高 − 固定栏高 48vp」保守兜底；
+     连画布高都无效返回 0。恒返回有限非负数，绝不把脏值传给几何计算。
+   - `textVisibleRowsOf(viewportH, rowH)`：视口行数（四舍五入、恒 ≥ 1），
+     覆盖整数 / 非整数视口高与脏值。
+   - `textBarVisibleOf(totalRows, viewportH, rowH)`：**内容行数严格超过视口行数**
+     才显示；短文件（未超一屏）与脏值恒不显示。
+   - `textBarVisibleSafeOf(...)`：端到端判定，把「尺寸事件没来」一并算进去。
+2. **`Index.ets` 接线**（唯一改动在「该不该显示」，几何 / 滑块 / 拖动一字不动）：
+   - 新增 `@State textBarShow: boolean = false`，是 `if` **直读的唯一状态**；
+     显示判定不再把非 `@State` 的 `textLines.length` 塞进条件。
+   - 新增 `refreshTextBar()`：读 `textLines.length`（普通字段）与 `textVpH`，
+     用 `textViewportHOf` 拿有效视口高、`textBarVisibleSafeOf` 拿结果，写进
+     `@State textBarShow`；尺寸未回填时同时把兜底视口高写回 `textVpH`，让**既有
+     滑块几何**（`textVBarThumbH/TopPos/DragTo`）有数可算。
+   - 两个主动调用时机：**解码落地 `applyTextDecoded`**（内容驱动，不等尺寸事件）、
+     **`onAreaChange` 实测到达**（自愈纠正兜底估计）；`closeTextMode()` 清门控。
+   - `Stack(TopEnd)` 里 `if (this.textVpH > 0 && this.textLines.length > …)`
+     → `if (this.textBarShow)`。
+3. **零回归保证**：`.scrollBar(BarState.Off)`、横向 `Scroll` 的 `BarState.Auto`、
+   轨道 10 宽 / 滑块 6 宽亮色 / 最小高 32、`PanGesture`、`HitTestMode.Transparent`、
+   `onScrollIndex`（含 `textVpH` 兜底）、`onAreaChange`、`onMouse` 选段、滚轮
+   `scrollBy`、Ctrl+C 复制、行高亮 / 工具条、横向滚动全部逐字未动。内容、布局、
+   其他交互不变。
+
+### 三、验证用例与结果（尺寸回填 / 内容行数 × 老链路 vs 新链路）
+
+常量：行高 `H=20vp`（`TEXT_ROW_H_VP`）、画布高 `C=600vp`、固定栏 `CH=48vp`、
+兜底视口高 `C−CH=552vp`（≈28 行）。老链路 = R53 的 `area>0 && total>round(area/H)`；
+新链路 = `textBarVisibleSafeOf`。数值由 `tests/dirname.test.mjs` R63 组当场重算打印。
+
+| 场景 | 视口高 | 视口行数 | 老链路 | 新链路 |
+| --- | --- | --- | --- | --- |
+| 实测 600 / 长文件 1000 行 | 600 | 30 | true | true |
+| 实测 320 / 长文件 1000 行 | 320 | 16 | true | true |
+| **尺寸未回填 0 / 长文件 1000 行** | **552（兜底）** | 28 | **false（丢条）** | **true（修复）** |
+| **尺寸未回填 NaN / 长文件 1000 行** | **552（兜底）** | 28 | **false（丢条）** | **true（修复）** |
+| 尺寸未回填 0 / 刚好一屏 27 行 | 552 | 28 | false | false |
+| 尺寸未回填 0 / 短文件 5 行 | 552 | 28 | false | false |
+| 实测 600 / 刚好一屏 30 行 | 600 | 30 | false | false |
+| 实测 600 / 一屏+1 31 行 | 600 | 30 | true | true |
+
+另：`textVisibleRowsOf` 整数 / 非整数视口高（600→30、610→31、400→20、41→2、
+20→1、1→1、0→1、脏值→1）全部符合「四舍五入且恒 ≥ 1」。
+
+结论（已写成静态契约断言）：
+
+- **尺寸事件未回填是全链路最容易丢条的路径**，老链路无论长短文件都判 `false`；
+  新链路长文件正确判 `true`（条出现）、短文件仍判 `false`（短文件不该有条）；
+- `onAreaChange` 实测值到达时，新老判定**完全一致** —— 正常路径零回归；
+- 兜底只在 `textVpH<=0` 生效，实测值随后覆盖，`textVpH` 是 `@State`，滑块几何
+  自动自愈重算；
+- 全脏（画布高也为 0 / 30）时保守返回 0、不显示条，绝不画错几何。
+
+> 上述是**纯函数 + 视口/行数数值验证**，不是真机像素测量；口径见第五节。
+
+### 四、改动范围
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/TextScrollBar.ts` | **新增**：2 常量 + 4 纯函数，显示判定与视口高兜底的唯一真值源 |
+| `pages/Index.ets` | import 3 符号；新增 `@State textBarShow` 与 `refreshTextBar()`；`if` 改直读 `@State`；`applyTextDecoded` / `onAreaChange` 两处主动算、`closeTextMode` 清门控；文件头 / `ESC_BUILD_TAG` R62→R63；R53 遗留注释订正 |
+| `tests/dirname.test.mjs` | 新增 **12 条** R63 断言（常量 / 纯函数真值 4 / 零依赖 / 源码接线 3 / 零回归 3）+ 8 行数值结果表 + 真机步骤 R63-A~D；批量升级构建标记 R62→R63、12 组旧包排除数组首位补 `R62`、2 组旧标记负检查滚动；R53「`if` 全直读」断言升级为 R63「只直读一个 `@State` 门控」 |
+| `components/` / `model/` | **未改动** |
+| `README.md` | 本章 + 抬头 / 章节列表（八个独立章节）/「使用前必读」构建标记与测试行号同步 |
+
+### 五、验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+| --- | --- |
+| **静态契约 / 纯函数 / 数值模型** | `ALL PASS 2013 passed, 0 failed`（R62 基线 2001，+12）；`git diff --check` 通过；本章真机步骤与测试逐字比对缺失 0；数值结果表由 R63 组当场重算打印 |
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **`BUILD SUCCESSFUL in 13 s 464 ms`**，日志 **`Finished :entry:default@CompileArkTS... after 7 s 921 ms`**（**CompileArkTS 非 UP-TO-DATE**，首轮即为真编译；日志里 `UP-TO-DATE` 只出现在 MergeProfile / ProcessResource 等资源类任务）；**0 ERROR / 17 WARN**（与 R62 基线一致，全部落在未改动区域） |
+| **产物核验** | 签名 HAP **1,277,828 B**（R62 为 1,269,189 B）/ 未签名 **1,241,401 B** / `modules.abc` **731,100 B**（R62 为 727,452 B）；产物 mtime 09:43 晚于源码 09:38–09:43；三件产物均检出 **`R63=1 / R62=0`**、**`1.0.7=1`**，且 `textBarShow`(4) / `refreshTextBar`(2) / `textViewportHOf`(2) / `textBarVisibleSafeOf`(2) / `textBarVisibleOf`(2) / `TSB_CHROME_H_VP`(1) 进入产物 |
+
+> **编译校验 ≠ 真机验证**；纯函数 / 数值模型也 **≠** 真机像素验证。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:7476` R63 组）
+
+> ⚠️ 本组是静态契约 + 纯函数 + 视口/行数数值验证，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R63-A：打开行数远超一屏的长 .log/.txt → 右侧视口右缘应出现纵向滚动条
+>      （亮色滑块 + 深色轨道），Ctrl+D 角标必须是 R63；这是本轮修复的核心现象。
+> ⚠️ 真机步骤 R63-B：从图片态点进文本态、反复开关文本预览、切换不同文本文件，
+>      每次都应立刻出现滚动条（不再依赖窗口尺寸变化才触发）；短文件（不满一屏）仍不应有条。
+> ⚠️ 真机步骤 R63-C：滚轮滚动正文、拖滑块跳转、点击轨道区域选段、Ctrl+C 复制、
+>      横向滚长行、行高亮 / 复制 / 清除工具条均与 R62 一致；滑块随滚动联动、无跳动。
+> ⚠️ 真机步骤 R63-D：拖动窗口尺寸改变预览区高度后滑块高 / 位置自适应；
+>      并排预览 / 全屏 / 放大镜 / 目录切换 / 翻页 / 图片预览画质均与 R62 一致，无回归。
+
+### 七、边界
+
+- 只改「自绘纵向滚动条该不该显示」：新增一个 `@State` 门控与内容驱动的判定；
+  原生条 `Off`、横向条 `Auto`、轨道 / 滑块几何、`PanGesture`、`onScrollIndex`、
+  `onAreaChange`、`onMouse`、滚轮、选段、复制、行渲染全部逐字未动；内容、布局、
+  其他交互不变；
+- 「恢复原有的 scrollbar」指恢复**自绘条**（R52 起的既有形态）的显示与滚动行为，
+  不是回退到 R37 的原生 `BarState.Auto` —— 后者会重现「长行时看不见」且改变布局；
+- 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
+  本轮**未推送**任何远端。
 
 ---
 

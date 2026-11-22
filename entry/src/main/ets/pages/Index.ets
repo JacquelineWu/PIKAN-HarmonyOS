@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R62 主线（R39 起组件化）· 主预览 resize 画质（动态插值 + AA）
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R63 主线（R39 起组件化）· 文本预览 scrollbar 恢复显示
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -163,6 +163,10 @@ import { ImageItem, GalleryDataSource } from '../model/GalleryData';
 // 第六十二轮：主预览 resize 画质的纯函数真值源（零 SDK / 零 IO）。
 import { RQ_MIPMAP, RQ_LOW, RQ_NEAR_ONE_TOL, RQ_MIPMAP_FLOOR,
   rqScaleOf, rqInterpolationOf, rqAntialiasOf } from '../common/ResizeQuality';
+// 第六十三轮：文本预览纵向滚动条「显示判定」的纯函数真值源（零 SDK / 零 IO）。
+// 内容驱动写 @State，UI 的 if 只直读它；不再把非 @State 的 textLines 塞进条件。
+import { TSB_CHROME_H_VP, textViewportHOf,
+  textBarVisibleSafeOf } from '../common/TextScrollBar';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -172,7 +176,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R62';
+const ESC_BUILD_TAG: string = 'R63';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1493,6 +1497,11 @@ struct Index {
   @State textVpH: number = 0;
   @State textFirstRow: number = 0;
   @State textLastRow: number = 0;
+  /** 第六十三轮：自绘纵向滚动条是否显示的唯一 @State 门控。R53 的 if 条件里塞了
+   *  非 @State 的 textLines.length，V1 依赖收集不追踪；textVpH 又只靠 onAreaChange
+   *  尺寸事件回填，文本态从图片态切来时尺寸不变 → 事件不回调 → 条永久不显示。
+   *  现在由 refreshTextBar() 在内容落地 / 尺寸到达时主动算好写入，if 只直读这一个状态。 */
+  @State textBarShow: boolean = false;
   private textVBarDragTop: number = 0;
   private textLines: Array<string> = [];
   private textBlockStarts: Array<boolean> = [];
@@ -9034,6 +9043,7 @@ struct Index {
     this.textLines = [];
     this.textBlockStarts = [];
     this.textSource.reload([]);
+    this.textBarShow = false;   // 第六十三轮：收掉文本态时同步清门控，开新文件重新算
     this.textName = '';
     this.textStatusText = '';
     this.textTruncated = false;
@@ -9062,6 +9072,7 @@ struct Index {
     this.textHScroller.scrollTo({ xOffset: 0, yOffset: 0 });
     this.textFirstRow = 0;
     this.textLastRow = 0;
+    this.refreshTextBar();   // 第六十三轮：内容落地即算一次，条不再等尺寸事件
     hilog.info(DOMAIN, TAG,
       'text open name=%{public}s lang=%{public}d enc=%{public}s lines=%{public}d trunc=%{public}d',
       name, lang, encLabel, split.lines.length, truncated ? 1 : 0);
@@ -9288,6 +9299,23 @@ struct Index {
     this.textSelDragging = false;  // R54：松键判定一并复位，防半路丢 Release 后误扩展
   }
 
+  /** 第六十三轮：内容驱动的滚动条显示判定（不依赖 onAreaChange 尺寸事件）。
+   *  在「解码落地」与「视口尺寸到达」两个时机主动算一次写进 @State textBarShow；
+   *  尺寸事件未回填时用画布高减固定栏兜底，并写回 textVpH 让既有滑块几何有数可算，
+   *  onAreaChange 实测值随后到达会自愈纠正。几何 / 滑块 / 拖动 / 滚轮全部逐字未动。 */
+  private refreshTextBar(): void {
+    const rows: number = this.textLines.length;
+    const vpH: number = textViewportHOf(this.textVpH, this.canvasH, TSB_CHROME_H_VP);
+    if (vpH > 0 && !(this.textVpH > 0)) {
+      this.textVpH = vpH;
+    }
+    const show: boolean = textBarVisibleSafeOf(rows, this.textVpH,
+      this.canvasH, TEXT_ROW_H_VP, TSB_CHROME_H_VP);
+    if (show !== this.textBarShow) {
+      this.textBarShow = show;
+    }
+  }
+
   /** 第五十二轮：自绘纵向滚动条的几何与拖动。 */
   private textTotalRows(): number {
     return this.textLines.length;
@@ -9478,14 +9506,18 @@ struct Index {
         .align(Alignment.TopStart)
         .onAreaChange((_o: Area, n: Area) => {
           this.textVpH = Number(n.height);
+          this.refreshTextBar();   // 第六十三轮：实测尺寸到达后自愈纠正兜底估计
           hilog.info(DOMAIN, TAG, 'text area h=%{public}d rows=%{public}d',
             Math.round(this.textVpH), this.textLines.length);
         })
 
         // 第五十三轮：R52 真机仍不见条 —— if 条件里藏方法调用（textVBarThumbH()）
         // 的话，V1 的 if 分支依赖收集可能认不出来，首评 textVpH=0 为 false 之后
-        // 就再也不重评。条件改为**全直读 @State**：视口高已知且总行高超过一屏。
-        if (this.textVpH > 0 && this.textLines.length > Math.round(this.textVpH / TEXT_ROW_H_VP)) {
+        // 就再也不重评。第六十三轮进一步订正：R53 虽号称「全直读 @State」，条件里
+        // 仍塞了非 @State 的 textLines.length，且 textVpH 只靠 onAreaChange 尺寸事件；
+        // 文本态从图片态切来时尺寸不变 → 事件不回调 → 条永久不显示。现在 if 只直读
+        // 唯一 @State textBarShow，由 refreshTextBar() 内容驱动算好写入。
+        if (this.textBarShow) {
           // 轨道（10 宽、深色底）+ 滑块（6 宽、亮色、最小 32 高）—— R52 的 4 宽
           // 细条在深底色上太不显眼；Transparent 让点击落到行上（选段不受挡）。
           Column() {
