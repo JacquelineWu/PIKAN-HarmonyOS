@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R64 主线（R39 起组件化）· 左栏目录内容量统计与展示
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R65 主线（R39 起组件化）· FITS/XISF 天文图像预览
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -184,7 +184,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R64';
+const ESC_BUILD_TAG: string = 'R65';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -577,8 +577,12 @@ interface DirRowsCacheEntry {
 }
 const DIR_ROWS_CACHE_MAX: number = 12;
 
-/** 受支持的图片后缀 */
-const IMAGE_SUFFIXES: Array<string> = ['.heic', '.heif', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'];
+/** 受支持的图片后缀。第六十五轮追加 FITS / XISF 天文图像后缀 —— 系统 codec 不认，
+ *  由 model/Preview.ets 的 decodeAstroPx 自解析；后缀进本表即自动获得左栏列出 /
+ *  进 items 翻页序列 / hover 缩略图 / 文件选择器 / R64 内容量计数的全部既有行为。
+ *  与 common/AstroImage.ts 的 AI_FITS_SUFFIXES + AI_XISF_SUFFIXES 逐项一致（R65 静态契约校验）。 */
+const IMAGE_SUFFIXES: Array<string> = ['.heic', '.heif', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif',
+  '.fits', '.fit', '.fts', '.xisf'];
 
 /** 文件名是否是可预览图片（大小写不敏感）。 */
 function isImageName(name: string): boolean {

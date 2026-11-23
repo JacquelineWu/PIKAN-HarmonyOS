@@ -13,9 +13,17 @@ import fs from '@ohos.file.fs';
 import image from '@ohos.multimedia.image';
 import hilog from '@ohos.hilog';
 import colorSpaceManager from '@ohos.graphics.colorSpaceManager';
+import zlib from '@ohos.zlib';
 import { ExifTransform, Size2, exifTransformOf, exifSizeOf } from '../common/ViewPlan';
 import { RawFit, rawFitOf, rawSingleAllowed, rawReadComplete,
   rawIoTimeoutMs, rawDenyAfterFailure } from '../common/RawCache';
+// 第六十五轮：FITS / XISF 天文图像预览的纯函数真值源（零 SDK / 零 IO）。
+// 系统 codec 不认这两种格式：decodePx 判到天文后缀即分流到 decodeAstroPx，
+// 由本模块（唯一碰 SDK 的地方）真异步读字节 → 纯函数解析 / 拉伸 → createPixelMap。
+import { AI_OK, AI_COMP_ZLIB, AI_STRETCH_GAMMA, AI_OUTPUT_BGRA,
+  AstroHeader, AstroBounds, AstroSize, aiIsAstroName, aiHeaderOf,
+  aiFailHintOf, aiUnshuffleOf, aiBoundsOf, aiDisplaySizeOf, aiRgbaOf,
+  aiPixelsLongEnough } from '../common/AstroImage';
 
 // hilog 域（原 pages/Index.ets 顶部同值迁入；Index.ets 反向 import 本定义）。
 export const TAG = 'HeicViewer';
@@ -336,7 +344,121 @@ export const rawStore: RawStore = new RawStore();
  *  功能绝不受缓存影响。EXIF / HDR / ICC 三件事在两种 ImageSource 上完全一致。
  *  2026-11-16 第二十七轮 ⑤：fd 兜底也从 fs.openSync 改为 await fs.open，
  *  NAS 死路径上这次跨进程 open 同样不再占住 UI 主线程。 */
+/** 第六十五轮：天文图像专用真异步整文件读取。
+ *  刻意不复用 rawStore.ensure —— 它按 RAW_SINGLE_MAX_BYTES=64MB 夹死单文件且会
+ *  把大图塞进普通图片 LRU；FITS 动辄上百 MB。这里全程 await 现成的异步 IO，
+ *  不自行构造 Promise、不引入竞速等待、不做同步 IO；一次性读满，读不满即明确失败。 */
+const ASTRO_MAX_BYTES: number = 512 * 1024 * 1024; // 512MB 防 OOM 上限
+async function readAstroBytes(uri: string): Promise<ArrayBuffer | undefined> {
+  let file: fs.File | undefined = undefined;
+  try {
+    const st: fs.Stat = await fs.stat(uri);
+    const size: number = st.size;
+    if (size <= 0 || size > ASTRO_MAX_BYTES) {
+      return undefined;
+    }
+    file = await fs.open(uri, fs.OpenMode.READ_ONLY);
+    const buf: ArrayBuffer = new ArrayBuffer(size);
+    // 与 openTextFile / RawStore.read 同口径：两参重载，刚 open 文件指针在 0 一次读满。
+    const got: number = await fs.read(file.fd, buf);
+    await fs.close(file.fd);
+    file = undefined;
+    if (got !== size) {
+      return undefined;
+    }
+    return buf;
+  } catch (e) {
+    hilog.warn(DOMAIN, TAG, 'astro read FAIL uri=%{public}s err=%{public}s',
+      uri, JSON.stringify(e));
+    if (file !== undefined) {
+      try { await fs.close(file.fd); } catch (e2) { /* 关不掉不影响失败态 */ }
+    }
+    return undefined;
+  }
+}
+
+/** 从原始字节里切出「已解压 + 已反 shuffle」的纯像素段。
+ *  无压缩直接切片；zlib（XISF 压缩块）用 SDK 内存级 uncompress，失败返回 undefined。 */
+async function astroPixelsOf(raw: ArrayBuffer, head: AstroHeader): Promise<Uint8Array | undefined> {
+  const off: number = head.dataOffset;
+  const len: number = head.dataLength;
+  if (off < 0 || len <= 0 || off + len > raw.byteLength) {
+    return undefined;
+  }
+  if (head.compressed === AI_COMP_ZLIB) {
+    try {
+      const src: ArrayBuffer = raw.slice(off, off + len);
+      const dest: ArrayBuffer = new ArrayBuffer(head.uncompressedSize);
+      const zip: zlib.Zip = zlib.createZipSync();
+      await zip.uncompress(dest, src);
+      const decoded: Uint8Array = new Uint8Array(dest);
+      if (head.shuffleItemSize > 1) {
+        return aiUnshuffleOf(decoded, head.shuffleItemSize);
+      }
+      return decoded;
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'astro zlib uncompress FAIL err=%{public}s', JSON.stringify(e));
+      return undefined;
+    }
+  }
+  const seg: Uint8Array = new Uint8Array(raw, off, len);
+  if (head.shuffleItemSize > 1) {
+    return aiUnshuffleOf(seg, head.shuffleItemSize);
+  }
+  return seg;
+}
+
+/** 第六十五轮：FITS / XISF 自解析解码。系统 codec 不认这两种格式，
+ *  由 AstroImage.ts 纯函数完成头解析 / 样本解码 / 拉伸，本函数只碰 SDK IO 与 PixelMap。
+ *  全程真异步、不阻塞主线程；任何环节失败都 hilog 明确原因并返回 undefined（既有失败态）。 */
+async function decodeAstroPx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
+  const raw: ArrayBuffer | undefined = await readAstroBytes(uri);
+  if (raw === undefined) {
+    hilog.warn(DOMAIN, TAG, 'astro decode: read bytes FAIL uri=%{public}s', uri);
+    return undefined;
+  }
+  const bytes: Uint8Array = new Uint8Array(raw);
+  const head: AstroHeader = aiHeaderOf(uri, bytes);
+  if (head.ok !== AI_OK) {
+    hilog.warn(DOMAIN, TAG, 'astro header FAIL uri=%{public}s code=%{public}d hint=%{public}s',
+      uri, head.ok, aiFailHintOf(head.ok, uri));
+    return undefined;
+  }
+  const pixels: Uint8Array | undefined = await astroPixelsOf(raw, head);
+  if (pixels === undefined || !aiPixelsLongEnough(pixels, head)) {
+    hilog.warn(DOMAIN, TAG, 'astro pixels FAIL uri=%{public}s', uri);
+    return undefined;
+  }
+  try {
+    const bounds: AstroBounds = aiBoundsOf(pixels, head);
+    const sz: AstroSize = aiDisplaySizeOf(head.width, head.height, edge);
+    const rgba: Uint8Array = aiRgbaOf(pixels, head, sz.w, sz.h,
+      bounds, AI_STRETCH_GAMMA, AI_OUTPUT_BGRA);
+    const opts: image.InitializationOptions = {
+      size: { height: sz.h, width: sz.w },
+      pixelFormat: image.PixelMapFormat.RGBA_8888,
+      alphaType: image.AlphaType.OPAQUE
+    };
+    // rgba 由 aiRgbaOf 用 new Uint8Array(sz.w*sz.h*4) 生成，.buffer 长度正好，直接交给 codec。
+    const px: image.PixelMap = await image.createPixelMap(rgba.buffer, opts);
+    const entry: PreviewEntry = {
+      uri: uri, px: px, bytes: sz.w * sz.h * 4,
+      w: sz.w, h: sz.h, edge: edge,
+      colorSpace: 0, isHdr: false, exifDegrees: 0
+    };
+    return entry;
+  } catch (e) {
+    hilog.warn(DOMAIN, TAG, 'astro createPixelMap FAIL uri=%{public}s err=%{public}s',
+      uri, JSON.stringify(e));
+    return undefined;
+  }
+}
+
 export async function decodePx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
+  // 第六十五轮：FITS / XISF 走自解析链（系统 codec 不认），其余格式逻辑逐字不变。
+  if (aiIsAstroName(uri)) {
+    return decodeAstroPx(uri, edge);
+  }
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
   try {

@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R64`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R65`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -553,15 +553,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R61（所有层级目录项不再显示正方形方格及其占位）、
 > R62（主预览 resize 画质：动态插值 + AA，消波纹与锯齿）、
 > R63（文本预览 scrollbar 恢复显示：内容驱动 @State + 视口高兜底）、
-> R64（左栏目录内容量统计与展示：空闲扫描 + TTL 缓存 + 四态显示）
-> 见下方九个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R64（左栏目录内容量统计与展示：空闲扫描 + TTL 缓存 + 四态显示）、
+> R65（FITS / XISF 天文图像预览：自解析头 + 灰度拉伸 + 真异步读字节）
+> 见下方十个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R64`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R64` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R65`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R65` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3886`；R64 新增 10 行 import，行号由 3876 顺延 10 行）
+  （`tests/dirname.test.mjs:3904`；R65 新增 18 行 import，行号由 3886 顺延 18 行）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -1725,6 +1726,133 @@ TTL 设置入口只放在既有 `Ctrl+D` 诊断层。
   文本预览 scrollbar、并排预览 / 全屏 / 放大镜、R61 目录行宽度全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 本地提交 `0b3416f` 亦未推送）。
+
+---
+
+## 第六十五轮：FITS / XISF 天文图像预览 —— 自解析头 + 灰度拉伸 + 真异步读字节（2026-11-23，R65）
+
+> 需求（逐字）：支持预览fits，xisf格式
+
+### 一、为什么必须自解析（按真实源码判读，不凭缓存推断）
+
+`decodePx()` 是主预览 / 预载 / 悬停缩略图共用的**唯一解码入口**，现状是
+`image.createImageSource(ArrayBuffer)` 交给系统 codec。HarmonyOS 26 的 Image Kit
+**不认 FITS / XISF** —— 它不是 JPEG/PNG/HEIC 这类编码流，而是天文仪器 / PixInsight 的
+**原始像素容器 + 结构化头**。因此不能只把后缀加进白名单就了事：加了仍会解码失败白屏。
+本轮按「纯函数真值源 + 唯一碰 SDK 的解码层」分层自解析：
+
+| 层 | 文件 | 职责 |
+| --- | --- | --- |
+| 纯函数真值源 | `common/AstroImage.ts` | 零 SDK / 零 IO / 零 await / 零 throw / 零全局可变状态；格式识别、FITS 卡片头、XISF XML 头、手写 IEEE754 字节解码、min-max 拉伸、RGBA 组装全在这里，能被 Node 用构造字节回归 |
+| SDK 解码层 | `model/Preview.ets` | 唯一碰 `@ohos.file.fs` / `@ohos.zlib` / `image.createPixelMap` 的地方；`decodePx` 分流 → 真异步读整文件字节 → 纯函数解析 → 生成 PixelMap |
+| 接线 | `pages/Index.ets` | `IMAGE_SUFFIXES` 追加 4 个天文后缀；`ESC_BUILD_TAG` R64→R65；文件头 |
+
+**格式口径**（按公开规范 + 实测实现，不臆造）：
+
+| | FITS（`SIMPLE=T` 主 HDU） | XISF 1.0（单文件 `XISF0100`） |
+| --- | --- | --- |
+| 头 | 2880 字节块，每块 36 张 80 字节 ASCII 卡片；`SIMPLE/BITPIX/NAXIS/NAXISn/BSCALE/BZERO/END` | 8B 签名 + u32 LE 头长 + 4B 保留 + XML 头；`<Image geometry="W:H:C" sampleFormat="…" pixelStorage="…" location="attachment:pos:size" compression="…"/>` |
+| 数据位置 | `END` 卡片后补齐到 2880 边界 | `attachment:position:size`，position 从文件开头算 |
+| 字节序 | **大端** | **小端**（`byteOrder="big"` 才大端） |
+| 样本 | BITPIX 8/16/32/-32/-64 → U8/I16/I32/F32/F64 | UInt8/16/32、Int8/16/32、Float32/64 |
+| 物理值 | `BZERO + BSCALE * raw` | 原样本值 |
+| 通道 | 2D 灰度；3D 且第三维 3 → RGB 平面（planar） | `Gray` 1 通道 / `RGB` 3 通道；`Normal` 交错 / `Planar` 分平面 |
+
+### 二、实现
+
+1. **`IMAGE_SUFFIXES` 追加 `.fits/.fit/.fts/.xisf`**：后缀进本表即自动获得左栏列出、
+   进 `items` 翻页序列、hover 缩略图、文件选择器「图片」下拉、R64 内容量计数的全部既有行为
+   —— 与 `AstroImage.ts` 的 `AI_FITS_SUFFIXES + AI_XISF_SUFFIXES` 逐项一致（R65 静态契约校验）。
+   正式界面**零新增常显控件**，三按钮 / 三栏 / 行高逐字不变。
+2. **`decodePx()` 开头分流**：`aiIsAstroName(uri)` → `decodeAstroPx(uri, edge)`；
+   其余格式的系统 codec 两行 `createImageSource` 逐字保留、逻辑一行未动。
+3. **真异步读字节**：天文 FITS 动辄上百 MB，刻意**不复用** `rawStore.ensure()`
+   （它按 `RAW_SINGLE_MAX_BYTES=64MB` 夹死单文件且会污染普通图片 LRU）。
+   新增 `readAstroBytes()` 全 `await fs.stat/open/read/close`，`ASTRO_MAX_BYTES=512MB` 防 OOM，
+   **零 `new Promise` / 零竞速等待 / 零同步 IO**（工程全源码 `new Promise` 仍恰 2 处），
+   读不满即明确失败、绝不半张图。
+4. **解析 + 拉伸**：`aiHeaderOf()` 出 `AstroHeader` 决策（含 10 种明确失败码 + 中文原因文案，
+   经 hilog 可见，绝不静默白屏）；`aiBoundsOf()` 最多采样 65536 像素估 min/max；
+   `aiStretchByteOf()` 归一化后 `pow(t, 0.5)` 提亮暗部（天文线性数据动态范围极大，
+   直接除以满量程几乎全黑）；`aiDisplaySizeOf()` 按 `edge` 直接生成目标尺寸、长边夹 8192，
+   **天然防 OOM**（不先生成 8K 全尺寸 RGBA 再缩）。物理值带 `BZERO/BSCALE`，
+   支持 planar / normal 两种排布，灰度三通道复用同一值。
+5. **压缩 XISF**：`compression="zlib"` / `zlib+sh` 用 SDK `@ohos.zlib` 的内存级
+   `createZipSync().uncompress(dest, src)`（API 12+，ArrayBuffer→ArrayBuffer），
+   解压后 `aiUnshuffleOf()` 纯函数反 `+sh` 字节重排；`lz4/lz4hc/zstd`、`inline:base64`、
+   FITS 扩展 HDU、Complex 样本一律给**明确失败态**，不假装支持。
+6. **生成 PixelMap**：`image.createPixelMap(rgba.buffer, { size, pixelFormat: RGBA_8888,
+   alphaType: OPAQUE })`。`aiRgbaOf()` 产出的 `Uint8Array.buffer` 长度正好 `w*h*4`。
+   华为官方 drawing guide 示例是 R,G,B,A 顺序，但开发者论坛有个别机型报「按 BGRA 处理」——
+   **`AI_OUTPUT_BGRA` 常量（默认 0）可一键切换 R/B 填充顺序**，属真机验证项（见真机步骤 R65-C）。
+   结果组装成既有 `PreviewEntry`（`colorSpace=0 / isHdr=false / exifDegrees=0`），
+   上游 `decodeTo` 的缓存复用 / 在途合并 / 失败黑名单 / 预载链全部零改动。
+
+### 三、验证用例（由 `tests/dirname.test.mjs` R65 组当场用构造字节重算，非抄表）
+
+Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、XISF 单文件
+（`XISF0100` + LE 头长 + XML + 4096 处 attachment），验证端到端：
+
+| 场景 | 结果 |
+| --- | --- |
+| FITS 2×2 灰度 BITPIX=16 | `ok=AI_OK`、宽高 2×2、I16 大端、`dataOffset=2880 / dataLength=8` |
+| 物理值 min-max | 像素 `0/100/1000/32000` → `lo=0 / hi=32000` |
+| 灰度拉伸 | `0 → R=0`，`32000(max) → R=255`，`alpha=255`，gamma=0.5 提亮暗部 |
+| XISF 2×2 UInt8 Normal | `ok=AI_OK`、小端、`layout=Normal`、`pos=4096 / size=4` |
+| IEEE754 手写解码 | float32 `1.0`、`π`；float64 `1.0` 位模式全部正确（不用 DataView） |
+| 反 `+sh` shuffle | itemSize=2 的字节平面还原为交错样本 |
+| 显示尺寸 | `8000×4000 @edge=1024 → 1024×512`，长边夹 8192 |
+| 失败态 | 太短 / 缺 SIMPLE / 坏 BITPIX / 坏 geometry / 未知压缩 / 数据不足各有明确失败码 |
+
+> 上述是**构造字节的纯函数数值回归**，不是真机像素 / 文件系统 IO 验证；口径见第五节。
+
+### 四、改动范围
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/AstroImage.ts` | **新增**：格式 / 状态 / 布局常量、`AstroHeader`/`AstroBounds`/`AstroSize` 接口、约 40 个纯函数（后缀识别、字节读取、IEEE754 解码、FITS 头、XISF 头、反 shuffle、拉伸、RGBA）；零 SDK / 零 IO / Node 可回归 |
+| `model/Preview.ets` | import `zlib` + `AstroImage`；`decodePx` 开头分流；新增 `readAstroBytes` / `astroPixelsOf` / `decodeAstroPx` 三个异步函数（真异步 IO、zlib 解压、createPixelMap）；系统 codec 链逐字保留 |
+| `pages/Index.ets` | 文件头 / `ESC_BUILD_TAG` R64→R65；`IMAGE_SUFFIXES` 追加 4 个天文后缀 |
+| `tests/dirname.test.mjs` | 新增 **28 条** R65 断言 + 真机步骤 R65-A~D；构建标记 R64→R65（27 处）、12 组旧包排除数组首位补 `R64`、2 组 `TEST_SELF` 正则同步、断言标签同步 |
+| `README.md` | 本章 + 抬头 / 章节列表（十个独立章节）/「使用前必读」构建标记与测试行号同步 |
+| `AppScope/app.json5` | **未改动**：`versionCode 7` / `versionName "1.0.7"` |
+
+### 五、验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+| --- | --- |
+| **静态契约 / 构造字节纯函数** | `ALL PASS 2072 passed, 0 failed`（R64 基线 2044，+28）；`git diff --check` 通过；FITS / XISF 头、拉伸、IEEE754、反 shuffle 全部由 R65 组构造字节当场重算 |
+| **真实 ArkTS 编译** | `hvigorw assembleHap --no-daemon` → **`BUILD SUCCESSFUL in 59 s 819 ms`**，日志 **`Finished :entry:default@CompileArkTS... after 35 s 179 ms`**（**CompileArkTS 非 UP-TO-DATE**，日志里 `UP-TO-DATE` 只出现在资源类任务）；**0 ERROR / 17 WARN**（与 R64 基线一致，全部为 Index.ets 既有全屏 `setWindowSystemBarEnable` 系 API 的 2in1 提示，R65 新增的 `Preview.ets` / `AstroImage.ts` 零 WARN） |
+| **产物核验** | 签名 HAP **1,437,802 B**（R64 为 1,350,282 B）/ 未签名 **1,400,621 B**（R64 为 1,314,839 B）/ `modules.abc` **825,080 B**（R64 为 781,524 B）；产物 mtime 00:15–00:16 晚于源码 23:55–00:13；三件产物均检出 **`R65=1 / R64=0`**、**`1.0.7=1`**，且 `aiFitsPlanOf` / `aiXisfPlanOf` / `decodeAstroPx` / `aiRgbaOf` / `AI_OUTPUT_BGRA` / `XISF0100` 进入产物 |
+
+> **编译校验 ≠ 真机验证**；构造字节的纯函数数值模型也 **≠** 真机文件系统与像素验证。
+> 尤其 `createPixelMap` 的 R/B 通道顺序是平台相关行为，真机 DevEco 安装、`hdc` / `hilog`
+> 侧验证由使用者完成（见 R65-C）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:7966` R65 组）
+
+> ⚠️ 本组是静态契约 + 构造字节纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R65-A：装新包后 Ctrl+D 角标必须是 R65；打开含 .fits/.xisf 的目录，
+>    这两类文件在左栏列出、点行进图片翻页序列，主视图显示拉伸后的天文图（非全黑），翻页/滚轮不卡。
+> ⚠️ 真机步骤 R65-B：FITS（16 位 / float 灰度、3 通道）与 XISF（UInt8/UInt16、Normal/Planar、
+>    zlib 压缩）分别能显示；损坏 / 超大 / lz4 等不支持文件给明确失败提示而非白屏或崩溃。
+> ⚠️ 真机步骤 R65-C：若天文图 R/B 通道偏色（华为个别机型 createPixelMap 按 BGRA 处理），
+>    把 AI_OUTPUT_BGRA 常量在 0↔1 间切换后重装验证 —— 属平台差异，编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R65-D：既有 HEIC/JPG/PNG / 文本预览 / 并排 / 全屏 / 放大镜 / 文本 scrollbar /
+>    R64 内容量统计 / 三栏三按钮 / 版本 1.0.7/7 全部零回归，无新增常显控件或跳动。
+
+### 七、边界
+
+- 系统 codec 不认 FITS / XISF，本轮只对这两种后缀自解析；普通图片链一行未动；
+- 支持主 HDU 未压缩 FITS、单文件 attachment/embedded 的未压缩或 zlib(含 +sh) XISF；
+  `lz4/lz4hc/zstd`、`inline:base64`、FITS 扩展 HDU、Complex 样本明确失败态，不假装支持；
+- 天文整文件走独立真异步读取（512MB 上限），不进 `rawStore` 的 64MB 图片 LRU；
+  目标 RGBA 按 `edge` 直接生成，长边夹 8192，全程零同步 IO、零新增 `new Promise`；
+- `AI_OUTPUT_BGRA` 默认 0（R,G,B,A），真机偏色切 1 —— 属平台差异，编译校验无法覆盖；
+- 正式界面零新增常显控件：三个工具按钮、三栏、行高、hover 缩略图、点击 / 双击、
+  文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
+- 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
+  **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
 
 ---
 
