@@ -1977,7 +1977,8 @@ MEDIUM(mipmap linear)** 抑制振铃与毛边，影像仍 HIGH 保细节；脏�
 ### 七、验证结果（三类证据严格分开）
 
 - **静态契约 + 构造数值回归**：`node --experimental-strip-types tests/dirname.test.mjs`
-  → `ALL PASS  2126 passed, 0 failed`（含 R67 新增 24 条、29 条标记迁移）。
+  → `ALL PASS  2126 passed, 0 failed`（R66 基线 2097，R67 新增 **29 条**；
+  另有 29 条历史构建标记断言整批由 `R66` 升位到 `R67`，不改变断言条数）。
 - **真实 ArkTS 编译**：`./build.sh`（`hvigorw assembleHap --no-daemon`）→
   **`BUILD SUCCESSFUL in 1 min 37 s 248 ms`**，`Finished :entry:default@CompileArkTS... after
   1 min 6 s 643 ms`（**CompileArkTS 非 UP-TO-DATE**）；**0 ERROR / 9 WARN**，全部是
