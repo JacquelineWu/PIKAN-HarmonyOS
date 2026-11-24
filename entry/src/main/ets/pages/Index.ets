@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R70 主线（R39 起组件化）· FITS/XISF 天文图像预览
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R71 主线（R39 起组件化）· FITS/XISF 天文图像预览
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -156,6 +156,8 @@ import { RESUME_REFRESH_GO, resumeRefreshAction, resumeSelectedIndex,
 import { ArchiveRow, ROW_IMAGE, ROW_UP, ROW_FOLDER, ROW_OTHER, ROW_TEXT } from '../components/ArchiveRow';
 import { PreviewEntry, decodePx, rawStore, RAW_CACHE_MAX_COUNT, TAG, DOMAIN,
   yieldMacroTask } from '../model/Preview';
+// 第七十一轮：解码失败的明确原因（按 uri 粒度），单独一行 import 保持既有 import 逐字不变。
+import { decodeFailCodeOf, decodeFailHintOf } from '../model/Preview';
 // R40（Index.ets 拆分 Phase 3）：左栏迁出为独立组件；ImageItem / GalleryDataSource
 // 一并迁至 model/GalleryData.ets（SidebarView 也要用，留在本文件会循环 import）。
 import { SidebarView } from '../components/SidebarView';
@@ -201,6 +203,8 @@ import { HB_LABEL, HB_MARGIN_VP, HB_HINT_H_VP, HB_HINT_GAP_VP,
   HB_FONT_VP, HB_PAD_H_VP, HB_PAD_V_VP, HB_RADIUS_VP, HB_BORDER_VP,
   HB_BG_COLOR, HB_FG_COLOR, HB_BORDER_COLOR,
   hbVisibleOf, hbLeftOf, hbTopOf } from '../common/HdrBadge';
+// 第七十一轮：HDR 保真结果的原因码门控（正常态不显示任何提示）。
+import { hpShowHintOf } from '../common/HdrPreview';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -210,7 +214,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R70';
+const ESC_BUILD_TAG: string = 'R71';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1225,6 +1229,9 @@ struct Index {
   @State viewIsHdr: boolean = false;
   @State viewExifDegrees: number = 0;
   @State viewHdrWanted: boolean = false;
+  // 第七十一轮：HDR 保真结果原因码 + 界面明确提示（正常态为空串）。
+  @State hdrCode: number = 0;
+  @State hdrHint: string = '';
 
   // ---- 画布尺寸（onAreaChange 得到）----
   @State canvasW: number = 800;
@@ -5455,6 +5462,8 @@ struct Index {
     this.viewIsHdr = false;
     this.viewExifDegrees = 0;
     this.viewHdrWanted = false;
+    this.hdrCode = 0;
+    this.hdrHint = '';
     // 只读名单态：不解码，也不让 viewFailed 变 true —— 否则 previewImage 会画
     // Image(uri) 交给系统对死 uri 反复重试。画面留中灰，由预览区指引卡接管。
     if (!bulkIoAllowed(this.restoreMode)) {
@@ -5510,6 +5519,9 @@ struct Index {
     this.viewIsHdr = e.isHdr;
     this.viewExifDegrees = e.exifDegrees;
     this.viewHdrWanted = e.isHdr || isWideGamutOf(e.colorSpace);
+    // 第七十一轮：解码链给出的 HDR 保真结果与明确提示直接落到 UI。
+    this.hdrCode = e.hdrCode;
+    this.hdrHint = e.hdrHint;
   }
 
   /** 这张图按当前画布 / zoom 实际需要解到多少（长边）。
@@ -5659,6 +5671,9 @@ struct Index {
       // 自己解码失败（例如某些 uri 打不开）→ 标记失败，让 UI 回退到 Image(uri) 由系统解码
       this.viewPixelMap = undefined;
       this.viewFailed = true;
+      // 第七十一轮：自解码失败时不再只留白屏 / 日志，按 uri 取明确原因与中文提示。
+      this.hdrCode = decodeFailCodeOf(uri);
+      this.hdrHint = decodeFailHintOf(uri, 0, 0);
       if (FOCUS_BLUR) {
         this.finishFocus(); // 兜底图由系统解码，过渡层照常淡出
       } else {
@@ -9012,6 +9027,32 @@ struct Index {
             .justifyContent(FlexAlign.Start)
             .alignItems(VerticalAlign.Top)
             .padding(12)
+            .hitTestBehavior(HitTestMode.Transparent)
+          }
+
+          // 第七十一轮：HDR 保真异常态的明确提示（缺 HDR 信息 / 格式不兼容 / 文件损坏 /
+          // 动态范围被压缩 / 产物标记不可读 / 原图超保真护栏）。正常态 hpShowHintOf=false，
+          // 界面零新增常显控件；与 R70 徽标同款深色底板 + 圆角 + 描边，底部居中不遮主体；
+          // HitTestMode.Transparent 让滚轮 / 拖拽 / 放大镜 / 点击全部穿透，交互零回归。
+          if (hpShowHintOf(this.hdrCode)) {
+            Column() {
+              Text(this.hdrHint)
+                .fontSize(11)
+                .fontColor('#ffd479')
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .constraintSize({ maxWidth: 520 })
+                .padding({ left: HB_PAD_H_VP, right: HB_PAD_H_VP,
+                  top: HB_PAD_V_VP, bottom: HB_PAD_V_VP })
+                .backgroundColor(HB_BG_COLOR)
+                .border({ width: HB_BORDER_VP, color: HB_BORDER_COLOR })
+                .borderRadius(HB_RADIUS_VP)
+            }
+            .width('100%')
+            .height('100%')
+            .justifyContent(FlexAlign.End)
+            .alignItems(HorizontalAlign.Center)
+            .padding({ left: HB_MARGIN_VP, right: HB_MARGIN_VP, bottom: HB_MARGIN_VP })
             .hitTestBehavior(HitTestMode.Transparent)
           }
 

@@ -38,6 +38,13 @@ import { LQ_CAP_SYSTEM_AA, LQ_AA_LOW, LQ_AA_MEDIUM, LQ_AA_HIGH,
 import { VQ_CAP_SYSTEM_AA, VQ_AA_LOW, VQ_AA_MEDIUM, VQ_AA_HIGH,
   VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE,
   vqSafeFactorOf, vqScaleAllowedOf } from '../common/ViewQuality';
+// 第七十一轮：HEIC HDR 保真解码的容器探测 / 显式动态范围 / 产物校验 / 保真护栏真值源
+// （零 SDK / 零 IO，本文件是唯一碰 SDK 的地方）。
+import { HpProbe, HpDecodeSize,
+  HP_FMT_CORRUPT, HP_FMT_INCOMPATIBLE, HP_RANGE_HDR, HP_OK_SDR,
+  HP_COLORSPACE_PRESERVE, HP_HDR_UNVERIFIED, HP_SIZE_CAPPED,
+  hpProbeOf, hpRequestOf, hpOutcomeOf, hpDecodeSizeOf, hpFailCodeOf,
+  hpColorSpacePreservedOf, hpShowHintOf, hpHintOf } from '../common/HdrPreview';
 
 // hilog 域（原 pages/Index.ets 顶部同值迁入；Index.ets 反向 import 本定义）。
 export const TAG = 'HeicViewer';
@@ -119,6 +126,38 @@ export interface PreviewEntry {
   colorSpace: number; // 系统 codec 识别出的内嵌色彩空间（colorSpaceManager.ColorSpace 数值）
   isHdr: boolean;     // 源图是否 HDR（ImageInfo.isHdr）
   exifDegrees: number;// 本张按 EXIF 摆正的角度（0/90/180/270）
+  /** 第七十一轮：源图原始尺寸（未缩放，用于 HDR 保真核验与信息栏）。 */
+  srcW: number;
+  srcH: number;
+  /** 解码产物 PixelMap.getImageInfo().isHdr —— 真正上屏的高动态范围状态。 */
+  isHdrDecoded: boolean;
+  /** 本张 HDR 结果原因码（HP_OK_HDR / HP_NO_HDR_META / HP_HDR_DOWNGRADED …）。 */
+  hdrCode: number;
+  /** 界面要显示的明确提示（正常态为空串）。 */
+  hdrHint: string;
+}
+
+// ---- 第七十一轮：解码失败原因（uri 粒度，供界面给明确提示） ----
+/** 与 EXIF_CACHE 同口径的模块级小表；只记最近 256 个失败 uri，不参与正常链路。 */
+const DECODE_FAIL_MAX: number = 256;
+const decodeFailByUri: Map<string, number> = new Map();
+function noteDecodeFail(uri: string, code: number): void {
+  if (decodeFailByUri.size >= DECODE_FAIL_MAX) {
+    decodeFailByUri.clear();
+  }
+  decodeFailByUri.set(uri, code);
+}
+function clearDecodeFail(uri: string): void {
+  decodeFailByUri.delete(uri);
+}
+/** 供 pages/Index.ets 在自解码失败时取明确原因码。 */
+export function decodeFailCodeOf(uri: string): number {
+  const c: number | undefined = decodeFailByUri.get(uri);
+  return c === undefined ? HP_OK_SDR : c;
+}
+/** 供 pages/Index.ets 直接取中文提示（正常态返回空串）。 */
+export function decodeFailHintOf(uri: string, w: number, h: number): string {
+  return hpHintOf(decodeFailCodeOf(uri), w, h);
 }
 
 /** EXIF 变换缓存：同一张图在预载 / 主视图 / 悬停缩略图之间只读一次元数据。
@@ -550,7 +589,9 @@ async function decodeAstroPx(uri: string, edge: number): Promise<PreviewEntry | 
     const entry: PreviewEntry = {
       uri: uri, px: px, bytes: sz.w * sz.h * 4,
       w: sz.w, h: sz.h, edge: edge,
-      colorSpace: 0, isHdr: false, exifDegrees: 0
+      colorSpace: 0, isHdr: false, exifDegrees: 0,
+      srcW: sz.w, srcH: sz.h, isHdrDecoded: false,
+      hdrCode: HP_OK_SDR, hdrHint: ''
     };
     return entry;
   } catch (e) {
@@ -567,9 +608,15 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
   }
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
+  let bytesReadable: boolean = false;
+  // 第七十一轮：容器层探测只在拿到完整原始字节时做；fd 兜底路径没有字节可验，
+  // 保持按扩展名分流，绝不把非 HEIC 文件误判成损坏。
+  let probe: HpProbe = hpProbeOf(uri, new Uint8Array(0));
   try {
     const raw: ArrayBuffer | undefined = await rawStore.ensure(uri);
+    bytesReadable = raw !== undefined;
     if (raw !== undefined) {
+      probe = hpProbeOf(uri, new Uint8Array(raw));
       src = image.createImageSource(raw);
     } else {
       // 第二十七轮：fd 兜底路径也改 await fs.open（同 RawStore.read 的真异步口径）。
@@ -577,16 +624,24 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
       file = await fs.open(uri, fs.OpenMode.READ_ONLY);
       src = image.createImageSource(file.fd);
     }
+    // 容器层已明确判损坏 / 不兼容：不进 codec，直接给明确失败原因。
+    if (probe.format === HP_FMT_CORRUPT || probe.format === HP_FMT_INCOMPATIBLE) {
+      const bad: number = hpFailCodeOf(probe.format, false, true);
+      noteDecodeFail(uri, bad);
+      hilog.warn(DOMAIN, TAG, 'decodePx HEIC REJECT uri=%{public}s code=%{public}d hint=%{public}s',
+        uri, bad, hpHintOf(bad, 0, 0));
+      return undefined;
+    }
     const info: image.ImageInfo = await src.getImageInfo();
     const w: number = info.size.width;
     const h: number = info.size.height;
-    let dw: number = w;
-    let dh: number = h;
-    if (w > edge || h > edge) {
-      const k: number = Math.max(w, h) / edge;
-      dw = Math.max(1, Math.floor(w / k));
-      dh = Math.max(1, Math.floor(h / k));
-    }
+    const isHdrSource: boolean = info.isHdr === true;
+    const request: number = hpRequestOf(isHdrSource, probe.format, probe.hdrMeta.present);
+    // 第七十一轮：HDR HEIC 在像素护栏内按原始尺寸解码；其余逐字沿用既有档位算法。
+    const sz: HpDecodeSize = hpDecodeSizeOf(w, h, edge,
+      isHdrSource || probe.hdrMeta.present, probe.format);
+    const dw: number = sz.w;
+    const dh: number = sz.h;
     if (dw <= 0 || dh <= 0) {
       return undefined;
     }
@@ -600,12 +655,19 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
     if (EXIF_AUTO_ROTATE && exif.degrees !== 0 && EXIF_ROTATE_AT_DECODE) {
       opts.rotate = exif.degrees;
     }
-    if (HDR_AUTO_DECODE) {
+    // 第七十一轮：源为 HDR（或容器带 HDR 元数据）时**显式请求 HDR 档**，
+    // 不再让 AUTO 在平台不支持时静默压缩动态范围；非 HDR 图仍走既有 AUTO。
+    if (request === HP_RANGE_HDR) {
+      opts.desiredDynamicRange = image.DecodingDynamicRange.HDR;
+    } else if (HDR_AUTO_DECODE) {
       opts.desiredDynamicRange = image.DecodingDynamicRange.AUTO;
     }
-    if (COLOR_MANAGE_MODE === 1) {
+    // HDR 图禁止在解码时强制转 sRGB / Display P3（会造成色彩失真）。
+    const colorMode: number = hpColorSpacePreservedOf(COLOR_MANAGE_MODE, isHdrSource)
+      ? COLOR_MANAGE_MODE : HP_COLORSPACE_PRESERVE;
+    if (colorMode === 1) {
       opts.desiredColorSpace = colorSpaceManager.create(colorSpaceManager.ColorSpace.SRGB);
-    } else if (COLOR_MANAGE_MODE === 2) {
+    } else if (colorMode === 2) {
       opts.desiredColorSpace = colorSpaceManager.create(colorSpaceManager.ColorSpace.DISPLAY_P3);
     }
 
@@ -622,17 +684,47 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
     } catch (e) {
       // 某些机型 / 格式不支持 getColorSpace：按「未标注」处理，不影响显示
     }
+    // 第七十一轮：请求 HDR ≠ 得到 HDR —— 必须校验**解码产物**才是真值。
+    let isHdrDecoded: boolean = false;
+    let hdrKnown: boolean = false;
+    try {
+      const pxInfo: image.ImageInfo = await px.getImageInfo();
+      isHdrDecoded = pxInfo.isHdr === true;
+      hdrKnown = true;
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'decodePx getImageInfo(px) skipped uri=%{public}s', uri);
+    }
+    let outcome: number = hpOutcomeOf(request, isHdrSource, isHdrDecoded);
+    if (!hdrKnown && (isHdrSource || request === HP_RANGE_HDR)) {
+      outcome = HP_HDR_UNVERIFIED;
+    }
+    let hint: string = hpHintOf(outcome, w, h);
+    if (sz.capped && hint.length === 0) {
+      outcome = HP_SIZE_CAPPED;
+      hint = hpHintOf(outcome, w, h);
+    }
+    if (hpShowHintOf(outcome)) {
+      hilog.warn(DOMAIN, TAG, 'decodePx HDR hint uri=%{public}s code=%{public}d hint=%{public}s',
+        uri, outcome, hint);
+    }
     const shown: Size2 = exifSizeOf(w, h, exif.degrees);
+    clearDecodeFail(uri);
     const entry: PreviewEntry = {
       uri: uri, px: px, bytes: dw * dh * 4,
       w: shown.w, h: shown.h, edge: edge,
-      colorSpace: cs, isHdr: info.isHdr === true, exifDegrees: exif.degrees
+      colorSpace: cs, isHdr: info.isHdr === true, exifDegrees: exif.degrees,
+      srcW: w, srcH: h, isHdrDecoded: isHdrDecoded,
+      hdrCode: outcome, hdrHint: hint
     };
     return entry;
   } catch (e) {
     // ⚠️ 以前这里静默吞掉：图打不开时屏幕全白、日志全无，排查只能靠猜。
     //    目录浏览的 uri 权限 / 编码问题全靠这一行定位。
-    hilog.warn(DOMAIN, TAG, 'decodePx FAIL uri=%{public}s err=%{public}s', uri, JSON.stringify(e));
+    //    第七十一轮：额外把明确原因码按 uri 落表，供界面显示「损坏 / 不兼容 / 解码失败」。
+    const fail: number = hpFailCodeOf(probe.format, true, bytesReadable);
+    noteDecodeFail(uri, fail);
+    hilog.warn(DOMAIN, TAG, 'decodePx FAIL uri=%{public}s code=%{public}d hint=%{public}s err=%{public}s',
+      uri, fail, hpHintOf(fail, 0, 0), JSON.stringify(e));
     return undefined;
   } finally {
     if (src !== undefined) {

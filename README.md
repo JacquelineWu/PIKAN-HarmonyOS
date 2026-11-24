@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R70`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R71`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -559,15 +559,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R67（放大镜高质量显示：系统 native 抗锯齿缩放 + 能力分级 + 跨密度一致档）、
 > R68（右边预览图优化 / resize 最高质素：系统 native AA 精炼 + 内容自适应档 + 跨密度一致）、
 > R69（左栏档案名行上下留白各减 0.8mm：总行高减 1.6mm，其余逐字不变）、
-> R70（HDR 标识：仅 HDR 相片在预览区左上角叠加清晰可辨标识，深浅背景恒清晰 / 交互零回归）
+> R70（HDR 标识：仅 HDR 相片在预览区左上角叠加清晰可辨标识，深浅背景恒清晰 / 交互零回归）、
+> R71（HEIC HDR 保真解码与预览：显式 HDR 档 / 产物 isHdr 校验 / 原始尺寸·色彩·亮度保真 / 三类异常明确提示）
 > 见下方十四个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R70`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R70` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R71`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R71` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R70 新增断言顺延，以 `grep -n 真机步骤 R70 tests/dirname.test.mjs` 为准：8897–8904）
+  （行号随 R71 新增断言顺延，以 `grep -n 真机步骤 R71 tests/dirname.test.mjs` 为准：9086–9097）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -602,6 +603,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R68 | 右边预览图优化 / resize 最高质素（系统 native AA 精炼 + 内容自适应档） | 8658–8665 |
 | R69 | 左栏档案名行上下留白各减 0.8mm（总行高减 1.6mm，其余逐字不变） | 8738–8745 |
 | R70 | HDR 标识（仅 HDR 相片预览区左上角叠加 / 深浅背景恒清晰 / 交互零回归） | 8897–8904 |
+| R71 | HEIC HDR 保真解码与预览（显式 HDR / 产物校验 / 原始尺寸保真 / 三类异常明确提示） | 9086–9097 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1863,6 +1865,136 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十一轮：HEIC HDR 保真解码与预览 —— 显式 HDR 档 / 产物校验 / 原始尺寸保真 / 三类异常明确提示（2026-11-25，R71）
+
+> 用户诉求（原文）：「实现一个 HEIC 格式解码并以 HDR 形式输出预览的功能：以 HEIC 文件或数据为输入，
+> 输出保留原始尺寸、方向、色彩空间、HDR 元数据、高动态范围及正确色彩亮度的可显示预览，
+> 避免动态范围压缩与色彩失真；要求在支持 HDR 的显示环境中稳定呈现，对缺失 HDR 信息、
+> 格式不兼容或文件损坏给出明确提示，并确保实现可直接运行验证。」
+
+### 一、现状判读（按真实源码 + 官方 API 语义，不凭缓存推断）
+
+- **`AUTO` 会静默降 SDR**：`model/Preview.ets` 的 `decodePx()` 既有
+  `opts.desiredDynamicRange = image.DecodingDynamicRange.AUTO`；官方语义是「按资源格式与
+  设备能力自适应」，当平台/设备不支持时**允许降为 SDR 且无任何提示**——与用户要求的
+  「避免动态范围压缩」直接冲突。官方 `DecodingDynamicRange` 有 `AUTO / SDR / HDR` 三档，
+  本轮对 HDR 源显式请求 `HDR`，不再把「是否保住 HDR」交给平台静默决定。
+- **只校验源图，未校验产物**：既有链只靠 `ImageSource.getImageInfo().isHdr`（源图是否
+  HDR 格式）写 `PreviewEntry.isHdr`，**从未校验真正上屏的 `PixelMap`**。若 SDK 把 HDR
+  解成 SDR，界面仍会当成 HDR（R70 徽标照常亮起），属「以 SDR 冒充 HDR」。
+  `PixelMap.getImageInfo().isHdr` 才是**解码产物真值**。
+- **HEIC 是 ISOBMFF 容器，HDR 线索在盒子里**：`ftyp` 的 `major_brand`/`compatible_brands`
+  识别 HEIC/HEIF 家族；`meta/iprp/ipco` 下的 `colr(nclx)` 给出 `primaries=9`(BT.2020)、
+  `transfer=16`(PQ)/`18`(HLG)；`clli/mdcv` 为 HDR10 静态元数据；`auxC` URN 含
+  `gain`/`hdr` 为 gain map 路线；`heix/hevx` 为 10bit HEVC 路线。既有代码完全没有这层预检。
+- **三类异常此前只有 `hilog`**：缺 HDR 信息 / 格式不兼容 / 文件损坏，界面无明确提示，
+  用户只看到白屏或普通 SDR 图。既有 3 处
+  `.dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)`
+  是 R42 起既有的显示策略，**本轮逐字不动、零回归**。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/HdrPreview.ts` | **新增** 664 行唯一真值源，**87 个导出**（46 常量 + 5 结构 + 36 纯函数）：ISOBMFF 递归解析 / HDR 元数据识别 / 损坏分类 / 显式动态范围决策 / 产物校验 / 保真护栏 / 明确提示文案。零 SDK / 零 IO / 零异步 / 零 throw / 零定时器 / 零 Promise / 零全局可变状态 |
+| `model/Preview.ets` | 新增 `HdrPreview` import；`PreviewEntry` 扩展 `srcW/srcH/isHdrDecoded/hdrCode/hdrHint`；新增模块级失败原因表（`noteDecodeFail` / `decodeFailCodeOf` / `decodeFailHintOf`）；`decodePx()` 加入容器预检、显式 `image.DecodingDynamicRange.HDR`、原始尺寸保真档、`await px.getImageInfo()` 产物校验、`hpOutcomeOf()` 结果归一；`decodeAstroPx()` 补齐 R71 字段且恒 `isHdr:false` 不误标 |
+| `pages/Index.ets` | 文件头主线号 `R70 → R71`、`ESC_BUILD_TAG` `R70 → R71`；单独一行 import `decodeFailCodeOf/decodeFailHintOf`、`hpShowHintOf`；新增 `@State hdrCode/hdrHint`；`showPreviewOf()` 切图清零、`setViewMeta()` 落地、`loadViewNow()` 解码失败按 uri 取明确提示；预览区新增 `if (hpShowHintOf(this.hdrCode))` 条件浮层（`9033` 起） |
+| `tests/hdrprobe.mjs` | **新增** 262 行「可直接运行验证」CLI：内置真实构造的 ISOBMFF/HEIF 字节样本（HDR10 PQ / 普通 SDR / gain map / 截断损坏 / jpeg 伪装）自检 + 传真实文件出探测报告 + `--json` 输出。只依赖 `node:fs` 与 `HdrPreview.ts`，零 SDK / 零真机 |
+| `tests/dirname.test.mjs` | `import` HdrPreview 全套导出与 hdrprobe 样本；**34 处**历史 `ESC_BUILD_TAG` 断言整批升位 `R71`；新增 R71 组 **22 条**断言与真机步骤 A~D（`9086–9097`） |
+| `README.md` / 记忆文件 | 抬头 / 手册 / 步骤对照表同步，新增本章 |
+
+**逐字不变**：`const raw: ArrayBuffer | undefined = await rawStore.ensure(uri);`、
+`isHdr: info.isHdr === true`（R70 徽标真值链）、既有 3 处 `dynamicRangeMode`、
+`viewHdrWanted`、EXIF `readExifTransform()`/`exifSizeOf()`、R68 `viewDisplayPx`、
+R67 放大镜、R64 四态、`new Promise` 恰 2 处 / `Promise.race` 1 处、无 worker、
+`APP_VERSION 1.0.7` / `versionCode 7`。
+
+### 三、为什么能保住 HDR（保真策略，全部是纯函数可回归判定）
+
+- **显式 HDR 档**：`hpRequestOf(isHdrSource, format, metaPresent)` —— 源 HDR 或容器检出
+  HDR 元数据 ⇒ `HP_RANGE_HDR(2)`；普通 SDR ⇒ `AUTO(0)`；损坏/不兼容 ⇒ `AUTO` 不强解。
+  `decodePx()` 据此写 `opts.desiredDynamicRange = image.DecodingDynamicRange.HDR`。
+- **产物校验**：`hpOutcomeOf(request, isHdrSource, isHdrDecoded)` —— 请求 HDR + 产物 HDR
+  = `HP_OK_HDR`；请求 HDR 但产物 SDR = **`HP_HDR_DOWNGRADED`（明确报「动态范围已被压缩」）**；
+  产物 HDR 标记读不到 = `HP_HDR_UNVERIFIED`。绝不静默以 SDR 冒充 HDR。
+- **原始尺寸保真**：`hpDecodeSizeOf()` 对 HDR HEIC 在 **12M 总像素 / 4096 长边**护栏内
+  按 `ispe` 原始尺寸解码（3840×2160 直接原尺寸）；超限退到既有等比档并标记 `capped`，
+  给「原图超过 HDR 保真上限，已按显示档位缩放（原尺寸 …）」信息提示，不是静默缩小。
+- **色彩 / 方向 / 位深 / 亮度护栏**：`hpColorSpacePreservedOf()` HDR 图保留源色彩空间，
+  不强制转 sRGB / Display P3；`hpPixelFormatSafeOf()` 10bit 内容不得落到
+  `RGBA_8888`(8bit)；`hpNoToneMapOf()` 不做 tone mapping；EXIF 方向继续走既有
+  `readExifTransform()`/`exifSizeOf()` 链路；`hpAspectPreservedOf()` 等比不改宽高比。
+- **量化数值模型**：`hpQuantLevelsOf(10)=1024` / `(8)=256` 级，`hpRangeRatioOf()=4×`
+  —— 落到 8bit 必丢 3/4 级数，故 10bit 护栏是硬约束而非建议。
+- **三类异常严格分类不混淆**：原因码 `HP_NO_HDR_META` / `HP_CAUSE_FORMAT` /
+  `HP_FILE_CORRUPT` 与格式码 `HP_FMT_CORRUPT` / `HP_FMT_INCOMPATIBLE` **命名空间隔离**
+  （初版曾撞值导致「格式不兼容」被误报为「损坏」，已修）。`hpFormatOf()` 先按扩展名
+  分流，JPG/PNG 等其它格式字节绝不被当 ISOBMFF 误报损坏；无扩展名但字节确属 HEIC
+  家族时仍支持**纯数据输入**。`hpHintOf()` 逐类给中文明确提示，正常态
+  `hpShowHintOf()=false` 零提示。
+
+### 四、验证用例（`tests/dirname.test.mjs` R71 组）
+
+22 条：① HdrPreview 纯函数真值源（零 SDK/IO/await/throw/定时器/Promise/全局状态）；② 关键
+参数（BT.2020=9 / PQ=16 / HLG=18 / 12M 像素 / 4096 长边 / RGBA_8888=3 / 显式 HDR=2）；
+③ 真实 HEIC 字节 `ftyp/brand + ispe + nclx + clli + heix` 全读出；④ ISOBMFF 递归进入
+`meta/iprp/ipco`；⑤ 三类异常严格分类 + gain map 单独识别；⑥ 原因码/格式码命名空间隔离；
+⑦ JPG/PNG 零回归护栏；⑧ 纯数据输入；⑨ 损坏边界零抛错；⑩ 显式 HDR 档决策；⑪ 产物
+`isHdr` 校验（真 HDR / 明确报压缩）；⑫ 显示模式 `HIGH/CONSTRAINT/STANDARD` 模型；⑬ 原始
+尺寸保真与超护栏 `capped`；⑭ 等比/色彩/位深/无 tone map 护栏；⑮ 量化级数与 4× 范围比；
+⑯ 三类异常各有明确提示、正常态零提示；⑰ 失败原因归一；⑱ 解码链静态接线；⑲ 界面接线；
+⑳ 可直接运行验证脚本；㉑ 零回归（R70 徽标 / 3 处 dynamicRangeMode / R68 AA / R64 四态 /
+版本 / Promise 计数）；㉒ 构建标记 `R71` / 旧标记已清 / 34 条历史断言整批升位。
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2201 passed, 0 failed`**（R70 基线 2179，+22 条 R71）；`git diff --check` 通过 |
+| 独立验证脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**；`node tests/hdrprobe.mjs /tmp/r71-sample.heic` → `HEIC / hdrMeta.present:true / HDR(显式) / 3840×2160 / originalSizeKept:true` |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 2 min 14 s 204 ms`**；`Finished :entry:default@CompileArkTS... after 1 min 34 s 508 ms`（**非 UP-TO-DATE**）；33 tasks：18 executed / 15 up-to-date；**0 ERROR / 17 WARN**（与 R69/R70 完全一致，全为 `Index.ets` 既有 2in1 / `READ_IMAGEVIDEO` 提示）；日志 `/tmp/r71-build.log` |
+| 产物核验 | 签名 HAP **1,625,883 B**（R70 1,568,303 B）/ 未签名 **1,590,355 B**（R70 1,531,337 B）/ `ets/modules.abc` **927,812 B**（R70 895,280 B）；产物 mtime **02:50** 晚于源码 **02:34–02:47**，即 HAP 由最终源码编译；字节码 **`R71=1 / R70=0 / R69=0 / 1.0.7=1`**，`HdrPreview=3` / `hpRequestOf=2` / `hpProbeOf=2` / `decodeFailHintOf=2` / `decodeFailCodeOf=2` / `DecodingDynamicRange=1` / `HP_HDR_UNVERIFIED=1` / `HP_NO_HDR_META=1` 全部进包 |
+| SDK 语义 | `image.DecodingDynamicRange.HDR` 与 `px.getImageInfo()` 在目标 SDK 26 真编译通过（0 ERROR），非仅文档推断 |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志/旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+>
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 R71-A~D）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:9086` R71 组）
+
+> ⚠️ 本组是源码静态契约 + 真实构造 HEIC 字节解析 + 数值模型，不替代真机 HDR 显示验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R71-A：装新包后 Ctrl+D 角标必须是 R71；打开 HDR HEIC，预览区正常出图，
+>     左上角出现 R70「HDR」标识；底部不出现任何异常提示（正常态零提示）。
+> ⚠️ 真机步骤 R71-B：分别用「无 HDR 信息的普通 HEIC」「jpeg brand 伪装成 .heic」
+>     「截断损坏的 HEIC」三份样本，底部依次出现「未包含 HDR 信息」「格式不兼容」
+>     「文件损坏或数据不完整」明确提示；系统解码兜底路径不白屏、不吞提示。
+> ⚠️ 真机步骤 R71-C：HDR 显示设备上打开 10bit PQ/HLG HEIC，高光与暗部层次完整、
+>     色彩不偏；若设备不支持 HDR 或 SDK 降级，底部出现「动态范围已被压缩」提示，
+>     不静默以 SDR 冒充 HDR；原图超 12M 像素时出现保真缩放提示并带上原始尺寸。
+> ⚠️ 真机步骤 R71-D：HEIC/JPG/PNG / FITS·XISF / 文本预览 scrollbar / 并排右页 / 放大镜 /
+>     R68 主预览 resize 画质 / R69 行高 / R70 HDR 徽标 / 三栏三按钮 / ESC / 版本 1.0.7/7
+>     全部零回归、无新增卡顿；也可在 PC 上直接跑 node tests/hdrprobe.mjs 校验容器判定。
+
+### 七、边界
+
+- **未升版本**（`1.0.7 / versionCode 7`）、未跑 `build.sh`、未把 HAP 放桌面；
+  提示浮层是**异常态条件显示**（正常态 `hpShowHintOf=false` 零提示），
+  不是 R55 所禁止的常显角标；`HitTestMode.Transparent` 保持滚轮 / 拖拽 / 放大镜穿透。
+- **显示模式模型与源码接线的真实边界（如实标注）**：`hpDisplayModeOf()` 已提供
+  `HIGH / CONSTRAINT / STANDARD` 决策与静态断言，但既有 3 处 `dynamicRangeMode()` 仍保持
+  `viewHdrWanted ? HIGH : STANDARD` 逐字不动，**本轮未替换为 `hpDisplayModeOf()` 实际调用**。
+  「支持 HDR 的显示环境中稳定呈现」需要显示设备能力判定，当前由系统
+  `DynamicRangeMode` 自行处理，**真机显示效果仍需用户按 R71-C 验证**。
+- **静态解析 ≠ 解码产物真值**：`hdrprobe.mjs` 是容器层判定；是否真为 HDR 以应用内
+  `PixelMap.getImageInfo().isHdr` 为准，二者不可互相替代。
+- 零新增定时器 / 全局可变状态 / worker；既有解码缓存、并发槽位、EXIF、R68 系统 AA 精炼、
+  R64 内容量统计、三栏三按钮、文本预览 scrollbar 全部零回归。
+- **本轮未 push**（用户未授权；R70 及历史提交此前已在用户明确授权下同步完毕）。
+- **编译校验 ≠ 真机验证**；字节样本自检 ≠ 真机 HDR 屏观感；数值模型 ≠ 系统 codec 实际行为。
 
 ---
 
