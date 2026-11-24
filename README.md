@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R69`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R70`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -558,15 +558,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R66（天文像素计算让出主线程：总像素硬上限 + 24 行分片 + 宏任务让出 + 并发槽位）、
 > R67（放大镜高质量显示：系统 native 抗锯齿缩放 + 能力分级 + 跨密度一致档）、
 > R68（右边预览图优化 / resize 最高质素：系统 native AA 精炼 + 内容自适应档 + 跨密度一致）、
-> R69（左栏档案名行上下留白各减 0.8mm：总行高减 1.6mm，其余逐字不变）
+> R69（左栏档案名行上下留白各减 0.8mm：总行高减 1.6mm，其余逐字不变）、
+> R70（HDR 标识：仅 HDR 相片在预览区左上角叠加清晰可辨标识，深浅背景恒清晰 / 交互零回归）
 > 见下方十四个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R69`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R69` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R70`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R70` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R69 新增断言顺延，以 `grep -n 真机步骤 R69 tests/dirname.test.mjs` 为准：8738–8745）
+  （行号随 R70 新增断言顺延，以 `grep -n 真机步骤 R70 tests/dirname.test.mjs` 为准：8897–8904）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -600,6 +601,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R67 | 放大镜高质量显示（系统 native AA + 能力分级 + 跨密度一致档） | 8413–8421 |
 | R68 | 右边预览图优化 / resize 最高质素（系统 native AA 精炼 + 内容自适应档） | 8658–8665 |
 | R69 | 左栏档案名行上下留白各减 0.8mm（总行高减 1.6mm，其余逐字不变） | 8738–8745 |
+| R70 | HDR 标识（仅 HDR 相片预览区左上角叠加 / 深浅背景恒清晰 / 交互零回归） | 8897–8904 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1861,6 +1863,118 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十轮：HDR 标识 —— 仅 HDR 相片在预览区左上角叠加清晰可辨标识（2026-11-25，R70）
+
+> 用户诉求（原文）：「请修改图片预览功能：仅当相片为 HDR 格式时，在预览图左上角叠加显示
+> 清晰可辨的 HDR 标识符号；非 HDR 相片不显示该标识。标识应固定在左上角并保留适当边距，
+> 在不同预览图尺寸和深浅背景下均保持清晰可读，避免遮挡主要内容，并保持原有预览功能与
+> 交互不变。」
+
+### 一、现状判读（按真实源码，不凭缓存推断）
+
+- **HDR 真值链已存在，本轮零新增解码 / 探测 / IO**：`model/Preview.ets` 的 `decodePx()`
+  用 `image.ImageSource.getImageInfo()` 读出 `ImageInfo.isHdr`（SDK @since 12，官方语义
+  「源图是否为 HDR 格式」）写入 `PreviewEntry.isHdr` → `setViewMeta()` 落到
+  `@State viewIsHdr` → `showPreviewOf()` 切图清零。本轮只把这条现成真值接到显示层。
+- **严格用 `viewIsHdr`，绝不用 `viewHdrWanted`**：后者是
+  `isHdr || isWideGamutOf(colorSpace)`，广色域 SDR 相片会被误标；它仍只服务于既有
+  3 处 `dynamicRangeMode`，逐字未动。
+- **层级约束**：R55 起预览区没有任何常显角标，全屏时 `(12,12)` 仍有一行
+  「全屏 · Esc / F11 / 双击退出」提示。故徽标须全屏下移避让，并挂在**预览区 `Stack`
+  直接子项**、与图片 `Column` 平级 ⇒ 不随图片旋转 / 缩放 / 拖拽平移移动。
+- **天文自解析图（FITS / XISF）恒 `isHdr=false`**，不会被误标。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/HdrBadge.ts` | **新增** 225 行唯一真值源，**41 个导出**（24 常量 + 17 纯函数）：显隐 / 位置 / 尺寸 / 遮挡决策 + WCAG 相对亮度·alpha 合成·对比度数值模型。零 SDK / 零 IO / 零异步 / 零 throw / 零定时器 / 零 Promise / 零全局可变状态 |
+| `pages/Index.ets` | 文件头主线号 `R69 → R70`、`ESC_BUILD_TAG` `R69 → R70`；`import` 徽标常量与 3 个决策函数（`hbVisibleOf` / `hbLeftOf` / `hbTopOf`）；预览区 `Stack` 内新增一个 `if (hbVisibleOf(...))` 徽标块（`9018` 起） |
+| `tests/dirname.test.mjs` | `import` HdrBadge 全套导出；**33 处**历史 `ESC_BUILD_TAG` 断言由 `R69` 整批升位 `R70`；新增 R70 组 **16 条**断言与真机步骤 A~D（`8897–8904`） |
+| `README.md` / 记忆文件 | 抬头 / 手册 / 步骤对照表同步，新增本章 |
+
+徽标本身：`Row` + `Text('HDR')`（`fontSize 11` / `FontWeight.Bold` / 纯白）+
+`padding(7, 3)` + 近不透明深色底板 `#db10141a` + 半透明白描边 `#66ffffff` +
+`borderRadius(4)` + `.position({ x: hbLeftOf(12), y: hbTopOf(fullscreen, 12, 24, 6) })`
++ `.hitTestBehavior(HitTestMode.Transparent)`。
+
+**逐字不变**：`decodePx` / `setViewMeta` / `showPreviewOf` / `viewIsHdr` /
+`viewHdrWanted` 既有 3 处 `dynamicRangeMode`、R69 行 `padding 0.2`、R68
+`viewDisplayPx`、R67 放大镜、R62 三插值四 AA 三 `autoResize`、R55 常显角标取消、
+三栏三按钮、文本预览 scrollbar、ESC 两态、`new Promise` 恰 2 处 / `Promise.race` 1 处 /
+无 worker、`APP_VERSION 1.0.7` / `versionCode 7`。
+
+### 三、为什么「清晰可读 / 固定 / 不遮挡 / 交互不变」
+
+- **深浅背景恒清晰**：徽标自带近不透明深色底板（alpha `0xdb/255 ≈ 0.86`）+ 纯白粗体 +
+  半透明白描边，对比度由徽标自身决定，与底下相片内容（纯白 / 纯黑 / 任意灰）几乎无关。
+  `hbBadgeContrastOf()` 用 WCAG 相对亮度 + alpha 合成逐点验证：背景灰度取
+  `0 / 32 / … / 255` 九档，白字对合成底板对比度**恒 ≥ 12**（远超 AAA 7:1），
+  最差在纯白背景、最好在纯黑背景。
+- **固定左上角 + 全屏避让**：尺寸 / 边距全部固定 `vp` 常量，不读 `canvasW` / `canvasH` /
+  `zoom` / `density`；`hbLeftOf` 恒 12vp；`hbTopOf` 普通态返回 12、全屏返回
+  `12 + 24 + 6 = 42`，让开 `12 + 24 = 36` 的提示底边，净距 6vp 不重叠。
+- **跨尺寸 / 跨密度一致**：`hbFixedSizeOf()` 在 `320×1×` 与 `3840×4×` 下都返回同一
+  40vp 标称值（脏值回退标称值）；`hbSafeMarginOf()` 仅当短边 `< 200vp` 才收缩边距，
+  常规画布一律恒 12vp。
+- **不遮挡主要内容**：`hbOcclusionOf()` 核算面积占比，`320×240` 起各尺寸均 `< 2%`
+  （上限 `HB_OCCLUSION_MAX = 0.02`）。
+- **交互零回归**：`HitTestMode.Transparent` 让滚轮切图 / 拖拽 / 右键放大镜 / 点击全部穿透；
+  徽标不进图片 `Column`、不进右下角 `BADGE` 切片，不参与任何既有布局测量。
+
+### 四、验证用例（`tests/dirname.test.mjs` R70 组）
+
+16 条：① HdrBadge 纯函数真值源（零 SDK/IO/await/throw/定时器/Promise/全局状态）；② 关键
+参数（HDR 文字 / 12vp / 24vp / 6vp / 40×20 / 2% / AAA 7:1）；③ 配色自洽
+（alpha 与 `HB_BG_ALPHA`、RGB 与 PLATE 常量逐值对应）；④ `hbVisibleOf` 严格判等
+（SDR / 文本态 / 无图源恒不显示）；⑤ WCAG 相对亮度模型（L(黑)=0 / L(白)=1 /
+白字对纯黑 21:1 / 合成夹界）；⑥ 深浅背景九档全域对比度 ≥ 12；⑦ 固定左上 + 全屏避让
+（12,12 / 42 / 净距 6vp）；⑧ 尺寸恒定不吃画布·zoom·密度；⑨ 常规边距恒 12vp +
+极小画布收缩 + 遮挡 < 2%；⑩ 显示层层级（Stack 直接子项、不随 rotate/scale/translate）；
+⑪ 徽标结构（门控 / 配色 / 圆角 / 描边 / position / Transparent）；⑫ 严格不误标
+（只用 `viewIsHdr`、绝不引用 `viewHdrWanted`）；⑬ HDR 真值链
+（`getImageInfo().isHdr → PreviewEntry.isHdr → setViewMeta → 切图清零`，天文恒 false）；
+⑭ 零回归（R69 / R68 / R67 / R62 / R55 链路全在）；⑮ 并发与版本零回归；
+⑯ 构建标记 `R70` / 旧标记 `R69`·`R68` 已清 / 33 条历史断言整批升位。
+
+### 五、验证结果（真实执行，非推断）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2179 passed, 0 failed`**（R69 基线 2163，+16 条 R70）；`git diff --check` 通过 |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 2 min 43 s 930 ms`**；`Finished :entry:default@CompileArkTS... after 1 min 57 s 340 ms`（**非 UP-TO-DATE**）；33 tasks：18 executed / 15 up-to-date；**0 ERROR / 17 WARN**（与 R69 完全一致，全为 `Index.ets` 既有 2in1 / `READ_IMAGEVIDEO` 提示）；日志 `/tmp/r70-build.log` |
+| 产物核验 | 签名 HAP **1,568,303 B**（R69 1,546,333 B）/ 未签名 **1,531,337 B**（R69 1,512,303 B）/ `ets/modules.abc` **895,280 B**（R69 884,484 B）；产物 mtime **02:05** 晚于源码 **01:36–01:41**，即 HAP 由最终源码编译；字节码构建标记常量 **`R70=1 / R69=0 / 1.0.7=1`**，`R68` 字面仅剩 4 处（全为逐字未动的 R68 日志串），`HDR` 字面 3 处 |
+| 版本守卫 | `APP_VERSION 1.0.7` / `versionCode 7` / `versionName 1.0.7` 逐字未动 |
+
+> ⚠️ 收口时发现先前 `/tmp/r64-build.log` 与 `entry/build/.../*.hap` 仍是 **R69 包**
+> （字节码 `R70=0 / R69=1`、mtime 00:56 早于 R70 源码），故**重新执行了 R70 真编译**
+> 并复核产物标记，未用旧产物充当新包证据。
+> **编译校验 ≠ 真机验证**，WCAG 对比度是数值模型、遮挡占比是面积算术，
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 R70-A~D）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:8897` R70 组）
+
+> ⚠️ 本组是源码静态契约 + WCAG 对比度数值模型，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R70-A：装新包后 Ctrl+D 角标必须是 R70；打开 HDR 相片，预览区左上角出现清晰「HDR」
+>     白字深色圆角标识；普通 SDR 相片 / FITS·XISF / 文本预览一律不显示该标识。
+> ⚠️ 真机步骤 R70-B：纯白 / 纯黑 / 高反差深浅底图各一张，标识边缘与文字均清晰可辨、无糊边、
+>     不被相片明暗吞没；放大 / 缩小 / 拖拽平移 / 旋转时标识恒固定左上角，不随图片移动。
+> ⚠️ 真机步骤 R70-C：窗口 resize 到最小与全屏，普通态边距 12vp、全屏态下移一行避开退出提示，
+>     两枚浮层不重叠；标识面积很小不遮挡相片主体；滚轮切图 / 右键放大镜 / 拖拽 / 点击全部照常。
+> ⚠️ 真机步骤 R70-D：HEIC/JPG/PNG / FITS·XISF / 文本预览 scrollbar / 并排右页 / 放大镜 /
+>     R68 主预览 resize 画质 / R69 行高 / 三栏三按钮 / ESC / 版本 1.0.7/7 全部零回归、无新增卡顿。
+
+### 七、边界
+
+- 未升版本（`1.0.7 / versionCode 7`）、未跑 `build.sh`、未把 HAP 放桌面；
+  徽标是**条件显示**（仅 HDR 相片），不是 R55 所禁止的常显角标；
+- 零新增解码 / 探测 / 读字节 / SDK 调用 / 异步 / 定时器 / 全局可变状态；
+- 右侧预览、顶栏、状态栏、左栏三栏、文本预览、放大镜、R68 主预览 AA 精炼、
+  R64 内容量统计等全部零回归；
+- **本轮未 push**（R63 `0b3416f` 起各轮均未推送，用户未授权）。
 
 ---
 

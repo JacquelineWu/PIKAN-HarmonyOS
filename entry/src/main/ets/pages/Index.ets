@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R69 主线（R39 起组件化）· FITS/XISF 天文图像预览
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R70 主线（R39 起组件化）· FITS/XISF 天文图像预览
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -195,6 +195,12 @@ import { VQ_CAP_COMPONENT, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR,
   vqConsistentTierOf, vqScaleAllowedOf, vqShouldRebuildOf, vqHasGainOf } from '../common/ViewQuality';
 // 第六十八轮：右侧主预览系统 native 级 AA 精炼（唯一碰 SDK 的实现在 model/Preview.ets）。
 import { viewSystemScaledPx } from '../model/Preview';
+// 第七十轮：HDR 标识的显隐 / 固定边距 / 全屏避让 / 深浅背景对比度真值源（零 SDK / 零 IO）。
+// 只把已有的 viewIsHdr（源图 ImageInfo.isHdr）接到显示层，不新增任何解码或探测。
+import { HB_LABEL, HB_MARGIN_VP, HB_HINT_H_VP, HB_HINT_GAP_VP,
+  HB_FONT_VP, HB_PAD_H_VP, HB_PAD_V_VP, HB_RADIUS_VP, HB_BORDER_VP,
+  HB_BG_COLOR, HB_FG_COLOR, HB_BORDER_COLOR,
+  hbVisibleOf, hbLeftOf, hbTopOf } from '../common/HdrBadge';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -204,7 +210,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R69';
+const ESC_BUILD_TAG: string = 'R70';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -9006,6 +9012,29 @@ struct Index {
             .justifyContent(FlexAlign.Start)
             .alignItems(VerticalAlign.Top)
             .padding(12)
+            .hitTestBehavior(HitTestMode.Transparent)
+          }
+
+          // 第七十轮：仅 HDR 相片在预览区左上角叠加「HDR」标识（自带近不透明深色底板 + 白字 +
+          // 半透明描边，深浅背景恒清晰）。挂在预览区 Stack 直接子项、与图片 Column 平级 ⇒
+          // 不随图片旋转 / 缩放 / 拖拽平移移动，恒固定左上角 + 12vp 边距；全屏时下移一行
+          // 避开「全屏 · Esc / F11 / 双击退出」提示。HitTestMode.Transparent 让滚轮切图 /
+          // 拖拽 / 右键放大镜 / 点击全部穿透，交互零回归。严格取 viewIsHdr（源图
+          // ImageInfo.isHdr），不用 viewHdrWanted（含广色域 SDR，会误标非 HDR 相片）。
+          if (hbVisibleOf(this.viewIsHdr, this.viewPixelMap !== undefined, this.textMode)) {
+            Row() {
+              Text(HB_LABEL)
+                .fontSize(HB_FONT_VP)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(HB_FG_COLOR)
+            }
+            .padding({ left: HB_PAD_H_VP, right: HB_PAD_H_VP,
+              top: HB_PAD_V_VP, bottom: HB_PAD_V_VP })
+            .backgroundColor(HB_BG_COLOR)
+            .border({ width: HB_BORDER_VP, color: HB_BORDER_COLOR })
+            .borderRadius(HB_RADIUS_VP)
+            .position({ x: hbLeftOf(HB_MARGIN_VP),
+              y: hbTopOf(this.fullscreen, HB_MARGIN_VP, HB_HINT_H_VP, HB_HINT_GAP_VP) })
             .hitTestBehavior(HitTestMode.Transparent)
           }
 
