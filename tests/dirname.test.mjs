@@ -239,6 +239,23 @@ import { LQ_CAP_COMPONENT, LQ_CAP_SYSTEM_AA, LQ_CAP_HW_CROP,
   lqScaleAllowedOf, lqSafeFactorOf, lqShouldRebuildOf, lqHasGainOf,
   lqCubicWeightOf, lqLinearWeightOf, lqResampleOf, lqEdgeJitterOf,
   lqOvershootOf } from '../entry/src/main/ets/common/LoupeQuality.ts';
+// 第六十八轮：右侧主预览 resize 最高质素的关键参数 / 场景分档 / 内容自适应 AA / 边缘信号模型。
+import { VQ_SCENE_SHRINK_DEEP, VQ_SCENE_SHRINK, VQ_SCENE_ONE,
+  VQ_SCENE_ENLARGE, VQ_SCENE_ENLARGE_HIGH,
+  VQ_KIND_IMAGE, VQ_KIND_GRAPHIC, VQ_KIND_TEXT,
+  VQ_CAP_COMPONENT, VQ_CAP_SYSTEM_AA,
+  VQ_AA_LOW, VQ_AA_MEDIUM, VQ_AA_HIGH,
+  VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR, VQ_CUBIC_MAX_SCALE,
+  VQ_REFINE_FACTOR_IMAGE, VQ_REFINE_FACTOR_DOC,
+  VQ_MAX_TARGET_PIXELS, VQ_MAX_FACTOR, VQ_MAX_EDGE,
+  VQ_STABLE_MIN_DELTA, VQ_MIN_GAIN, VQ_RESAMPLE_1X,
+  VQ_DENSITY_MIN, VQ_DENSITY_MAX, VQ_DENSITY_REF, VQ_DENSITY_FALLBACK,
+  VQ_MODE_NEAREST, VQ_MODE_LINEAR, VQ_MODE_CUBIC, VQ_MODE_MIPMAP,
+  vqFiniteOf, vqDensityOf, vqSceneOf, vqKindOf, vqAaLevelOf,
+  vqSystemWantedOf, vqRefineFactorOf, vqEffectiveScaleOf, vqConsistentTierOf,
+  vqSafeFactorOf, vqScaleAllowedOf, vqShouldRebuildOf, vqHasGainOf,
+  vqCubicWeightOf, vqLinearWeightOf, vqResampleOf, vqEdgeJitterOf,
+  vqOvershootOf } from '../entry/src/main/ets/common/ViewQuality.ts';
 
 const ROOT = '/storage/Users/currentUser/Download/com.baidu.netdisk.hmpc';
 let pass = 0;
@@ -1414,7 +1431,7 @@ check('右下角不出现 MB / 上限 / 张数分母 / 缓存账目',
   /fmtBytes|PRELOAD_COUNT|PRELOAD_MAX_BYTES|cacheBytes|cacheCount/.test(BADGE_CODE) === false, true);
 check('缩放百分比只在诊断层角标显示（R55 起正式版右下角无常显项）；构建标记与 keys=N 口径未改',
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(BADGE_CODE) &&
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX) &&
   /' · keys=' \+ this\.keySeen/.test(INDEX) &&
   /const ZOOM_PCT_RELATIVE_TO_PIXEL: boolean = true;/.test(INDEX), true);
 check('状态栏「预载 N 张」保持不变（只删百分比上方那一处），不带 MB 占用',
@@ -3901,7 +3918,7 @@ check('③ R24 按键去重：ESC 只在当前事件循环内去重，非 ESC �
   INDEX.includes('if (this.lastKeyEvent === event) {') &&
   INDEX.includes('FULL_EXIT_ESC_GUARD_MS') === false, true);
 check('③ 诊断层展开时可见 R38 构建标记 + 诊断行（正式版默认收起，只留百分比）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   /' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
   INDEX.includes('if (this.escDiag.length > 0 || this.keySeen === 0) {') &&
   INDEX.includes("未收到任何按键") &&
@@ -3989,7 +4006,7 @@ check('④ 诊断层展开时角标显示 keys=N；keys=0 显示红字「未收�
   INDEX.includes("'keys=0 · ' + this.focusDiag + ' · 未收到任何按键'") &&
   INDEX.includes(".fontColor(this.escDiag.length > 0 ? '#ffd479' : '#ff9a9a')"), true);
 check('④ R38 构建标记已升级（R33 / R32 / R31 / R30 / R29 / R28 / R27 / R26 / R25 / R24 / R23 / R22 / R21 旧包可从截图一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4090,7 +4107,7 @@ check('④ 诊断层展开时显示鼠标「退出 APP」入口：不依赖键�
 
 console.log('--- 第二十三轮 ⑤：回归护栏 + 验证边界声明 ---');
 check('⑤ R38 构建标记升级且旧标记已清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4169,7 +4186,7 @@ check('④ Ctrl+Q 退出：不依赖 ESC / 焦点重建 / 系统沉浸形态',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_Q) {') &&
   /if \(this\.ctrlDown && code === KeyCode\.KEYCODE_Q\) \{\s*this\.quitApp\(\);\s*return;/.test(INDEX), true);
 check('④ R38 构建标记且 R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4224,7 +4241,7 @@ check('② 诊断层切换入口：Ctrl+D + 展开时点全字段角标收起（
 
 console.log('--- 第二十五轮 ③：R38 构建标记 + 既有链路零回归 ---');
 check('③ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧标记全清除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R35';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R36';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R33';") === false &&
@@ -4308,7 +4325,7 @@ check('③ 滚轮翻页仍是 go(d)（Ctrl 才缩放），双指捏合 / 右键�
 
 console.log('--- 第二十六轮 ④：R38 构建标记 + 既有链路零回归 ---');
 check('④ ESC_BUILD_TAG=R35，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('④ ESC 两态 / 诊断层开关 / 焦点链路 / 版本 1.0.7 全部未坏',
@@ -4424,7 +4441,7 @@ check('⑤ ESC 两态 / 方向键翻页 / 诊断层 / ro1 闸门 / 版本 1.0.7 
   (INDEX.match(/bulkIoAllowed\(this\.restoreMode\)/g) || []).length >= 9 &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';"), true);
 check('⑤ R38 构建标记，R33/R32/R31/R30/R29/R28/R27/R26/R25/R24/R23/R22/R21 旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机 NAS 路径验证。');
@@ -4548,7 +4565,7 @@ check('R29 showUpListInApp 仍回填 browseBase / titlePath / canGoUp',
   /this\.titlePath = target;/.test(UPLIST_CODE) &&
   /this\.canGoUp = canGoUpFrom\(target\);/.test(UPLIST_CODE), true);
 check('R38 构建标记，R33 及更早旧标记全清除',
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX) &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
@@ -4745,7 +4762,7 @@ check('R29 browseUp 父级真值校验 / 两处 showUpListInApp 收口 / 清旧�
   (UP_FN.match(/this\.showUpListInApp\(/g) || []).length === 2 &&
   /this\.pickRootUri = '';/.test(UP_FN), true);
 check('R38 构建标记且 R33 及更早旧包全部可从截图排除',
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX) &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
@@ -4946,7 +4963,7 @@ check('R30 零回归：R27 真异步 / R26 翻页 / R25 诊断开关 / 版本守
   /case KeyCode\.KEYCODE_DPAD_UP:[\s\S]{0,300}this\.go\(-1\)/.test(INDEX) &&
   /const DIAG_OVERLAY_DEFAULT: boolean = false;/.test(INDEX) &&
   /const APP_VERSION: string = '1\.0\.7'/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX), true);
 console.log('  ⚠️ 本组仍是源码静态契约 + 纯函数回归，不替代真机重启验证。');
 console.log('  ⚠️ 真机步骤：装 R38 包 → 子目录看图 → 退出重开 → 点「往上层」→ 应落在直接父级并列出全部子目录。');
 
@@ -5004,7 +5021,7 @@ console.log('--- 第三十一轮 ②：Index.ets 静态接线（隔离 / 编码 
 check('R31 接线：DirName import 三个新函数',
   /prefsSafeEncode, prefsSafeDecode, prefsIsLegacyBadCache/.test(INDEX), true);
 check('R35 接线：ESC_BUILD_TAG 升 R38 且源码不再有 R34 定义',
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX) &&
   /const ESC_BUILD_TAG: string = 'R35';/.test(INDEX) === false &&
   /const ESC_BUILD_TAG: string = 'R36';/.test(INDEX) === false, true);
 check('R31 接线：readLastPos 主 try 只 await readBrowseExtras（增强 key 不再内联）',
@@ -5546,7 +5563,7 @@ check('R35 零回归：版本 1.0.7 / 诊断默认关闭 / 往上层恒亮不禁
   /\.enabled\(/.test(CODE_LINES) === false &&
   /isStrictParentOf\(target, current\)/.test(UP_FN), true);
 check('R38 构建标记升 R38，R34 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX) &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
@@ -5666,7 +5683,7 @@ check('R36 接线：目录态持久化 key + 全量探索夹界常量',
   /const POS_KEY_DIRCTX: string = 'lastDirCtx';/.test(INDEX) &&
   /const UP_EXPLORE_MAX_FORMS: number = 64;/.test(INDEX), true);
 check('R38 构建标记升 R38，R35 及更早旧包可从截图一眼排除',
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX) &&
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX) &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21']
     .every(t => INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 check('R36 根因护栏 A：markPos 无图片时不再直接 return，仍排一次写盘',
@@ -5984,7 +6001,7 @@ check('R37 TextDoc.ts 纯函数导出齐全（59 个 export）',
   (TEXTDOC.match(/^export (const|function|interface)/gm) || []).length, 59);
 check('R38 Index import TextDoc 真值源，且构建标记升 R38',
   INDEX.includes("from '../common/TextDoc';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';"), true);
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';"), true);
 check('R37 新增 ROW_TEXT=4，文本行只进 rows 不进 items',
   /const ROW_TEXT: number = 4;/.test(ARCHIVE) &&
   INDEX.includes('texts.push({ uri: child, name: shown, size: size, mtime: mtime, kind: ROW_TEXT, itemIndex: -1 });') &&
@@ -6105,7 +6122,7 @@ check('R37 零回归：往上层主链 / R36 目录态 / ESC 严格两态 / 诊�
   INDEX.includes('const DIAG_OVERLAY_DEFAULT: boolean = false;') &&
   INDEX.includes('escActionByState(this.fullscreen, this.pendingSystemEcho);'), true);
 check('R38 构建标记 R38，R37 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26',
     'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
@@ -6220,7 +6237,7 @@ check('R38 既有往上层主链 / 全量探索 / R36 目录态 / R37 文本态�
   INDEX.includes("if (this.textMode) {"), true);
 check('R38 版本恒定 1.0.7 / 7，构建标记 R38',
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R37';") === false, true);
 check('R38 旧包排除：R37 及更早旧标记全不在源码里',
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28',
@@ -6534,7 +6551,7 @@ check('R55 全屏退出提示保留（唯一指引，仅全屏出现，样式带
 check('R55 右下角百分比方块取消：无常显分支，缩放百分比只在诊断层（Ctrl+D）角标里出现',
   /Text\(this\.zoomPercentText\(\)\)/.test(INDEX) === false &&
   /Text\(this\.zoomPercentText\(\) \+ ' · ' \+ ESC_BUILD_TAG/.test(INDEX) &&
-  /const ESC_BUILD_TAG: string = 'R67';/.test(INDEX), true);
+  /const ESC_BUILD_TAG: string = 'R68';/.test(INDEX), true);
 check('R55 诊断层入口与内容不变：Ctrl+D 切换、退出 APP 按钮、全字段角标、diagLine 赋值链全保留',
   INDEX.includes('if (this.ctrlDown && code === KeyCode.KEYCODE_D) {') &&
   /Text\('退出 APP'\)/.test(INDEX) &&
@@ -6566,7 +6583,7 @@ const spread56Start = INDEX.indexOf('private refreshSpread(): void {');
 const SPREAD56_FN = INDEX.slice(spread56Start, spread56Start + 1800);
 
 check('R66 构建标记 R66，R64 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
 
@@ -6670,7 +6687,7 @@ check('R56 既有翻页 / 右页重试 / 文本预览 / 往上层 / 版本守卫
   /if \(this\.textMode\) \{/.test(INDEX) &&
   /private async browseUp\(\): Promise<void> \{/.test(INDEX) &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';"), true);
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';"), true);
 
 console.log('  ⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。');
 console.log('  ⚠️ 真机步骤 R56-A：打开任意含图目录 → 切到别的应用 / 锁屏再返回 → 左栏应只刷一次、');
@@ -6690,7 +6707,7 @@ const BOOT57_FN = INDEX.slice(boot57Start, boot57End > boot57Start ? boot57End :
 const RESUME56_DECISION_FN = INDEX.slice(r56Start, boot57Start);
 
 check('R64 构建标记 R64，旧包排除数组首位补 R64（R64 旧包截图可一眼排除）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   /\['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56'/.test(TEST_SELF) === true, true);
 
 // —— 冷启动补刷的独立纯函数决策（R56 决策零回归） ——
@@ -6854,7 +6871,7 @@ check('R58 ViewPlan 新增两纯函数零 SDK / 零 IO / 零 await / 零 throw',
   /@ohos\.|\bfs\./.test(VP58) === false &&
   /\bawait\s|\bthrow\s+/.test(VP58) === false, true);
 check('R66 构建标记 R66 且 R64 / R63 旧标记定义全清除（截图一眼排除旧包）',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R63';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R62';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R61';") === false &&
@@ -7010,7 +7027,7 @@ check('R59 目录切换 / 文本预览 / 并排预览 / 视窗护栏 / 版本守
   INDEX.includes('chromeSampleOf(') && INDEX.includes('canvasResizeAcceptOf(') &&
   INDEX.includes('this.openTextFile(r.uri, r.name);'), true);
 check('R66 构建标记 R66，R64 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") === false &&
   ['R64', 'R63', 'R62', 'R61', 'R60', 'R57', 'R56', 'R55', 'R54', 'R53', 'R52', 'R51', 'R50', 'R49', 'R48', 'R47', 'R46', 'R45', 'R44', 'R43', 'R42', 'R41', 'R38', 'R37', 'R36', 'R35', 'R34', 'R33', 'R32', 'R31', 'R30', 'R29', 'R28', 'R27', 'R26', 'R25', 'R24', 'R23', 'R22', 'R21'].every(t =>
     INDEX.includes("const ESC_BUILD_TAG: string = '" + t + "';") === false), true);
@@ -7145,7 +7162,7 @@ check('R60 文本预览 / 并排预览 / 视窗护栏 / 版本守卫零回归',
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
   /"versionCode":\s*7/.test(APP_JSON) && /"versionName":\s*"1\.0\.7"/.test(APP_JSON), true);
 check('R66 构建标记 R66，R64 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R59';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R58';") === false, true);
 
@@ -7261,7 +7278,7 @@ check('R61 全源码裸 scrollToIndex 仍恰好 4 处 / 版本守卫 1.0.7 / 7',
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
   /"versionCode":\s*7/.test(APP_JSON) && /"versionName":\s*"1\.0\.7"/.test(APP_JSON), true);
 check('R66 构建标记 R66，R64 及更早旧包可从截图一眼排除',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R63';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R62';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R61';") === false, true);
@@ -7420,7 +7437,7 @@ check('R62 解码档位 / 缓存 / resize 节流 / 高亮护栏 / 文本预览 /
 check('R64 版本守卫 1.0.7 / 7、构建标记 R66、R63 旧标记定义已清除',
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
   /"versionCode":\s*7/.test(APP_JSON) && /"versionName":\s*"1\.0\.7"/.test(APP_JSON) &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R61';") === false, true);
 
 console.log('  ⚠️ 本组是静态契约 + 纯函数 + 一维信号数值验证，不替代真机验证；编译校验 ≠ 真机验证。');
@@ -7682,7 +7699,7 @@ check('R64 DirCount.ts 零 SDK / 零文件 IO / 零异步 / 零异常 / 零全�
 // —— 源码接线 ——
 check('R64 Index 接入 DirCount 真值源：导入 + 构建标记 R66 + 三个展示 @State',
   INDEX.includes("from '../common/DirCount';") &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes('@State dirCountLabels: string[] = [];') &&
   INDEX.includes('@State dirCountVersion: number = 0;') &&
   INDEX.includes('@State dirCountTtlLabel: string ='), true);
@@ -7980,7 +7997,7 @@ check('R65 零回归：new Promise 仍恰 2 处、Promise.race 仍 1 处、版�
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
   /"versionCode":\s*7/.test(APP_JSON) && /"versionName":\s*"1\.0\.7"/.test(APP_JSON) &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R64';") === false &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';"), true);
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';"), true);
 check('R65 正式界面零新增常显控件：三按钮 / 三栏 / DirCount 四态链 / 文本 scrollbar 全未动',
   (SIDEBAR.match(/ToolButton\(/g) || []).length === 3 &&
   (BADGE_CODE.match(/^\s*Text\(/gm) || []).length === 3 &&
@@ -8180,7 +8197,7 @@ check('R66 nasRetryWait 委托 yieldMacroTask：R44 重试节奏语义不变、I
   INDEX.includes('return yieldMacroTask(ms);') &&
   /private nasRetryWait\(ms: number\): Promise<void> \{\s*return yieldMacroTask\(ms\);/.test(INDEX), true);
 check('R66 零回归：构建标记 R66 / 版本 1.0.7/7 / 普通图片 codec 两行 / R65 旧标记已清',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R65';") === false &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
   /"versionCode":\s*7/.test(APP_JSON) && /"versionName":\s*"1\.0\.7"/.test(APP_JSON) &&
@@ -8363,7 +8380,7 @@ check('R67 Index.ets：LoupeQuality 决策 import + 系统缩放 import + 画质
   INDEX.includes("from '../common/LoupeQuality';") &&
   INDEX.includes("import { loupeCapabilityOf, loupeSystemScaledPx } from '../model/Preview';") &&
   INDEX.includes('interface LoupeScalePlan {') &&
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("'R66';") === false, true);
 check('R67 Index.ets 画质计划：逻辑/有效倍率、内容种类、AA 档、目标边、稳定阈值/真实增益全在',
   INDEX.includes('private loupeSystemPlan(uri: string): LoupeScalePlan') &&
@@ -8393,7 +8410,7 @@ check('R67 显示层：系统级产物优先 + uri/pane 双重对账 + 五个图
   LOUPE13_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 5 &&
   LOUPE13_CODE.includes('if (this.loupeHiUsable(uri, pane))'), true);
 check('R67 零回归：构建标记 R67 / R66 旧标记已清 / 版本 1.0.7/7 / 三处 autoResize / 三按钮三栏',
-  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R66';") === false &&
   INDEX.includes("const ESC_BUILD_TAG: string = 'R65';") === false &&
   INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
@@ -8418,6 +8435,234 @@ console.log('  ⚠️ 真机步骤 R67-C：hilog 出现 loupe R67 cap=1|2 表示
 console.log('     createScaledPixelMap FAIL 时自动回退 R17 组件级链，放大镜仍可用、不空白、不崩溃。');
 console.log('  ⚠️ 真机步骤 R67-D：既有 HEIC/JPG/PNG / 文本预览 scrollbar / 并排 / 全屏 / ESC /');
 console.log('     R64 内容量统计 / R65 天文解析 / R66 主线程让出 / 三栏三按钮 / 版本 1.0.7/7 全部零回归。');
+
+// ==================== 第六十八轮：右侧主预览 resize 最高质素（R68） ====================
+console.log('--- 第六十八轮：右侧主预览 resize 最高质素（系统 native AA 精炼 / 关键参数 / 零回归）---');
+const VQ68_CODE = stripComments(readFileSync(
+  new URL('../entry/src/main/ets/common/ViewQuality.ts', import.meta.url), 'utf8'));
+const THIN68 = [0, 0, 0, 0, 1, 0, 0, 0, 0];
+const CURVE68 = [0, 0.03, 0.12, 0.28, 0.5, 0.72, 0.88, 0.97, 1, 1, 1, 1];
+const STEP68 = [0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0];
+
+// —— ① 关键参数设定 ——
+check('R68 缩放场景档 / 内容种类 / 能力档 / AA 档常量语义（AA 数值 = SDK AntiAliasingLevel）',
+  VQ_SCENE_SHRINK_DEEP === 0 && VQ_SCENE_SHRINK === 1 && VQ_SCENE_ONE === 2 &&
+  VQ_SCENE_ENLARGE === 3 && VQ_SCENE_ENLARGE_HIGH === 4 &&
+  VQ_KIND_IMAGE === 0 && VQ_KIND_GRAPHIC === 1 && VQ_KIND_TEXT === 2 &&
+  VQ_CAP_COMPONENT === 0 && VQ_CAP_SYSTEM_AA === 1 &&
+  VQ_AA_LOW === 1 && VQ_AA_MEDIUM === 2 && VQ_AA_HIGH === 3, true);
+check('R68 关键参数：1:1 容差 0.06 / MipMap 门槛 0.4 / Cubic 高倍门槛 2 / 精炼倍率 1.5·1.25',
+  VQ_NEAR_ONE_TOL === 0.06 && VQ_MIPMAP_FLOOR === 0.4 &&
+  VQ_CUBIC_MAX_SCALE === 2 && VQ_REFINE_FACTOR_IMAGE === 1.5 &&
+  VQ_REFINE_FACTOR_DOC === 1.25, true);
+check('R68 资源护栏与 R67 逐项对齐：4M 像素 / 3× 倍率 / 8192 长边 / 64px 稳定 / 96px 增益',
+  VQ_MAX_TARGET_PIXELS === 4 * 1024 * 1024 && VQ_MAX_FACTOR === 3 &&
+  VQ_MAX_EDGE === 8192 && VQ_STABLE_MIN_DELTA === 64 && VQ_MIN_GAIN === 96 &&
+  VQ_RESAMPLE_1X === 1 &&
+  VQ_MAX_TARGET_PIXELS === LQ_MAX_TARGET_PIXELS && VQ_MAX_FACTOR === LQ_MAX_FACTOR &&
+  VQ_MAX_EDGE === LQ_MAX_EDGE && VQ_STABLE_MIN_DELTA === LQ_STABLE_MIN_DELTA &&
+  VQ_MIN_GAIN === LQ_MIN_GAIN, true);
+check('R68 密度 / 数值验证模式码常量语义',
+  VQ_DENSITY_MIN === 0.5 && VQ_DENSITY_MAX === 4 && VQ_DENSITY_REF === 1 &&
+  VQ_DENSITY_FALLBACK === 1 &&
+  VQ_MODE_NEAREST === 0 && VQ_MODE_LINEAR === 1 &&
+  VQ_MODE_CUBIC === 2 && VQ_MODE_MIPMAP === 3, true);
+
+// —— ② 基础判据 / 场景 / 内容 / 跨密度一致 ——
+check('R68 vqFiniteOf / vqDensityOf：NaN / 0 / 负数回退 1，越界夹到 [0.5,4.0]',
+  vqFiniteOf(3) === true && vqFiniteOf(NaN) === false &&
+  vqDensityOf(NaN) === 1 && vqDensityOf(0) === 1 && vqDensityOf(-3) === 1 &&
+  vqDensityOf(0.2) === VQ_DENSITY_MIN && vqDensityOf(9) === VQ_DENSITY_MAX &&
+  vqDensityOf(2) === 2, true);
+check('R68 vqSceneOf 五档分界与脏值按 1:1 兜底',
+  vqSceneOf(0.25, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_SHRINK_DEEP &&
+  vqSceneOf(0.4, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_SHRINK &&
+  vqSceneOf(0.67, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_SHRINK &&
+  vqSceneOf(0.93, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_SHRINK &&
+  vqSceneOf(1.0, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_ONE &&
+  vqSceneOf(1.5, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_ENLARGE &&
+  vqSceneOf(3.0, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_ENLARGE_HIGH &&
+  vqSceneOf(NaN, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_ONE &&
+  vqSceneOf(-1, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR) === VQ_SCENE_ONE, true);
+check('R68 vqKindOf：文字·扫描件·报表→TEXT，图表·svg→GRAPHIC，照片·HEIC·FITS→IMAGE',
+  vqKindOf('notes.TXT') === VQ_KIND_TEXT && vqKindOf('扫描件.png') === VQ_KIND_TEXT &&
+  vqKindOf('报表.pdf') === VQ_KIND_TEXT && vqKindOf('screenshot.png') === VQ_KIND_TEXT &&
+  vqKindOf('chart.svg') === VQ_KIND_GRAPHIC && vqKindOf('schematic.png') === VQ_KIND_GRAPHIC &&
+  vqKindOf('IMG_0001.HEIC') === VQ_KIND_IMAGE && vqKindOf('m31.fits') === VQ_KIND_IMAGE, true);
+check('R68 跨密度一致档：同一逻辑倍率在 0.5/1/2/3/4 密度下恒同档；有效倍率 = 逻辑 × 归一化密度',
+  [0.5, 1, 2, 3, 4].every(d => vqConsistentTierOf(3, d) === vqConsistentTierOf(3, 1)) &&
+  [0.5, 1, 2, 3, 4].every(d => vqConsistentTierOf(0.67, d) === vqConsistentTierOf(0.67, 1)) &&
+  vqConsistentTierOf(1, 2) === VQ_SCENE_ONE &&
+  vqConsistentTierOf(3, 2) === VQ_SCENE_ENLARGE_HIGH &&
+  vqEffectiveScaleOf(3, 2) === 6 && vqEffectiveScaleOf(3, 0.5) === 1.5, true);
+
+// —— ③ 系统级 AA 档决策 ——
+check('R68 缩小 / 极端缩小一律 MEDIUM(mipmap 预滤波)，1:1 一律 LOW',
+  [0.25, 0.4, 0.5, 0.67, 0.73, 0.93].every(k =>
+    vqAaLevelOf(k, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA) === VQ_AA_MEDIUM) &&
+  [0.25, 0.67].every(k => vqAaLevelOf(k, VQ_KIND_TEXT, VQ_CAP_SYSTEM_AA) === VQ_AA_MEDIUM) &&
+  vqAaLevelOf(1, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA) === VQ_AA_LOW, true);
+check('R68 影像放大 / 温和放大一律 HIGH(Cubic)，高倍文字·图形改 MEDIUM 抑制负 lobe',
+  [1.07, 1.37, 2.0, 3.0, 4.0].every(k =>
+    vqAaLevelOf(k, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA) === VQ_AA_HIGH) &&
+  vqAaLevelOf(1.5, VQ_KIND_TEXT, VQ_CAP_SYSTEM_AA) === VQ_AA_HIGH &&
+  vqAaLevelOf(3, VQ_KIND_TEXT, VQ_CAP_SYSTEM_AA) === VQ_AA_MEDIUM &&
+  vqAaLevelOf(3, VQ_KIND_GRAPHIC, VQ_CAP_SYSTEM_AA) === VQ_AA_MEDIUM &&
+  vqAaLevelOf(3, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA) === VQ_AA_HIGH, true);
+check('R68 能力不足恒 LOW 哨兵、脏缩放比按 1:1 保守回退，绝不落 NONE',
+  vqAaLevelOf(0.67, VQ_KIND_IMAGE, VQ_CAP_COMPONENT) === VQ_AA_LOW &&
+  vqAaLevelOf(3, VQ_KIND_TEXT, VQ_CAP_COMPONENT) === VQ_AA_LOW &&
+  vqAaLevelOf(NaN, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA) === VQ_AA_LOW &&
+  vqAaLevelOf(-1, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA) === VQ_AA_LOW, true);
+check('R68 vqSystemWantedOf：1:1 / 脏值 / 能力不足一律不做（省资源，绝不无意义分配）',
+  vqSystemWantedOf(1, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL) === false &&
+  vqSystemWantedOf(1.02, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL) === false &&
+  vqSystemWantedOf(NaN, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL) === false &&
+  vqSystemWantedOf(-1, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL) === false &&
+  vqSystemWantedOf(0.67, VQ_KIND_IMAGE, VQ_CAP_COMPONENT, VQ_NEAR_ONE_TOL) === false &&
+  vqSystemWantedOf(0.67, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL) === true &&
+  vqSystemWantedOf(3, VQ_KIND_TEXT, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL) === true, true);
+check('R68 精炼倍率只认内容种类、不吃 zoom / 恒夹 maxFactor（跨帧稳定）',
+  vqRefineFactorOf(VQ_KIND_IMAGE, VQ_MAX_FACTOR) === 1.5 &&
+  vqRefineFactorOf(VQ_KIND_TEXT, VQ_MAX_FACTOR) === 1.25 &&
+  vqRefineFactorOf(VQ_KIND_GRAPHIC, VQ_MAX_FACTOR) === 1.25 &&
+  vqRefineFactorOf(VQ_KIND_IMAGE, 1.1) === 1.1 &&
+  vqRefineFactorOf(VQ_KIND_IMAGE, NaN) <= VQ_MAX_FACTOR, true);
+
+// —— ④ 资源护栏（防卡顿 / 防 OOM / 防无意义分配） ——
+check('R68 vqSafeFactorOf：4M 预算把 3× 夹到 ≤3 且 ceil 后不越界；超大源返回 1（跳过精炼）',
+  (() => {
+    const f = vqSafeFactorOf(1000, 1000, 3, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE);
+    const w = Math.ceil(1000 * f), h = Math.ceil(1000 * f);
+    return f > 1 && f <= VQ_MAX_FACTOR && Math.abs(f - 2.048) < 0.001 &&
+      w * h <= VQ_MAX_TARGET_PIXELS && w <= VQ_MAX_EDGE && h <= VQ_MAX_EDGE &&
+      vqSafeFactorOf(4000, 3000, 2, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) === 1 &&
+      vqSafeFactorOf(0, 600, 2, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) === 1 &&
+      vqSafeFactorOf(800, 600, NaN, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) <= VQ_MAX_FACTOR;
+  })(), true);
+check('R68 vqScaleAllowedOf：能力 / factor≤1 / 超预算 / 脏尺寸四重拒绝，正常精炼放行',
+  vqScaleAllowedOf(800, 600, 1.5, VQ_CAP_COMPONENT, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) === false &&
+  vqScaleAllowedOf(800, 600, 1, VQ_CAP_SYSTEM_AA, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) === false &&
+  vqScaleAllowedOf(6000, 4000, 2, VQ_CAP_SYSTEM_AA, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) === false &&
+  vqScaleAllowedOf(NaN, 600, 1.5, VQ_CAP_SYSTEM_AA, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) === false &&
+  vqScaleAllowedOf(800, 600, 1.5, VQ_CAP_SYSTEM_AA, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE) === true, true);
+check('R68 vqShouldRebuildOf / vqHasGainOf：微动不重算 / 无真实增益不分配 / 脏值安全',
+  vqShouldRebuildOf(0, 4096, VQ_STABLE_MIN_DELTA) === true &&
+  vqShouldRebuildOf(4096, 4096 + 63, VQ_STABLE_MIN_DELTA) === false &&
+  vqShouldRebuildOf(4096, 4096 + 64, VQ_STABLE_MIN_DELTA) === true &&
+  vqShouldRebuildOf(4096, NaN, VQ_STABLE_MIN_DELTA) === false &&
+  vqHasGainOf(4800, 800, VQ_MIN_GAIN) === true &&
+  vqHasGainOf(4800, 4800, VQ_MIN_GAIN) === false &&
+  vqHasGainOf(NaN, 0, VQ_MIN_GAIN) === false, true);
+
+// —— ⑤ 一维边缘信号数值模型（为什么缩小 / 高倍文字必须改走 mipmap） ——
+check('R68 Cubic 核 1<|x|<2 存在负 lobe（-0.0625 @1.5）；双线性核恒非负',
+  vqCubicWeightOf(1.5) === -0.0625 && vqCubicWeightOf(0) === 1 &&
+  vqLinearWeightOf(1.5) === 0 && vqLinearWeightOf(0.5) === 0.5 &&
+  vqLinearWeightOf(-0.5) === 0.5, true);
+check('R68 缩小场景选 MEDIUM 的数值依据：mip 过冲恒 0 而 Cubic >0，曲线抖动 mip ≤ Cubic',
+  (() => {
+    const ks = [0.25, 0.4, 0.5, 0.67, 0.73, 0.93];
+    return ks.every(k => {
+      const cub = vqResampleOf(THIN68, k, VQ_MODE_CUBIC);
+      const mip = vqResampleOf(THIN68, k, VQ_MODE_MIPMAP);
+      const cc = vqResampleOf(CURVE68, k, VQ_MODE_CUBIC);
+      const cm = vqResampleOf(CURVE68, k, VQ_MODE_MIPMAP);
+      return vqAaLevelOf(k, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA) === VQ_AA_MEDIUM &&
+        vqOvershootOf(mip, 0, 1) === 0 &&
+        vqEdgeJitterOf(cm) <= vqEdgeJitterOf(cc);
+    }) && vqOvershootOf(vqResampleOf(THIN68, 0.73, VQ_MODE_CUBIC), 0, 1) > 0;
+  })(), true);
+check('R68 放大场景影像选 HIGH 与恒 Cubic 逐点一致（细节零回归）',
+  (() => [1.07, 1.37, 2.0, 3.0, 4.0].every(k => [THIN68, CURVE68].every(sig => {
+    const aa = vqAaLevelOf(k, VQ_KIND_IMAGE, VQ_CAP_SYSTEM_AA);
+    const mode = aa === VQ_AA_HIGH ? VQ_MODE_CUBIC :
+      (aa === VQ_AA_MEDIUM ? VQ_MODE_MIPMAP : VQ_MODE_LINEAR);
+    const cub = vqResampleOf(sig, k, VQ_MODE_CUBIC);
+    const sel = vqResampleOf(sig, k, mode);
+    return aa === VQ_AA_HIGH && cub.length === sel.length &&
+      cub.every((v, i) => v === sel[i]);
+  })))(), true);
+check('R68 高倍文字选 MEDIUM 的数值依据：mip 过冲 / 抖动双低于 Cubic',
+  (() => {
+    const cub = vqResampleOf(STEP68, 3, VQ_MODE_CUBIC);
+    const mip = vqResampleOf(STEP68, 3, VQ_MODE_MIPMAP);
+    return vqAaLevelOf(3, VQ_KIND_TEXT, VQ_CAP_SYSTEM_AA) === VQ_AA_MEDIUM &&
+      vqOvershootOf(mip, 0, 1) === 0 && vqOvershootOf(cub, 0, 1) > 0 &&
+      vqEdgeJitterOf(mip) < vqEdgeJitterOf(cub);
+  })(), true);
+
+// —— ⑥ 源码接线静态契约：真值源纯净 / SDK 独立出口 / 触发链 / 零回归 ——
+check('R68 ViewQuality.ts 仍是纯函数真值源：零 SDK / 零 IO / 零 await / 零 throw / 零定时器 / 零 Promise',
+  ['@ohos.', 'setTimeout', 'fileIo', 'new Promise', 'await ', 'throw ',
+    'Atomics.wait', 'Date.now'].some(s => VQ68_CODE.includes(s)) === false &&
+  VQ68_CODE.includes('export function vqAaLevelOf') &&
+  VQ68_CODE.includes('export function vqSafeFactorOf') &&
+  VQ68_CODE.includes('export function vqResampleOf'), true);
+check('R68 Preview.ets：独立 SDK 入口 + AA 档映射 + 真异步读尺寸 + 双护栏 + 失败静默回退',
+  MODEL.includes('export async function viewSystemScaledPx') &&
+  MODEL.includes('function vqSdkAaLevelOf(level: number): image.AntiAliasingLevel') &&
+  MODEL.includes('image.AntiAliasingLevel.HIGH') &&
+  MODEL.includes('await src.getImageInfo()') &&
+  MODEL.includes('vqSafeFactorOf(w, h, want, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE)') &&
+  MODEL.includes('vqScaleAllowedOf(w, h, factor, cap, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE)') &&
+  MODEL.includes('await src.createScaledPixelMap(factor, factor, vqSdkAaLevelOf(aa))') &&
+  (MODEL.match(/viewSystemScaledPx/g) || []).length === 1, true);
+check('R68 Index.ets：真值源 import + 系统精炼 import + 构建标记 R68 / R67 旧标记已清',
+  INDEX.includes("from '../common/ViewQuality';") &&
+  INDEX.includes("import { viewSystemScaledPx } from '../model/Preview';") &&
+  INDEX.includes("import { loupeCapabilityOf, loupeSystemScaledPx } from '../model/Preview';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R68';") &&
+  INDEX.includes("const ESC_BUILD_TAG: string = 'R67';") === false, true);
+check('R68 Index.ets 接线：懒探测能力 / 一次系统精炼 / token 作废迟到结果 / 失败静默回退 R62',
+  INDEX.includes('private ensureViewSysPx(uri: string, px: image.PixelMap, token: number): void') &&
+  INDEX.includes('loupeCapabilityOf(px) >= LQ_CAP_SYSTEM_AA') &&
+  INDEX.includes('vqSystemWantedOf(scale, kind, this.viewCap, VQ_NEAR_ONE_TOL)') &&
+  INDEX.includes('vqRefineFactorOf(kind, VQ_MAX_FACTOR)') &&
+  INDEX.includes('vqScaleAllowedOf(srcW, srcH, factor, this.viewCap,') &&
+  INDEX.includes('vqShouldRebuildOf(this.viewSysEdge, target, VQ_STABLE_MIN_DELTA)') &&
+  INDEX.includes('vqHasGainOf(target, srcLong, VQ_MIN_GAIN)') &&
+  INDEX.includes('vqConsistentTierOf(scale, this.loupeDensityOf())') &&
+  INDEX.includes('viewSystemScaledPx(px, factor, aa, this.viewCap)') &&
+  INDEX.includes('const sysToken: number = ++this.viewSysToken;') &&
+  INDEX.includes('this.releaseViewSysPx(scaled);') &&
+  INDEX.includes('this.clearViewSysPx();'), true);
+check('R68 触发链：loadViewNow 成功落点 + showPreviewOf 切图清理 + aboutToDisappear 退出释放',
+  INDEX.includes('this.ensureViewSysPx(uri, best.px, token);') &&
+  INDEX.includes('this.clearViewSysPx(); // 第六十八轮：切图即刻作废并释放系统级产物，杜绝上一张错画') &&
+  INDEX.includes('this.clearViewSysPx();  // 第六十八轮：页面销毁时释放主预览系统级 AA 精炼产物') &&
+  INDEX.includes('private viewSysAa(uri: string): number') &&
+  INDEX.includes('private viewDisplayPx(uri: string): image.PixelMap') &&
+  INDEX.includes('private clearViewSysPx(): void') &&
+  INDEX.includes('@State viewSysPx: image.PixelMap | undefined = undefined;'), true);
+check('R68 显示层：viewDisplayPx 优先出口 + uri 对账；三处插值 / 四处 AA / 三处 autoResize 逐字不变',
+  PREVIEW13_CODE.includes('Image(this.viewDisplayPx(uri))') &&
+  INDEX.includes('Image(this.viewPixelMap!)') &&
+  INDEX.includes('this.viewSysPx !== undefined && this.viewSysUri === uri') &&
+  INDEX.split('.interpolation(this.previewInterpolation())').length - 1 === 3 &&
+  INDEX.split('.antialiased(this.previewAntialias())').length - 1 === 4 &&
+  INDEX.split('.autoResize(false)').length - 1 === 3 &&
+  PREVIEW13_CODE.split('.interpolation(this.previewInterpolation())').length - 1 === 2, true);
+check('R68 零回归：R62 三档 / R67 放大镜五源 / 版本 1.0.7/7 / new Promise 恰 2 / race 恰 1 / 无 worker',
+  LOUPE13_CODE.split('.interpolation(this.loupeInterpolation())').length - 1 === 5 &&
+  LOUPE13_CODE.split('.antialiased(LOUPE_AA_ENABLED)').length - 1 === 5 &&
+  LOUPE13_CODE.split('.objectFit(ImageFit.Contain)').length - 1 === 5 &&
+  INDEX.includes('rqInterpolationOf(this.previewScale(),') &&
+  INDEX.includes("const APP_VERSION: string = '1.0.7';") &&
+  /"versionCode":\s*7/.test(APP_JSON) && /"versionName":\s*"1\.0\.7"/.test(APP_JSON) &&
+  ((INDEX + ARCHIVE + MODEL).match(/new Promise/g) || []).length === 2 &&
+  (INDEX.match(/Promise\.race/g) || []).length === 1 &&
+  MODEL.includes('taskpool') === false && MODEL.includes('@ohos.worker') === false, true);
+
+console.log('  ⚠️ 本组是静态契约 + 一维边缘信号数值模型，不替代真机验证；编译校验 ≠ 真机验证。');
+console.log('  ⚠️ 真机步骤 R68-A：装新包后 Ctrl+D 角标必须是 R68；打开含细线（栅栏 / 电线 / 文字边缘）');
+console.log('     与曲线（圆弧 / 轮廓）的图，在 100% / 缩小 / 放大各档观察边缘：平滑、无波纹、无锯齿毛边。');
+console.log('  ⚠️ 真机步骤 R68-B：拖窗口 resize / 进出全屏 / Ctrl+滚轮到 137% / 73% / 67% / 200% 各档，');
+console.log('     画质稳定一致，不出现「换倍率/换窗口就忽糊忽锐」，细线不被抹宽，整体不过度模糊。');
+console.log('  ⚠️ 真机步骤 R68-C：hilog 出现 view R68 cap=1 scene=.. aa=.. 表示系统 native AA 精炼生效；');
+console.log('     cap=0 / getImageInfo FAIL / createScaledPixelMap FAIL 时自动回退 R62 组件级链，预览仍可用。');
+console.log('  ⚠️ 真机步骤 R68-D：HEIC/JPG/PNG / FITS·XISF / 文本预览 scrollbar / 并排右页 / 放大镜 /');
+console.log('     R64 内容量统计 / R66 主线程让出 / 三栏三按钮 / ESC / 版本 1.0.7/7 全部零回归、无新增卡顿。');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  ${pass} passed, ${fail} failed`);
 if (fail > 0) {

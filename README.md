@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R67`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R68`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -556,15 +556,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R64（左栏目录内容量统计与展示：空闲扫描 + TTL 缓存 + 四态显示）、
 > R65（FITS / XISF 天文图像预览：自解析头 + 灰度拉伸 + 真异步读字节）、
 > R66（天文像素计算让出主线程：总像素硬上限 + 24 行分片 + 宏任务让出 + 并发槽位）、
-> R67（放大镜高质量显示：系统 native 抗锯齿缩放 + 能力分级 + 跨密度一致档）
-> 见下方十二个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R67（放大镜高质量显示：系统 native 抗锯齿缩放 + 能力分级 + 跨密度一致档）、
+> R68（右边预览图优化 / resize 最高质素：系统 native AA 精炼 + 内容自适应档 + 跨密度一致）
+> 见下方十三个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R67`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R67` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R68`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R68` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R67 新增 import 顺延，以 `grep -n 真机步骤 R67 tests/dirname.test.mjs` 为准：8413–8421）
+  （行号随 R68 新增 import 顺延，以 `grep -n 真机步骤 R68 tests/dirname.test.mjs` 为准：8658–8665）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -596,6 +597,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R55 | 预览区常显角标取消 | 6452–6453 |
 | R66 | 天文像素计算让出主线程（THREAD_BLOCK_6S：尺寸护栏 + 分片 + 并发槽位） | 8177–8185 |
 | R67 | 放大镜高质量显示（系统 native AA + 能力分级 + 跨密度一致档） | 8413–8421 |
+| R68 | 右边预览图优化 / resize 最高质素（系统 native AA 精炼 + 内容自适应档） | 8658–8665 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1857,6 +1859,144 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第六十八轮：右边预览图优化 / resize 最高质素 —— 系统 native AA 精炼 + 内容自适应档 + 跨密度一致（2026-11-25，R68）
+
+> 用户诉求（原文）：「右边预览图优化，resize要保持最高质素」。
+> 承接 R62（主预览 resize 动态插值 + PixelMap 边缘 AA）与 R67（放大镜系统 native AA），
+> 把同样是系统级的抗锯齿重采样下沉到**右侧主预览**，并让不同倍率 / 窗口尺寸 / 屏幕密度下
+> 画质稳定一致，不引入卡顿、延迟或过度资源占用。
+
+### 一、现状判读（按真实源码，不凭缓存推断）
+
+| 层 | R62 既有基线 | 本轮新增 |
+| --- | --- | --- |
+| 重采样位置 | ArkUI **组件级** `.interpolation()` / `.antialiased()`，每帧由 UI 合成层 GPU 采样 | `image.PixelMap.createScaledPixelMap()` **系统 native 级**一次重采样，产物跨帧复用 |
+| 画质档 | `rqInterpolationOf` 三档（High=Cubic / Low=双线性 / Medium=MipMap）+ 全源边缘 AA | `vqAaLevelOf` 按缩放场景 × 内容种类选 `AntiAliasingLevel`（LOW/MEDIUM/HIGH） |
+| 像素来源 | `displayEdge()` 按画布 × zoom 重解码，`desiredSize` 只能降采样 | 在已超采样解码的 `viewPixelMap` 上再做一次高密度 AA 精炼（可升采样） |
+| 跨帧稳定性 | 倍率 / 相位每帧变，边缘相位随之抖 | 精炼倍率只由内容种类定、**不吃 zoom**；64px 稳定阈值内不重算 |
+
+R67 已在放大镜链路核实 SDK 26 的声明：`@ohos.multimedia.image.d.ts` L2495
+`AntiAliasingLevel` NONE=0 / LOW=1 / MEDIUM=2 / HIGH=3，L5302
+`createScaledPixelMap(x, y, level?)` **since 18**（x/y 官方语义为 scale factor）。
+「编译有声明」≠「运行时一定有」：本轮**直接复用** R67 的 `loupeCapabilityOf(px)` 懒探测结果
+（`typeof px.createScaledPixelMap === 'function'`），不另造探针；能力不足即逐字回退 R62。
+
+### 二、关键参数设定（唯一真值源 `common/ViewQuality.ts`）
+
+| 组 | 参数 | 取值 / 语义 |
+| --- | --- | --- |
+| 缩放场景 | `VQ_SCENE_SHRINK_DEEP / SHRINK / ONE / ENLARGE / ENLARGE_HIGH` | `0/1/2/3/4`；k<0.4 / 0.4≤k<0.94 / \|k−1\|≤0.06 / 1.06≤k≤2 / k>2 |
+| 内容种类 | `VQ_KIND_IMAGE / GRAPHIC / TEXT` | `0/1/2`；文字类含中文「扫描 / 截图 / 报表」与 `.txt/.pdf`，图表类含 `.svg` |
+| 能力档 | `VQ_CAP_COMPONENT / SYSTEM_AA` | `0/1`；门槛 `since 18`，运行时函数存在性双判据 |
+| 系统 AA 档 | `VQ_AA_LOW / MEDIUM / HIGH` | `1/2/3`，与 SDK 枚举**逐值对应**；脏值落 LOW，**绝不落 NONE**（锯齿之源） |
+| 档位阈值 | 1:1 容差 `0.06` / mipmap 门槛 `0.4` / 高倍门槛 `2` | `vqSceneOf` 脏值保守按 1:1 处理，绝不劣化 R62 基线 |
+| 精炼倍率 | 影像 `1.5` / 文字·图形 `1.25` | **只认内容种类，不吃 zoom** ⇒ resize 抖动时产物密度恒定、跨帧稳定 |
+| 资源护栏 | 总像素 `4M` / 倍率 `3.0` / 长边 `8192` | 与 R67 `LQ_*` **逐项对齐**（静态契约逐值断言），`ceil` 上浮后二次复核 |
+| 稳定 / 增益 | 重算阈值 `64px` / 最小真实增益 `96px` | 微动不重算、补不出像素就不分配 |
+| 屏幕密度 | `[0.5, 4.0]` / 参考 1.0 / 脏值回退 1.0 | **只进像素预算，不进画质档** ⇒ 不同 DPI 同一倍率恒同档 |
+
+`vqSafeFactorOf(w, h, want, maxPixels, maxEdge)` 先按 `sqrt(mp/(w·h))` 与 `me/max(w,h)`
+取小并夹到 3×，再以 0.98 逐档收缩复核 `ceil(w·f)·ceil(h·f)` 是否越界（最多 64 次），
+最终仍放不下就返回哨兵 `1` ⇒ 页面侧跳过系统级精炼、留在 R62 组件级链。
+
+### 三、为什么缩小 / 高倍文字必须走 MEDIUM（数值证据，不是拍脑袋）
+
+Cubic 的 Catmull-Rom 核在 `1<|x|<2` 有**负 lobe**：`vqCubicWeightOf(1.5) = -0.0625`；
+双线性 tent 核恒非负。R68 组用一维细线信号 `THIN68`、曲线信号 `CURVE68`、阶跃 `STEP68`
+在 0.25 / 0.4 / 0.5 / 0.67 / 0.73 / 0.93 各缩小档与 1.07 / 1.37 / 2 / 3 / 4 放大档逐点重算：
+
+- 缩小各档：mipmap 预滤波的**过冲恒为 0**，Cubic 在 0.73 细线上 > 0；曲线抖动 mip ≤ Cubic；
+- 放大影像：`vqAaLevelOf` = HIGH(Cubic)，选档重采样与恒 Cubic **逐点全等**（细节零回归）；
+- 高倍（k=3）文字 / 图形：mip 过冲 0 且抖动低于 Cubic ⇒ 改 MEDIUM 抑制振铃光晕与毛边；
+  影像仍 HIGH 保细节。
+
+故 `vqAaLevelOf` 定档：能力不足 → LOW 哨兵；缩小 / 极端缩小 → MEDIUM；1:1 → LOW；
+高倍文字·图形 → MEDIUM；其余放大 → HIGH。
+
+### 四、实现（三层分工，与 R62 / R65 / R66 / R67 完全一致）
+
+1. **`common/ViewQuality.ts`（新增，纯函数真值源）**：零 SDK / 零 IO / 零 `await` /
+   零 `throw` / 零定时器 / 零 `Promise` / 零全局可变状态。决策函数（场景 / 内容 / 能力 /
+   AA 档 / 是否启用 / 精炼倍率 / 有效倍率 / 跨密度一致档 / 护栏 / 稳定 / 增益）供运行时调用；
+   核 / 重采样 / 过冲 / 边缘抖动四个数值模型只用于回归用例。
+2. **`model/Preview.ets`（唯一碰该 SDK 的入口，R67 代码逐字未动）**：
+   `vqSdkAaLevelOf()` 把 `VQ_AA_*` 映射成 `image.AntiAliasingLevel`；
+   `viewSystemScaledPx(src, want, aa, cap)` → `await src.getImageInfo()` 拿真实宽高 →
+   `vqSafeFactorOf` 夹预算 → `vqScaleAllowedOf` 复核 →
+   `await src.createScaledPixelMap(factor, factor, level)`；能力不足 / 尺寸脏值 /
+   预算放不下 / SDK 抛错一律返回 `undefined`，**全异步、零新增 `Promise` 构造、零同步 IO**。
+3. **`pages/Index.ets`（接线，不动既有交互）**：
+   - 新增 `@State viewSysPx` + `viewSysUri / viewSysEdge / viewSysToken / viewCap / viewCapProbed`；
+   - `viewSysAa(uri)` 本帧决策；`viewDisplayPx(uri)` 统一图源出口（系统产物优先 + `uri` 对账，
+     `@Builder` 内只读选择、不触发解码）；
+   - `ensureViewSysPx(uri, px, token)` 是 `loadViewNow` 成功落点、切图 / resize / 全屏 /
+     档位升级的共同入口：懒探测一次能力 → `vqSystemWantedOf` / `vqScaleAllowedOf` /
+     `vqHasGainOf` / `vqShouldRebuildOf` 四道闸 → 起一次系统精炼；
+     `sysToken` + `curToken` 双对账作废迟到结果并 `release()`；失败静默 `clearViewSysPx()`
+     回退 R62；
+   - 触发链：`loadViewNow` → `ensureViewSysPx(uri, best.px, token)`；`showPreviewOf` 切图
+     即刻 `clearViewSysPx()`（杜绝上一张错画）；`aboutToDisappear` 退出释放；
+   - **显示层只把 `Image(this.viewPixelMap!)` 换成 `Image(this.viewDisplayPx(uri))`**：
+     三处 `.interpolation(this.previewInterpolation())`、四处
+     `.antialiased(this.previewAntialias())`、三处 `.autoResize(false)` 逐字未动，
+     R62 三档与 R67 放大镜五图源 / 5 处 interpolation / 5 处 antialiased 全部零回归。
+
+**回退链**：`cap=0`（低版本 ROM / 方法缺失）→ 完全走 R62 组件级三档 → 再退既有兜底源；
+`getImageInfo FAIL` / `createScaledPixelMap FAIL` / 预算不足同样不空白、不花屏、不崩溃。
+HiLog：`view R68 cap=.. scene=.. aa=.. tier=.. factor=..`。
+
+### 五、验证用例（`tests/dirname.test.mjs` R68 组）
+
+- ① 关键参数常量语义、与 R67 `LQ_*` 护栏逐项对齐、密度与模式码；
+- ② 有限数 / 密度钳界 / 五档场景分界与脏值兜底 / 内容种类（含中文）/ 跨密度同档；
+- ③ AA 档决策：缩小 MEDIUM、1:1 LOW、影像放大 HIGH、高倍文字·图形 MEDIUM、
+  能力不足 LOW 哨兵、`vqSystemWantedOf` 四拒绝、精炼倍率不吃 zoom；
+- ④ 护栏：`vqSafeFactorOf` 4M 夹界（1000² 的 3× 夹到 2.048）、超大源返回 1、
+  `vqScaleAllowedOf` 四重拒绝、64px 稳定阈值与 96px 增益；
+- ⑤ 一维边缘信号数值模型（Cubic 负 lobe、缩小 / 高倍 mip 优于 Cubic、放大影像逐点一致）；
+- ⑥ 源码静态契约：真值源纯净 / SDK 独立出口 / 接线 / 触发链 / 显示层 / 零回归；
+- ⑦ 构建标记迁移：**31 条**历史 `ESC_BUILD_TAG` 断言由 `R67` 整批升位到 `R68`
+  （`R67` 旧构建标记定义被显式断言为不存在）。
+
+### 六、验证结果（真实执行，非推断）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node --experimental-strip-types tests/dirname.test.mjs` → **`ALL PASS 2153 passed, 0 failed`**（R67 基线 2126，R68 新增 **27 条**；另 31 条历史构建标记断言升位，不改变断言条数）；`git diff --check` 通过 |
+| 真实 ArkTS 编译 | 严格回到 `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**，纠正 R66/R67 过程偏差）→ **`BUILD SUCCESSFUL in 1 min 18 s 892 ms`**；`Finished :entry:default@CompileArkTS... after 43 s 395 ms`（**非 UP-TO-DATE**）；33 tasks：18 executed / 15 up-to-date；**0 ERROR / 17 WARN**（全部为 `Index.ets` 既有全屏 `setWindowSystemBarEnable` 系 2in1 提示与 `READ_IMAGEVIDEO` 权限提示，R68 新增的 `ViewQuality.ts` / `Preview.ets` 缩放函数零 WARN）。日志 `/tmp/r68-build.log` |
+| 产物核验 | 签名 HAP **1,546,339 B**（R67 1,507,725 B）/ 未签名 **1,512,292 B**（R67 1,469,337 B）/ `ets/modules.abc` **884,476 B**（R67 861,652 B）；产物 mtime **00:17** 晚于全部源码 **00:03–00:15**，即 HAP 由最终源码编译；从签名 HAP 解出的字节码检出 **`R68=5`**、**`1.0.7=1`**、构建标记常量已为 `R68`，`view R68` / `ViewQuality` / `viewSystemScaledPx` / `vqAaLevelOf` 进包（`R67` 字面仅剩 4 处，全部来自逐字未动的 R67 放大镜日志串） |
+| 版本守卫 | `APP_VERSION 1.0.7` / `versionCode 7` / `versionName 1.0.7` 逐字未动 |
+
+> **编译校验 ≠ 真机验证**；静态契约 + 一维边缘信号数值模型也 **≠** 真机像素验证。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见下节 R68-A~D）。
+
+### 七、真机步骤（逐字取自 `tests/dirname.test.mjs:8658` R68 组）
+
+> ⚠️ 本组是静态契约 + 一维边缘信号数值模型，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R68-A：装新包后 Ctrl+D 角标必须是 R68；打开含细线（栅栏 / 电线 / 文字边缘）
+>     与曲线（圆弧 / 轮廓）的图，在 100% / 缩小 / 放大各档观察边缘：平滑、无波纹、无锯齿毛边。
+> ⚠️ 真机步骤 R68-B：拖窗口 resize / 进出全屏 / Ctrl+滚轮到 137% / 73% / 67% / 200% 各档，
+>     画质稳定一致，不出现「换倍率/换窗口就忽糊忽锐」，细线不被抹宽，整体不过度模糊。
+> ⚠️ 真机步骤 R68-C：hilog 出现 view R68 cap=1 scene=.. aa=.. 表示系统 native AA 精炼生效；
+>     cap=0 / getImageInfo FAIL / createScaledPixelMap FAIL 时自动回退 R62 组件级链，预览仍可用。
+> ⚠️ 真机步骤 R68-D：HEIC/JPG/PNG / FITS·XISF / 文本预览 scrollbar / 并排右页 / 放大镜 /
+>     R64 内容量统计 / R66 主线程让出 / 三栏三按钮 / ESC / 版本 1.0.7/7 全部零回归、无新增卡顿。
+
+### 八、边界
+
+- 系统级 AA 精炼是图像管线的一次重采样，**不是**凭空恢复不存在的原始细节；
+  小图 / 低分辨率原图仍受信息量限制，本轮只保证边缘平滑与跨帧稳定。
+- 精炼产物是「某张图某个倍率档下的临时重采样结果」，**刻意不进 `previews` LRU**；
+  由 `viewSysToken` + `clearViewSysPx()` 精确释放，不污染解码档位复用判据。
+- 未引入 Canvas 绘制层 / 工作线程 / 定时器 / 常显控件；`createScaledPixelMap` 能力探测
+  复用 R67 `loupeCapabilityOf`，未新增 SDK 探针；R67 放大镜代码逐字未改。
+- 界面零新增常显控件：三栏、行高、hover 缩略图、点击 / 双击、文本 scrollbar、并排 /
+  全屏 / 放大镜、R64 内容量统计、R66 让出、ESC 两态、三按钮全部零回归。
+- 未升版本（`1.0.7 / versionCode 7`）、未跑 `build.sh`、未把 HAP 放桌面；
+  **本轮未 push**（R63 `0b3416f` 起各轮均未推送，用户未授权）。
 
 ---
 

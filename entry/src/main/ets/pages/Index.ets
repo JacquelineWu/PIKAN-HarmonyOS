@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R67 主线（R39 起组件化）· FITS/XISF 天文图像预览
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R68 主线（R39 起组件化）· FITS/XISF 天文图像预览
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -186,6 +186,15 @@ import { LQ_CAP_COMPONENT, LQ_CAP_SYSTEM_AA, LQ_MAX_EDGE, LQ_MAX_FACTOR,
   lqFactorOf, lqTargetEdgeOf, lqShouldRebuildOf, lqHasGainOf } from '../common/LoupeQuality';
 // 第六十七轮：系统 native 级抗锯齿缩放（唯一碰 SDK 的实现在 model/Preview.ets）。
 import { loupeCapabilityOf, loupeSystemScaledPx } from '../model/Preview';
+// 第六十八轮：右侧主预览 resize 最高质素的场景分档 / 内容自适应 AA / 资源护栏真值源。
+// 画质档位只由逻辑缩放比决定，密度只进像素预算 ⇒ 跨 DPI 一致；精炼倍率不吃 zoom ⇒ 跨帧稳定。
+import { VQ_CAP_COMPONENT, VQ_CAP_SYSTEM_AA, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR,
+  VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE, VQ_MAX_FACTOR,
+  VQ_STABLE_MIN_DELTA, VQ_MIN_GAIN,
+  vqSceneOf, vqKindOf, vqAaLevelOf, vqSystemWantedOf, vqRefineFactorOf,
+  vqConsistentTierOf, vqScaleAllowedOf, vqShouldRebuildOf, vqHasGainOf } from '../common/ViewQuality';
+// 第六十八轮：右侧主预览系统 native 级 AA 精炼（唯一碰 SDK 的实现在 model/Preview.ets）。
+import { viewSystemScaledPx } from '../model/Preview';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -195,7 +204,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R67';
+const ESC_BUILD_TAG: string = 'R68';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1389,6 +1398,17 @@ struct Index {
   private loupeCap: number = LQ_CAP_COMPONENT;
   private loupeCapProbed: boolean = false;
 
+  // ---- 第六十八轮：右侧主预览系统 native 级 AA 精炼产物（自有、由本类 release）----
+  /** 一张比 viewPixelMap 更密、经系统 AA 预滤波的精炼图源；undefined = 走 R62 组件级链。
+   *  刻意不进 previews 缓存：它只是某张图在某档画质下的临时重采样结果。 */
+  @State viewSysPx: image.PixelMap | undefined = undefined;
+  private viewSysUri: string = '';
+  private viewSysEdge: number = 0;
+  private viewSysToken: number = 0;
+  /** 运行时能力档：懒探测一次（首次拿到主预览图源时读方法存在性），绝不进启动路径。 */
+  private viewCap: number = VQ_CAP_COMPONENT;
+  private viewCapProbed: boolean = false;
+
   // ---- 滚轮翻页：去抖 + 合并（见 onWheel / flushWheel 注释）----
   private lastAxisMs: number = 0;     // 最近一次轴事件（滚轮/触控板）的时刻，用于屏蔽「被当成拖拽」的伪平移
   private lastWheelMs: number = 0;    // 上一次计入的轴事件时间戳
@@ -1807,6 +1827,7 @@ struct Index {
     this.clearPreviews();
     this.releaseViewOwned();
     this.clearLoupeHiRes(); // 第十六轮：页面销毁时释放放大镜专用高清 PixelMap
+    this.clearViewSysPx();  // 第六十八轮：页面销毁时释放主预览系统级 AA 精炼产物
     this.clearWheel();
     this.clearTopbarTimer();
     this.sizeSeq++; // 作废还在跑的体积补测任务
@@ -5420,6 +5441,7 @@ struct Index {
     this.releaseViewOwned();
     this.viewFailed = false;
     this.viewPixelMap = undefined;
+    this.clearViewSysPx(); // 第六十八轮：切图即刻作废并释放系统级产物，杜绝上一张错画
     this.imgW = 0;
     this.imgH = 0;
     // 新张还没解码出来前，别把上一张的色彩 / HDR / EXIF 元数据挂在信息浮层上
@@ -5648,6 +5670,8 @@ struct Index {
     this.imgW = best.w;
     this.imgH = best.h;
     this.setViewMeta(best);
+    // 第六十八轮：切图 / resize / 全屏 / 档位升级的共同落点 —— 一次系统 native AA 精炼。
+    this.ensureViewSysPx(uri, best.px, token);
     if (FOCUS_BLUR) {
       this.finishFocus(); // 清晰图到位 → 低清模糊层淡出（这才是「动态模糊」的收尾）
     } else {
@@ -5689,6 +5713,100 @@ struct Index {
    *  只改 GPU 采样属性，不改尺寸 / 位置 / 解码档位 / 缓存，无新增解码，无位置偏移。 */
   private previewAntialias(): boolean {
     return rqAntialiasOf(this.previewScale());
+  }
+
+  // ---- 第六十八轮：右侧主预览 resize 最高质素（系统 native 级 AA 精炼决策）----
+
+  /** 本帧画质决策：AA 档只认「逻辑缩放比 + 内容种类 + 运行时能力」，
+   *  密度只进像素预算 ⇒ 不同 DPI 屏在同一倍率下落同一档、视觉稳定一致。 */
+  private viewSysAa(uri: string): number {
+    return vqAaLevelOf(this.previewScale(), vqKindOf(uri), this.viewCap);
+  }
+
+  /** 主预览统一图源出口：系统级 AA 精炼产物优先（uri 对账），否则 R62 自解码图源。
+   *  ⚠️ @Builder 内只做只读选择，不触发任何解码 / 缩放 / 状态写入。 */
+  private viewDisplayPx(uri: string): image.PixelMap {
+    if (this.viewSysPx !== undefined && this.viewSysUri === uri) {
+      return this.viewSysPx!;
+    }
+    return this.viewPixelMap!;
+  }
+
+  /** 释放系统级产物并作废旧代号（切图 / 退出 / 能力不足 / 预算不足 / SDK 失败）。 */
+  private clearViewSysPx(): void {
+    this.viewSysToken++;
+    const oldSys: image.PixelMap | undefined = this.viewSysPx;
+    this.viewSysPx = undefined;
+    this.viewSysUri = '';
+    this.viewSysEdge = 0;
+    this.releaseViewSysPx(oldSys);
+  }
+
+  private releaseViewSysPx(px: image.PixelMap | undefined): void {
+    if (px === undefined) {
+      return;
+    }
+    try {
+      px.release();
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'view R68 release skipped');
+    }
+  }
+
+  /** 切图 / resize / 全屏 / 档位升级的共同落点（loadViewNow 成功后调用）。
+   *  能力懒探测一次 → 一次系统 native AA 精炼 → token 对账接手；
+   *  失败 / 能力不足 / 预算不足 / 无真实增益都留在 R62 组件级链，绝不空白、绝不花屏。
+   *  精炼倍率只由内容种类决定、不吃 zoom ⇒ resize 抖动时产物密度恒定、跨帧稳定。 */
+  private ensureViewSysPx(uri: string, px: image.PixelMap, token: number): void {
+    if (!this.viewCapProbed) {
+      this.viewCap = loupeCapabilityOf(px) >= LQ_CAP_SYSTEM_AA
+        ? VQ_CAP_SYSTEM_AA : VQ_CAP_COMPONENT;
+      this.viewCapProbed = true;
+    }
+    const scale: number = this.previewScale();
+    const kind: number = vqKindOf(uri);
+    if (!vqSystemWantedOf(scale, kind, this.viewCap, VQ_NEAR_ONE_TOL)) {
+      this.clearViewSysPx();
+      return;
+    }
+    const factor: number = vqRefineFactorOf(kind, VQ_MAX_FACTOR);
+    const srcW: number = this.imgW;
+    const srcH: number = this.imgH;
+    const srcLong: number = Math.max(srcW, srcH);
+    const target: number = Math.round(srcLong * factor);
+    const allowed: boolean = vqScaleAllowedOf(srcW, srcH, factor, this.viewCap,
+      VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE);
+    if (!allowed || !vqHasGainOf(target, srcLong, VQ_MIN_GAIN)) {
+      this.clearViewSysPx();
+      return;
+    }
+    if (!vqShouldRebuildOf(this.viewSysEdge, target, VQ_STABLE_MIN_DELTA) &&
+      this.viewSysUri === uri) {
+      return; // 同图同档：稳定阈值内不重算，跨帧一致、不引入卡顿
+    }
+    const aa: number = this.viewSysAa(uri);
+    const scene: number = vqSceneOf(scale, VQ_NEAR_ONE_TOL, VQ_MIPMAP_FLOOR);
+    const tier: number = vqConsistentTierOf(scale, this.loupeDensityOf());
+    this.viewSysUri = uri;
+    this.viewSysEdge = target;
+    const sysToken: number = ++this.viewSysToken;
+    viewSystemScaledPx(px, factor, aa, this.viewCap).then(
+      (scaled: image.PixelMap | undefined): void => {
+        if (sysToken !== this.viewSysToken || token !== this.curToken) {
+          this.releaseViewSysPx(scaled); // 迟到作废结果不接手、不泄漏
+          return;
+        }
+        if (scaled === undefined) {
+          this.clearViewSysPx(); // SDK 缩放失败：静默回退 R62 组件级链
+          return;
+        }
+        const oldSys: image.PixelMap | undefined = this.viewSysPx;
+        this.viewSysPx = scaled;
+        this.releaseViewSysPx(oldSys);
+        hilog.info(DOMAIN, TAG,
+          'view R68 cap=%{public}d scene=%{public}d aa=%{public}d tier=%{public}d factor=%{public}d',
+          this.viewCap, scene, aa, tier, Math.round(factor * 100));
+      });
   }
 
   /** 左右页共用的显示档位判据（纯函数在 ViewPlan，可 Node 单测）。
@@ -8524,7 +8642,7 @@ struct Index {
   previewImage(uri: string, token: number, half: boolean) {
     Stack() {
       if (this.viewPixelMap !== undefined) {
-        Image(this.viewPixelMap!)          // 自解码结果：清晰，且一定是当前这张
+        Image(this.viewDisplayPx(uri))    // 第六十八轮：系统 native AA 精炼产物优先，失败回退 R62 自解码图源
           .objectFit(ImageFit.Contain)
           // 第六十二轮：不再无条件 High(Cubic)。viewEdge() 是 1.5×/2.0× oversampling，
           // zoom=1 时 GPU 实际在缩小 0.67×/0.50×，Cubic 负 lobe 产生过冲 / 振铃（波纹）；

@@ -33,6 +33,11 @@ import { AI_OK, AI_COMP_ZLIB, AI_STRETCH_GAMMA, AI_OUTPUT_BGRA,
 import { LQ_CAP_SYSTEM_AA, LQ_AA_LOW, LQ_AA_MEDIUM, LQ_AA_HIGH,
   LQ_API_PROBE_LEVEL, LQ_MAX_TARGET_PIXELS, LQ_MAX_EDGE,
   lqCapabilityOf, lqSafeFactorOf, lqScaleAllowedOf } from '../common/LoupeQuality';
+// 第六十八轮：右侧主预览 resize 最高质素的护栏 / AA 档真值源（零 SDK / 零 IO）。
+// 与放大镜各自独立判定，形成两层护栏；两边常量数值一致，静态契约会逐项对齐。
+import { VQ_CAP_SYSTEM_AA, VQ_AA_LOW, VQ_AA_MEDIUM, VQ_AA_HIGH,
+  VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE,
+  vqSafeFactorOf, vqScaleAllowedOf } from '../common/ViewQuality';
 
 // hilog 域（原 pages/Index.ets 顶部同值迁入；Index.ets 反向 import 本定义）。
 export const TAG = 'HeicViewer';
@@ -709,6 +714,58 @@ export async function loupeSystemScaledPx(src: image.PixelMap, want: number,
   } catch (e) {
     // HDR / 特殊 pixelFormat / 低版本 ROM 的方法缺失都会走到这里：静默回退组件级链。
     hilog.warn(DOMAIN, TAG, 'loupe R67 createScaledPixelMap FAIL err=%{public}s',
+      JSON.stringify(e));
+    return undefined;
+  }
+}
+
+// ====================================================================
+// 第六十八轮：右侧主预览 resize 的系统 native 级 AA 精炼
+//
+//  · 与 R67 放大镜共用同一 SDK 能力 `createScaledPixelMap`（since 18），但护栏与 AA 档
+//    由 common/ViewQuality.ts 独立判定 —— 两个入口互不改写，R67 代码逐字未动。
+//  · 成功返回**调用方自有**的新 PixelMap（页面侧必须 release）；能力不足 / 尺寸脏值 /
+//    预算放不下 / SDK 抛错一律返回 undefined ⇒ 页面静默回退 R62 组件级三档链。
+//  · getImageInfo / createScaledPixelMap 全是 await 异步版，绝不占住 UI 主线程；
+//    不新增等待原语、不引入定时器与工作线程（R66 appfreeze 的硬约束延续）。
+// ====================================================================
+
+/** VQ_AA_* → image.AntiAliasingLevel；脏值落 LOW（双线性），绝不落 NONE 这个锯齿之源。 */
+function vqSdkAaLevelOf(level: number): image.AntiAliasingLevel {
+  if (level === VQ_AA_HIGH) {
+    return image.AntiAliasingLevel.HIGH;
+  }
+  if (level === VQ_AA_MEDIUM) {
+    return image.AntiAliasingLevel.MEDIUM;
+  }
+  return image.AntiAliasingLevel.LOW;
+}
+
+/** 一次系统级 AA 精炼：真异步读尺寸 → 双重护栏 → native 缩放。 */
+export async function viewSystemScaledPx(src: image.PixelMap, want: number,
+  aa: number, cap: number): Promise<image.PixelMap | undefined> {
+  if (cap < VQ_CAP_SYSTEM_AA) {
+    return undefined;
+  }
+  let w: number = 0;
+  let h: number = 0;
+  try {
+    const info: image.ImageInfo = await src.getImageInfo();
+    w = info.size.width;
+    h = info.size.height;
+  } catch (e) {
+    hilog.warn(DOMAIN, TAG, 'view R68 getImageInfo FAIL err=%{public}s', JSON.stringify(e));
+    return undefined;
+  }
+  // 先按总像素 / 长边预算把「想要的倍率」夹成实际可用倍率，再复核是否允许分配。
+  const factor: number = vqSafeFactorOf(w, h, want, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE);
+  if (!vqScaleAllowedOf(w, h, factor, cap, VQ_MAX_TARGET_PIXELS, VQ_MAX_EDGE)) {
+    return undefined;
+  }
+  try {
+    return await src.createScaledPixelMap(factor, factor, vqSdkAaLevelOf(aa));
+  } catch (e) {
+    hilog.warn(DOMAIN, TAG, 'view R68 createScaledPixelMap FAIL err=%{public}s',
       JSON.stringify(e));
     return undefined;
   }
