@@ -32,7 +32,10 @@ export const ROW_TEXT: number = 4;
 /** 「梅花间竹」交替色格子（2026-11-11 用户要求）：档案列表奇偶行两种底色，
  *  形成一格一格的棋盘条纹；选中行用独立高亮色，优先级最高（见 ArchiveRow.rowBgColor）。
  *  两行之间的垂直缝按「继续压缩到约 1mm」取 1vp —— ArkUI 只有 vp / px，没有 mm 单位，
- *  1vp 在 2in1 高密度屏上就是极细的一线缝；实机觉得宽/窄只改 LIST_ROW_GAP_VP 一个常量即可。 */
+ *  1vp 在 2in1 高密度屏上就是极细的一线缝；实机觉得宽/窄只改 LIST_ROW_GAP_VP 一个常量即可。
+ *  第六十九轮（R69）：项目沿用「1mm ↔ 1vp」的视觉口径（见 README「关于 1mm」），
+ *  故「上下留白各减 0.8mm」= padding top/bottom 各减 0.8vp：1 → 0.2，
+ *  整行 28vp → 26.4vp（−1.6vp = −1.6mm）；文字载体 .height(26) 完全不动。 */
 const ROW_STRIPE_EVEN: string = '#1e242e';
 const ROW_STRIPE_ODD: string = '#161a21';
 const ROW_SELECTED_BG: string = '#1f2730';
@@ -453,8 +456,14 @@ export struct ArchiveRow {
     }
     .width('100%')
     // 11-11 起继续压缩：上下 padding 2 → 1，配合 List space=1 把两行缝压到约 1mm。
+    // 第六十九轮（R69）：用户要求每个档案名行上下留白各减 0.8mm、总行高减 1.6mm。
+    // 项目口径 1mm ↔ 1vp（ArkUI 无 mm 单位），故 top/bottom 各 1 → 0.2（各 −0.8vp），
+    // 整行由 26 + 1 + 1 = 28vp 变为 26 + 0.2 + 0.2 = 26.4vp（−1.6vp = −1.6mm）。
+    // 只动这两个留白数值：文字 .height(26) 载体、fontSize 12/10、三栏宽度与对齐、
+    // List space=1、right padding 6、条纹配色、hover / 点击 / 双击全部逐字不变；
+    // padding 仍为正（0.2 > 0）且 List 仍留 1vp 缝 ⇒ 文字不被截断、相邻行不重叠。
     // 行背景改为「梅花间竹」交替色格子（奇偶两色），选中行仍是高亮色。
-    .padding({ right: 6, top: 1, bottom: 1 })
+    .padding({ right: 6, top: 0.2, bottom: 0.2 })
     .borderRadius(3)
     .backgroundColor(this.rowBgColor())
     // hover 绑在整行而不是档案名 Text 上：鼠标划过图标 / 字节 / 日期列也能出图，
