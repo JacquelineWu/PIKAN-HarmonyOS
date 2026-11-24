@@ -21,13 +21,39 @@ import { RawFit, rawFitOf, rawSingleAllowed, rawReadComplete,
 // 系统 codec 不认这两种格式：decodePx 判到天文后缀即分流到 decodeAstroPx，
 // 由本模块（唯一碰 SDK 的地方）真异步读字节 → 纯函数解析 / 拉伸 → createPixelMap。
 import { AI_OK, AI_COMP_ZLIB, AI_STRETCH_GAMMA, AI_OUTPUT_BGRA,
+  AI_MAX_TARGET_PIXELS, AI_SLICE_ROWS, AI_SLICE_YIELD_MS,
+  AI_MAX_UNCOMPRESSED_BYTES, AI_UNSHUFFLE_SLICE_LIMIT, AI_UNSHUFFLE_SLICE_ITEMS,
+  AI_MAX_CONCURRENT_RENDER,
   AstroHeader, AstroBounds, AstroSize, aiIsAstroName, aiHeaderOf,
-  aiFailHintOf, aiUnshuffleOf, aiBoundsOf, aiDisplaySizeOf, aiRgbaOf,
-  aiPixelsLongEnough } from '../common/AstroImage';
+  aiFailHintOf, aiUnshuffleOf, aiBoundsOf, aiRgbaOf,
+  aiPixelsLongEnough, aiTargetSizeSafeOf, aiSxTableOf, aiRgbaSliceOf,
+  aiSliceCountOf, aiSliceI0Of, aiSliceI1Of, aiUnshuffleSliceOf,
+  aiAllocAllowedOf, aiRenderSlotAllowedOf } from '../common/AstroImage';
 
 // hilog 域（原 pages/Index.ets 顶部同值迁入；Index.ets 反向 import 本定义）。
 export const TAG = 'HeicViewer';
 export const DOMAIN = 0x0000;
+
+/** 第六十六轮：让出主线程的**宏任务**等待（R65 天文长循环 appfreeze 的根治件）。
+ *  · 这不是「新增 Promise 构造」：它把 R44 `Index.ets/nasRetryWait` 里那一处
+ *    「定时器 + resolve」**原样搬过来共用**，工程全源码 Promise 构造仍恰 2 处
+ *    （RawStore.readGuarded 超时闸门 + 本函数），Index.ets 的 nasRetryWait 改为委托。
+ *  · 与 `await Promise.resolve()` 的微任务本质不同：setTimeout 回调由 EventHandler
+ *    以独立宏任务派发，相邻两片计算之间 VIP 输入事件可以插队，UI 线程不再被连续独占。
+ *  · ms 恒取有限整数常量（AI_SLICE_YIELD_MS=0 / NAS_RETRY_DELAYS），绝不把 NaN 传给
+ *    定时器；非正数一律归零，语义是「尽快让出一次」而不是「不等待」。 */
+export function yieldMacroTask(ms: number): Promise<void> {
+  const delay: number = ms > 0 ? Math.floor(ms) : 0;
+  return new Promise<void>((resolve: () => void): void => {
+    setTimeout((): void => {
+      resolve();
+    }, delay);
+  });
+}
+
+/** 第六十六轮：正在做 RGBA 重计算的解码条数（只计「重计算」这一段，不含 IO）。
+ *  等待方靠宏任务让出排队，绝不丢弃任何一次解码；try/finally 保证异常也归还槽位。 */
+let astroRenderActive: number = 0;
 
 // ---- 第八轮（2026-11-12）：原始档案数据（未解码 bytes）的内存缓存 ----
 /** 用户要求「档案数据完全载入内存同时解码」：载入链把每个图片文件的完整 bytes 读进
@@ -354,7 +380,8 @@ async function readAstroBytes(uri: string): Promise<ArrayBuffer | undefined> {
   try {
     const st: fs.Stat = await fs.stat(uri);
     const size: number = st.size;
-    if (size <= 0 || size > ASTRO_MAX_BYTES) {
+    // 第六十六轮：走纯函数尺寸护栏，0 / 负数 / NaN / 超限一律拒绝，不分配畸形缓冲区。
+    if (!aiAllocAllowedOf(size, ASTRO_MAX_BYTES)) {
       return undefined;
     }
     file = await fs.open(uri, fs.OpenMode.READ_ONLY);
@@ -377,8 +404,29 @@ async function readAstroBytes(uri: string): Promise<ArrayBuffer | undefined> {
   }
 }
 
+/** 第六十六轮：大压缩块的反 shuffle 分片版。R65 的 aiUnshuffleOf 是
+ *  一段 O(n) 同步长循环，挂在 await zip.uncompress 的续体上同样会饿死 EventHandler；
+ *  超过 AI_UNSHUFFLE_SLICE_LIMIT 就按「字节平面 × 样本片」切开，片间宏任务让出。
+ *  输出与一次性 aiUnshuffleOf 逐字节一致（同一个预分配 out，只是写入顺序分片）。 */
+async function astroUnshuffleSliced(src: Uint8Array, itemSize: number): Promise<Uint8Array> {
+  const count: number = Math.floor(src.length / itemSize);
+  const out: Uint8Array = new Uint8Array(count * itemSize);
+  const slices: number = aiSliceCountOf(count, AI_UNSHUFFLE_SLICE_ITEMS);
+  for (let plane = 0; plane < itemSize; plane++) {
+    for (let i = 0; i < slices; i++) {
+      const i0: number = aiSliceI0Of(i, AI_UNSHUFFLE_SLICE_ITEMS);
+      const i1: number = aiSliceI1Of(i, AI_UNSHUFFLE_SLICE_ITEMS, count);
+      aiUnshuffleSliceOf(src, itemSize, count, out, plane, i0, i1);
+      await yieldMacroTask(AI_SLICE_YIELD_MS);
+    }
+  }
+  return out;
+}
+
 /** 从原始字节里切出「已解压 + 已反 shuffle」的纯像素段。
- *  无压缩直接切片；zlib（XISF 压缩块）用 SDK 内存级 uncompress，失败返回 undefined。 */
+ *  无压缩直接切片；zlib（XISF 压缩块）用 SDK 内存级 uncompress，失败返回 undefined。
+ *  第六十六轮：解压前后都走 aiAllocAllowedOf 纯函数尺寸护栏（256MB 上限），
+ *  超限明确失败而不是先分配一大块再失败；大块反 shuffle 改走分片让出版。 */
 async function astroPixelsOf(raw: ArrayBuffer, head: AstroHeader): Promise<Uint8Array | undefined> {
   const off: number = head.dataOffset;
   const len: number = head.dataLength;
@@ -386,6 +434,10 @@ async function astroPixelsOf(raw: ArrayBuffer, head: AstroHeader): Promise<Uint8
     return undefined;
   }
   if (head.compressed === AI_COMP_ZLIB) {
+    if (!aiAllocAllowedOf(head.uncompressedSize, AI_MAX_UNCOMPRESSED_BYTES)) {
+      hilog.warn(DOMAIN, TAG, 'astro zlib size DENY bytes=%{public}d', head.uncompressedSize);
+      return undefined;
+    }
     try {
       const src: ArrayBuffer = raw.slice(off, off + len);
       const dest: ArrayBuffer = new ArrayBuffer(head.uncompressedSize);
@@ -393,7 +445,10 @@ async function astroPixelsOf(raw: ArrayBuffer, head: AstroHeader): Promise<Uint8
       await zip.uncompress(dest, src);
       const decoded: Uint8Array = new Uint8Array(dest);
       if (head.shuffleItemSize > 1) {
-        return aiUnshuffleOf(decoded, head.shuffleItemSize);
+        if (decoded.length <= AI_UNSHUFFLE_SLICE_LIMIT) {
+          return aiUnshuffleOf(decoded, head.shuffleItemSize);
+        }
+        return await astroUnshuffleSliced(decoded, head.shuffleItemSize);
       }
       return decoded;
     } catch (e) {
@@ -401,16 +456,59 @@ async function astroPixelsOf(raw: ArrayBuffer, head: AstroHeader): Promise<Uint8
       return undefined;
     }
   }
+  if (!aiAllocAllowedOf(len, AI_MAX_UNCOMPRESSED_BYTES)) {
+    hilog.warn(DOMAIN, TAG, 'astro segment size DENY bytes=%{public}d', len);
+    return undefined;
+  }
   const seg: Uint8Array = new Uint8Array(raw, off, len);
   if (head.shuffleItemSize > 1) {
-    return aiUnshuffleOf(seg, head.shuffleItemSize);
+    if (seg.length <= AI_UNSHUFFLE_SLICE_LIMIT) {
+      return aiUnshuffleOf(seg, head.shuffleItemSize);
+    }
+    return await astroUnshuffleSliced(seg, head.shuffleItemSize);
   }
   return seg;
 }
 
+/** 第六十六轮：把 R65 的一整段 O(dw*dh) 同步循环切成 24 行一片，片间宏任务让出。
+ *  · 先按 AI_MAX_CONCURRENT_RENDER 拿重计算槽位（等待期间也用宏任务让出，不丢弃解码）；
+ *  · 目标总像素已由 aiTargetSizeSafeOf 夹到 4M，单片最多 24×2048 ≈ 5 万像素；
+ *  · 小图（一片以内）仍走 R65 的 aiRgbaOf 一次性纯函数，数值模型逐字不变；
+ *  · 结果数组与 aiRgbaOf 完全一致：列映射表预建、灰度只采样一次、alpha 恒 255。 */
+async function astroRgbaOf(pixels: Uint8Array, head: AstroHeader, sz: AstroSize,
+  bounds: AstroBounds): Promise<Uint8Array> {
+  while (!aiRenderSlotAllowedOf(astroRenderActive, AI_MAX_CONCURRENT_RENDER)) {
+    await yieldMacroTask(AI_SLICE_YIELD_MS);
+  }
+  astroRenderActive++;
+  try {
+    const slices: number = aiSliceCountOf(sz.h, AI_SLICE_ROWS);
+    if (slices <= 1) {
+      return aiRgbaOf(pixels, head, sz.w, sz.h, bounds, AI_STRETCH_GAMMA, AI_OUTPUT_BGRA);
+    }
+    const rgba: Uint8Array = new Uint8Array(sz.w * sz.h * 4);
+    const sxTable: number[] = aiSxTableOf(head.width, sz.w);
+    for (let i = 0; i < slices; i++) {
+      const y0: number = aiSliceI0Of(i, AI_SLICE_ROWS);
+      const y1: number = aiSliceI1Of(i, AI_SLICE_ROWS, sz.h);
+      aiRgbaSliceOf(pixels, head, sz.w, sz.h, bounds, AI_STRETCH_GAMMA,
+        AI_OUTPUT_BGRA, rgba, sxTable, y0, y1);
+      if (i + 1 < slices) {
+        await yieldMacroTask(AI_SLICE_YIELD_MS);
+      }
+    }
+    return rgba;
+  } finally {
+    astroRenderActive--;
+  }
+}
+
 /** 第六十五轮：FITS / XISF 自解析解码。系统 codec 不认这两种格式，
  *  由 AstroImage.ts 纯函数完成头解析 / 样本解码 / 拉伸，本函数只碰 SDK IO 与 PixelMap。
- *  全程真异步、不阻塞主线程；任何环节失败都 hilog 明确原因并返回 undefined（既有失败态）。 */
+ *  全程真异步、不阻塞主线程；任何环节失败都 hilog 明确原因并返回 undefined（既有失败态）。
+ *  第六十六轮：目标尺寸改走 aiTargetSizeSafeOf（长边夹界 + 总像素 4M 硬上限），
+ *  RGBA 组装改走 astroRgbaOf（分片 + 片间宏任务让出 + 重计算槽位串行化），
+ *  从根上消除 THREAD_BLOCK_6S 的 CPU 独占；createPixelMap 与既有失败态逐字不变。 */
 async function decodeAstroPx(uri: string, edge: number): Promise<PreviewEntry | undefined> {
   const raw: ArrayBuffer | undefined = await readAstroBytes(uri);
   if (raw === undefined) {
@@ -431,15 +529,14 @@ async function decodeAstroPx(uri: string, edge: number): Promise<PreviewEntry | 
   }
   try {
     const bounds: AstroBounds = aiBoundsOf(pixels, head);
-    const sz: AstroSize = aiDisplaySizeOf(head.width, head.height, edge);
-    const rgba: Uint8Array = aiRgbaOf(pixels, head, sz.w, sz.h,
-      bounds, AI_STRETCH_GAMMA, AI_OUTPUT_BGRA);
+    const sz: AstroSize = aiTargetSizeSafeOf(head.width, head.height, edge, AI_MAX_TARGET_PIXELS);
+    const rgba: Uint8Array = await astroRgbaOf(pixels, head, sz, bounds);
     const opts: image.InitializationOptions = {
       size: { height: sz.h, width: sz.w },
       pixelFormat: image.PixelMapFormat.RGBA_8888,
       alphaType: image.AlphaType.OPAQUE
     };
-    // rgba 由 aiRgbaOf 用 new Uint8Array(sz.w*sz.h*4) 生成，.buffer 长度正好，直接交给 codec。
+    // rgba 由 aiRgbaOf / astroRgbaOf 用 new Uint8Array(sz.w*sz.h*4) 生成，.buffer 长度正好。
     const px: image.PixelMap = await image.createPixelMap(rgba.buffer, opts);
     const entry: PreviewEntry = {
       uri: uri, px: px, bytes: sz.w * sz.h * 4,

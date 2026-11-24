@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R65`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R66`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -539,7 +539,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 ## 真机验证手册（依据 `tests/dirname.test.mjs` ⚠️ 步骤整理，2026-11-20）
 
 > **本章是执行清单，不是需求 / 实现说明。** 下面所有 `⚠️` 段落逐字取自
-> `tests/dirname.test.mjs` 中 **27 组**含 `⚠️ 真机步骤` 的 `console.log` 块（连同块内的
+> `tests/dirname.test.mjs` 中 **28 组**含 `⚠️ 真机步骤` 的 `console.log` 块（连同块内的
 > 「本组是…」「边界：」行与全部续行），只做按轮次归并与排版，**未新增、未推断、
 > 未改写任何验证动作**；每节标注来源行号便于回溯。测试里另有若干
 > 「⚠️ 本组…真机步骤见 README 第 X 轮章节」的导航注记，只指向既有章节、不含步骤，
@@ -554,15 +554,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R62（主预览 resize 画质：动态插值 + AA，消波纹与锯齿）、
 > R63（文本预览 scrollbar 恢复显示：内容驱动 @State + 视口高兜底）、
 > R64（左栏目录内容量统计与展示：空闲扫描 + TTL 缓存 + 四态显示）、
-> R65（FITS / XISF 天文图像预览：自解析头 + 灰度拉伸 + 真异步读字节）
-> 见下方十个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R65（FITS / XISF 天文图像预览：自解析头 + 灰度拉伸 + 真异步读字节）、
+> R66（天文像素计算让出主线程：总像素硬上限 + 24 行分片 + 宏任务让出 + 并发槽位）
+> 见下方十一个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R65`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R65` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R66`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R66` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3904`；R65 新增 18 行 import，行号由 3886 顺延 18 行）
+  （`tests/dirname.test.mjs:3912`；R66 测试 import 再顺延 8 行，行号由 3904 顺延至 3912）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -592,6 +593,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R53 | R52 自绘条真机不显示 —— 条件全直读 + 兜底回填 + 加粗加亮 | 6407–6409 |
 | R54 | 选段改为按住左键拖选 | 6427–6428 |
 | R55 | 预览区常显角标取消 | 6452–6453 |
+| R66 | 天文像素计算让出主线程（THREAD_BLOCK_6S：尺寸护栏 + 分片 + 并发槽位） | 8177–8185 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1853,6 +1855,119 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第六十六轮：天文像素计算让出主线程 —— 总像素硬上限 + 24 行分片 + 宏任务让出 + 并发槽位（2026-11-24，R66）
+
+> 触发（真机 appfreeze 栈，逐字判读而非凭日志猜）：栈顶 `aiRgbaOf(AstroImage.ts:874)` /
+> `decodeAstroPx(Preview.ets:435)` / `state=R` / `utime=1727` / **266 个 VIP MMITask 堆积**，
+> 即 THREAD_BLOCK_6S。用户诉求：修掉「打开超大 FITS / XISF 后整个 APP 冻住」。
+
+### 一、为什么 R65 会冻住（按真实源码判读）
+
+R65 已经把**文件 IO** 全部改成 `await fs.stat/open/read/close`，也把 XISF 的 zlib 解压改成
+`await zip.uncompress` —— 所以这一次**不是 IO 卡住**（与 R23 / R27 的 NAS appfreeze 不同）。
+`state=R`、`utime=1727` 说明线程在**跑 CPU**。逐行核对 `decodeAstroPx` 的续体：
+
+| 环节 | R65 行为 | 规模 |
+| --- | --- | --- |
+| `aiDisplaySizeOf` | 只夹**长边** 8192，`edge` 来自 `viewEdge()` / `preloadEdge()` | 全屏 4096 → **4096×4096 = 1677 万**目标像素 |
+| `aiRgbaOf` | 挂在一个 `await` 续体上的**单段同步逐像素 JS 循环** | 每像素 3 次 `aiPixelAt` 采样 + 3 次 `aiStretchByteOf`（各含一次 `Math.pow`）+ 4 次索引写 |
+| `aiBoundsOf` | 已封顶 65536 采样 | 不是瓶颈 |
+| 预载链 `pumpAll` | 一次可发多张解码，每段都排进同一个 UI 线程 | N 段长循环**串行叠加** |
+
+ArkTS 字节码解释执行下，1677 万像素这一段连续执行 > 6 秒；`await` 只在**段与段之间**让出，
+段内主线程回不到 EventHandler，266 个 VIP 输入事件全饿死 → appfreeze。
+
+### 二、实现（纯函数真值源 + SDK 层让出，分层与 R65 完全一致）
+
+1. **总像素硬上限**：新增 `AI_MAX_TARGET_PIXELS = 4M` 与
+   `aiTargetSizeSafeOf(w,h,edge,maxPixels)` —— 在 R65 `aiDisplaySizeOf` 的长边夹界**之后**再按
+   `sqrt(max/total)` 等比例夹总像素；`aiDisplaySizeOf` 本身逐字不动。全屏 4096² → **2048²**，
+   单帧计算量降到约 1/4；`maxPixels<=0` 时保持 R65 原尺寸，1×1 不会被缩成 0。
+2. **24 行一片 + 片间宏任务让出**：`aiSliceCountOf/I0/I1` 给出分片计划，
+   `aiSxTableOf` 预建「目标列 → 源列」映射（省掉 `dw×dh` 次重复除法），
+   `aiRgbaSliceOf` 只渲染 `[y0,y1)` 行到调用方预分配的 `out`。SDK 层
+   `astroRgbaOf` 按片调用，片与片之间 `await yieldMacroTask(AI_SLICE_YIELD_MS=0)`。
+   **宏任务**（`setTimeout` 回调由 EventHandler 派发）而非 `await Promise.resolve()` 的微任务，
+   是这轮的关键：微任务队列会被一次排空，VIP 输入事件仍插不进来。
+3. **零新增 Promise 构造的让出件**：`yieldMacroTask` 把 R44 `Index.ets/nasRetryWait` 里
+   那一处「定时器 + resolve」**原样搬进 `model/Preview.ets` 共用**，
+   `nasRetryWait` 改为委托。工程全源码 Promise 构造仍**恰 2 处**
+   （`RawStore.readGuarded` 超时闸门 + `yieldMacroTask`）、`Promise.race` 仍 1 处，
+   启动恢复路径零新增等待原语，R44 重试节奏语义逐字不变。
+4. **并发槽位**：`AI_MAX_CONCURRENT_RENDER = 1` + `aiRenderSlotAllowedOf` 把「重计算」串行化；
+   等待方用同一个宏任务让出排队，**绝不丢弃任何一次解码**（不返回失败、不进黑名单），
+   `try/finally` 保证异常也归还槽位，不会把链永久堵死。
+5. **去掉每像素通用幂**：`aiStretchByteOf` 的 `gamma=0.5`（天文默认档）改走 `Math.sqrt`，
+   其余 gamma 仍走 `Math.pow`；Node 侧用 1 万个采样点验证两者输出字节**逐值全等**。
+   灰度图 `aiRgbaSliceOf` 还只采样一次（r=g=b），色图保持三通道。
+6. **尺寸 / 分配护栏**：`aiAllocAllowedOf` 在**读整文件、zlib 解压前、未压缩段**三处拦截
+   0 / 负数 / NaN / 超限；解压后像素段上限 256MB；大压缩块（>2MB）反 shuffle 改走
+   `aiUnshuffleSliceOf` 分片版（字节平面 × 65536 样本一片，片间同样宏任务让出），
+   小块仍走 R65 一次性 `aiUnshuffleOf`，结果逐字节一致。
+
+> 没有引入 `taskpool` / `worker`：ArkTS 的 `@Concurrent` 对自定义结构体 /
+> `Uint8Array` 的传参限制多、真机行为不可在本机编译校验，且会把纯函数真值源劈成两份。
+> 分片 + 宏任务让出是**可在本机用 Node 逐值回归 + 真实 ArkTS 编译**验证的方案。
+
+### 三、验证用例（`tests/dirname.test.mjs` R66 组，构造字节 / 源码静态契约）
+
+| 场景 | 结果 |
+| --- | --- |
+| 全屏 4096² | `aiTargetSizeSafeOf` → 2048×2048，总像素恰 4M；小图 / 降采样图与 `aiDisplaySizeOf` 完全同值 |
+| 分片计划 | `aiSliceCountOf(50,24)=3`、末片夹到 total、非法 per 按 1、空总得 0 |
+| 列映射表 | `aiSxTableOf(4,2)=[0,2]`，长度=dw、夹到 `srcW-1`、单调不减 |
+| **分片渲染 vs R65** | 4×5 目标、2 行一片，`aiRgbaSliceOf` 拼接结果与 `aiRgbaOf` **逐字节全等**（RGBA / BGRA 双口径），alpha 恒 255 |
+| gamma 快路 | `sqrt` 与 `Math.pow(t,0.5)` 在 10001 个采样点输出同为 0..255；0.35 档仍走 pow |
+| 反 shuffle 分片 | `aiUnshuffleSliceOf`（每片 2 样本）拼接 == `aiUnshuffleOf` 逐字节 |
+| 护栏纯函数 | `aiAllocAllowedOf` 拒 0/负数/NaN/超限；`aiRenderSlotAllowedOf` 满槽拒、账目异常放行、max<=0 恒拒 |
+| 源码契约 | 纯函数模块零 SDK / 零 IO / 零 await / 零 throw / 零定时器；SDK 层三处 `await yieldMacroTask`；`finally` 归还槽位；Promise 构造恰 2 处 |
+
+> 上述是**静态契约 + 构造字节纯函数数值回归**；分片数值等价 ≠ 真机无 appfreeze。
+
+### 四、改动范围
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/AstroImage.ts` | 新增 7 个 R66 常量 + `aiAllocAllowedOf` / `aiRenderSlotAllowedOf` / `aiSliceCountOf` / `aiSliceI0Of` / `aiSliceI1Of` / `aiSxTableOf` / `aiTargetSizeSafeOf` / `aiRgbaSliceOf` / `aiUnshuffleSliceOf`；`aiStretchByteOf` gamma 快路；`aiRgbaOf` 改为复用列映射 + 分片函数（对外结果不变） |
+| `model/Preview.ets` | 新增 `yieldMacroTask` / `astroRenderActive` / `astroUnshuffleSliced` / `astroRgbaOf`；`astroPixelsOf` 三处尺寸护栏 + 大块分片反 shuffle；`decodeAstroPx` 改走 `aiTargetSizeSafeOf` + `await astroRgbaOf`；普通图片 codec 链逐字未动 |
+| `pages/Index.ets` | `ESC_BUILD_TAG` R65→R66；`nasRetryWait` 委托 `yieldMacroTask`；文件头主线号 |
+| `tests/dirname.test.mjs` | 新增 **25 条** R66 断言 + 真机步骤 R66-A~D；构建标记 R65→R66（全量）、断言标签同步 |
+| `README.md` | 本章 + 抬头 / 章节列表 /「使用前必读」构建标记与行号同步 |
+| `AppScope/app.json5` | **未改动**：`versionCode 7` / `versionName "1.0.7"` |
+
+### 五、验证结果（三类证据严格分开）
+
+| 类型 | 结果 |
+| --- | --- |
+| **静态契约 / 构造字节纯函数** | `ALL PASS 2097 passed, 0 failed`（R65 基线 2072，+25）；`git diff --check` 通过；分片 / 尺寸 / 护栏 / gamma 全部由 R66 组当场重算 |
+| **真实 ArkTS 编译** | `./build.sh`（`hvigorw assembleHap --no-daemon`）→ **`BUILD SUCCESSFUL in 19 s 75 ms`**，日志 **`Finished :entry:default@CompileArkTS... after 11 s 753 ms`**（**CompileArkTS 非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（与 R65 基线一致，全部为 Index.ets 既有全屏 `setWindowSystemBarEnable` 系 API 的 2in1 提示，R66 新增的 `Preview.ets` / `AstroImage.ts` 零 WARN） |
+| **产物核验** | 签名 HAP **1,453,747 B**（R65 为 1,437,802 B）/ 未签名 **1,417,007 B**（R65 为 1,400,621 B）/ `modules.abc` **833,708 B**（R65 为 825,080 B）；产物 mtime 11:13 晚于源码 11:04–11:12；三件产物均检出 **`R66=1 / R65=0`**、**`1.0.7`**，且 `aiTargetSizeSafeOf` / `yieldMacroTask` / `aiRgbaSliceOf` 进入产物 |
+
+> **编译校验 ≠ 真机验证**；本机没有 EventHandler / appfreeze 监控，
+> THREAD_BLOCK_6S 是否真的消失必须由使用者在真机侧确认（见 R66-A）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:8177` R66 组）
+
+> ⚠️ 真机步骤 R66-A：装新包后 Ctrl+D 角标必须是 R66；打开含 8K×8K FITS / XISF 的目录，
+>     连续滚轮翻页 30 秒，界面/按键不再冻结、无 THREAD_BLOCK_6S appfreeze 栈。
+> ⚠️ 真机步骤 R66-B：全屏打开同一张超大天文图，主视图仍显示拉伸后的图（目标尺寸被夹到约
+>     2048×2048，属预期行为，不是「变糊」故障）；翻页 / ESC / 退出 APP 全部即时响应。
+> ⚠️ 真机步骤 R66-C：目录里同时放 3 张以上 .fits，触发预载并发；hilog 里不应出现
+>     astro decode 失败潮，槽位等待只让出主线程、不丢弃任何一次解码。
+> ⚠️ 真机步骤 R66-D：既有 HEIC/JPG/PNG / 文本预览 scrollbar / 并排 / 全屏 / 放大镜 /
+>     R64 内容量统计 / R65 天文解析 / 三栏三按钮 / 版本 1.0.7/7 全部零回归。
+
+### 七、边界
+
+- 只治「天文像素计算」这段 CPU 独占；普通图片走系统 codec，链路一行未动；
+- 目标尺寸被夹到 4M 像素（约 2048×2048）是**有意的画质/流畅度取舍**，
+  真机上超大图会比 R65 稍软，但不会白屏、不会丢图、不会冻住；
+- 并发槽位恒为 1，等待用宏任务让出而非丢弃；`AI_SLICE_YIELD_MS=0` 表示「尽快」，
+  不是「不等待」，每次仍是独立的宏任务；
+- 正式界面零新增常显控件；版本仍 `1.0.7 / versionCode 7`；**本轮只做本地提交，未 push**。
 
 ---
 

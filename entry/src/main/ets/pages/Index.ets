@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R65 主线（R39 起组件化）· FITS/XISF 天文图像预览
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R66 主线（R39 起组件化）· FITS/XISF 天文图像预览
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -154,7 +154,8 @@ import { RESUME_REFRESH_GO, resumeRefreshAction, resumeSelectedIndex,
 //   · model/Preview.ets：PreviewEntry / RawStore / decodePx 解码链 + hilog TAG/DOMAIN
 // 本文件只保留页面接线与业务逻辑，依赖方向单向（pages → components/model → common）。
 import { ArchiveRow, ROW_IMAGE, ROW_UP, ROW_FOLDER, ROW_OTHER, ROW_TEXT } from '../components/ArchiveRow';
-import { PreviewEntry, decodePx, rawStore, RAW_CACHE_MAX_COUNT, TAG, DOMAIN } from '../model/Preview';
+import { PreviewEntry, decodePx, rawStore, RAW_CACHE_MAX_COUNT, TAG, DOMAIN,
+  yieldMacroTask } from '../model/Preview';
 // R40（Index.ets 拆分 Phase 3）：左栏迁出为独立组件；ImageItem / GalleryDataSource
 // 一并迁至 model/GalleryData.ets（SidebarView 也要用，留在本文件会循环 import）。
 import { SidebarView } from '../components/SidebarView';
@@ -184,7 +185,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R65';
+const ESC_BUILD_TAG: string = 'R66';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -2226,13 +2227,12 @@ struct Index {
     }
   }
 
-  /** 第四十四轮：毫秒级等待（NAS 重连重试节奏用）。 */
+  /** 第四十四轮：毫秒级等待（NAS 重连重试节奏用）。
+   *  第六十六轮：等待用的 Promise 构造统一收敛到 model/Preview.ets 的 yieldMacroTask ——
+   *  同一处定时器等待现在同时服务 NAS 重试与天文分片让出，工程全源码 Promise 构造
+   *  仍恰 2 处（零新增），语义与 R44 逐字一致。 */
   private nasRetryWait(ms: number): Promise<void> {
-    return new Promise<void>((resolve: () => void) => {
-      setTimeout(() => {
-        resolve();
-      }, ms);
-    });
+    return yieldMacroTask(ms);
   }
 
   /** 第四十四轮：重试前的**静默**授权再激活 —— 只推 activatePermission，绝不走

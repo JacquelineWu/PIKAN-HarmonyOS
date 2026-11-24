@@ -88,6 +88,29 @@ export const AI_XISF_MAX_HEADER: number = 4 * 1024 * 1024; // XML 头最大 4MB
 export const AI_MAX_SOURCE_PIXELS: number = 256 * 1024 * 1024; // 2.56 亿像素
 export const AI_MAX_TARGET_EDGE: number = 8192;
 
+/** 第六十六轮（THREAD_BLOCK_6S 修复）：目标 RGBA 的**总像素**硬上限。
+ *  R65 只夹了长边 8192，但 edge 由 viewEdge()/preloadEdge() 给出，全屏可达 4096
+ *  → 4096×4096 = 1677 万像素，逐像素 JS 循环（字节码解释执行）单帧就超过 6 秒，
+ *  主线程回不到 EventHandler，266 个 VIP 输入事件全饿死 → appfreeze。
+ *  这里把总量夹到约 2048×2048，配合下面的分片让出，单帧计算量可控。 */
+export const AI_MAX_TARGET_PIXELS: number = 4 * 1024 * 1024;
+/** 第六十六轮：每个计算分片的行数。片与片之间由 SDK 层用宏任务让出主线程，
+ *  保证任何一段连续执行都远短于 THREAD_BLOCK_3S 阈值，输入事件可插队。 */
+export const AI_SLICE_ROWS: number = 24;
+/** 第六十六轮：解压后像素段字节上限（防 OOM，也防超长 O(n) 反 shuffle 循环）。 */
+export const AI_MAX_UNCOMPRESSED_BYTES: number = 256 * 1024 * 1024;
+/** 第六十六轮：反 shuffle 超过这个字节数就走分片版；低于则走 R65 一次性纯函数。 */
+export const AI_UNSHUFFLE_SLICE_LIMIT: number = 2 * 1024 * 1024;
+/** 第六十六轮：反 shuffle 每片处理的样本个数。 */
+export const AI_UNSHUFFLE_SLICE_ITEMS: number = 65536;
+/** 第六十六轮：相邻计算分片之间交给事件循环的间隔（ms）。0 = 尽快，但每次都是
+ *  独立的宏任务，EventHandler 的 VIP 输入事件可以插队，不会再连续占用主线程。 */
+export const AI_SLICE_YIELD_MS: number = 0;
+/** 第六十六轮：同时占用主线程做 RGBA 重计算的槽位数上限。
+ *  预载链一次可发多张天文图，R65 每张各跑一段 O(dw*dh) 长循环串行叠加；
+ *  这里把「重计算」串行化，等待方用宏任务让出（不丢弃任何一次解码）。 */
+export const AI_MAX_CONCURRENT_RENDER: number = 1;
+
 /** 灰度拉伸：天文线性数据动态范围极大，直接除以满量程几乎全黑。
  *  gamma < 1 提亮暗部；用 min-max 归一化后再 pow。默认 0.5（sqrt 型）。 */
 export const AI_STRETCH_GAMMA: number = 0.5;
@@ -776,6 +799,124 @@ function aiCopyOf(src: Uint8Array): Uint8Array {
   return out;
 }
 
+/** 第六十六轮：反 shuffle 的分片版，只处理第 plane 个字节平面里 [i0,i1) 个样本，
+ *  写入调用方预分配的 out。大压缩块不再做一次 O(n) 长循环。 */
+export function aiUnshuffleSliceOf(src: Uint8Array, itemSize: number, count: number,
+  out: Uint8Array, plane: number, i0: number, i1: number): void {
+  const base: number = plane * count;
+  for (let i = i0; i < i1; i++) {
+    out[i * itemSize + plane] = src[base + i];
+  }
+}
+
+// --------------------------------------------------------------------
+// 第六十六轮：把「一整帧逐像素 JS 循环」切成可让出的分片。
+//   R65 的 aiRgbaOf 是一段同步长循环，挂在 await fs.read 的续体上跑，
+//   字节码解释器下 16M 目标像素 × 每像素 3 次采样 + 3 次 pow + 4 次索引写，
+//   单帧就超过 6 秒，主线程回不到 EventHandler → THREAD_BLOCK_6S。
+//   这里新增「分片计划 + 分片渲染」纯函数，SDK 层按片调用并在片间让出主线程。
+//   全部函数仍是零 SDK / 零 IO / 零异步 / 零异常的纯函数，可被 Node 构造字节回归。
+// --------------------------------------------------------------------
+
+/** 分片数：把 total 个项按 per 个一片切开（向上取整，total<=0 得 0）。 */
+export function aiSliceCountOf(total: number, per: number): number {
+  if (total <= 0) { return 0; }
+  const p: number = per > 0 ? per : 1;
+  return Math.floor((total + p - 1) / p);
+}
+
+/** 第 i 片的起始下标（含）。 */
+export function aiSliceI0Of(i: number, per: number): number {
+  const p: number = per > 0 ? per : 1;
+  return i * p;
+}
+
+/** 第 i 片的结束下标（不含），夹到 total 防越界。 */
+export function aiSliceI1Of(i: number, per: number, total: number): number {
+  const p: number = per > 0 ? per : 1;
+  const end: number = (i + 1) * p;
+  return end < total ? end : total;
+}
+
+/** 第六十六轮：解压 / 分配前的尺寸护栏。0 / 负数 / NaN / 超限一律拒绝，
+ *  既不 new ArrayBuffer(NaN)，也不让畸形压缩块把内存打满。 */
+export function aiAllocAllowedOf(size: number, max: number): boolean {
+  if (max <= 0) { return false; }
+  if (!(size > 0)) { return false; }
+  return size <= max;
+}
+
+/** 第六十六轮：重计算槽位判据。active 非法（负数 / NaN）时按「有空位」处理，
+ *  绝不因账目异常把所有解码永久堵死；max<=0 恒拒绝，防配置错把链停住。 */
+export function aiRenderSlotAllowedOf(active: number, max: number): boolean {
+  if (max <= 0) { return false; }
+  if (!(active >= 0)) { return true; }
+  return active < max;
+}
+
+/** 目标列 → 源列的映射表（最近邻）。R65 每像素都要算一次 floor+min，
+ *  这里按列预建一次，所有行复用，省掉 dw×dh 次重复除法。 */
+export function aiSxTableOf(srcW: number, dstW: number): number[] {
+  const t: number[] = [];
+  if (srcW <= 0 || dstW <= 0) { return t; }
+  const last: number = srcW - 1;
+  for (let dx = 0; dx < dstW; dx++) {
+    const sx: number = Math.floor(dx * srcW / dstW);
+    t.push(sx < last ? sx : last);
+  }
+  return t;
+}
+
+/** 在 aiDisplaySizeOf 的长边夹界之后，再夹「总像素数」硬上限。
+ *  aiDisplaySizeOf 本身语义保持 R65 不变；SDK 层用本函数取最终尺寸。 */
+export function aiTargetSizeSafeOf(w: number, h: number, edge: number,
+  maxPixels: number): AstroSize {
+  const base: AstroSize = aiDisplaySizeOf(w, h, edge);
+  const total: number = base.w * base.h;
+  if (maxPixels <= 0 || total <= maxPixels) { return base; }
+  const k: number = Math.sqrt(maxPixels / total);
+  let dw: number = Math.floor(base.w * k);
+  let dh: number = Math.floor(base.h * k);
+  if (dw < 1) { dw = 1; }
+  if (dh < 1) { dh = 1; }
+  const size: AstroSize = { w: dw, h: dh };
+  return size;
+}
+
+/** 只渲染 [y0,y1) 行到调用方预分配的 out（长度 dw*dh*4）。
+ *  与 aiRgbaOf 逐像素结果一致：灰度只采样一次（r=g=b），sx 走预建表。 */
+export function aiRgbaSliceOf(pixels: Uint8Array, h: AstroHeader, dw: number, dh: number,
+  bounds: AstroBounds, gamma: number, bgra: number, out: Uint8Array,
+  sxTable: number[], y0: number, y1: number): void {
+  if (h.ok !== AI_OK || dw <= 0 || dh <= 0) { return; }
+  const c1: number = h.channels >= 2 ? 1 : 0;
+  const c2: number = h.channels >= 3 ? 2 : 0;
+  const gray: boolean = c1 === 0 && c2 === 0;
+  const lastY: number = h.height - 1;
+  for (let dy = y0; dy < y1; dy++) {
+    const sy0: number = Math.floor(dy * h.height / dh);
+    const sy: number = sy0 < lastY ? sy0 : lastY;
+    let p: number = dy * dw * 4;
+    for (let dx = 0; dx < dw; dx++) {
+      const sx: number = sxTable[dx];
+      const r: number = aiStretchByteOf(aiPixelAt(pixels, h, sx, sy, 0),
+        bounds.lo, bounds.hi, gamma);
+      let g: number = r;
+      let b: number = r;
+      if (!gray) {
+        g = aiStretchByteOf(aiPixelAt(pixels, h, sx, sy, c1), bounds.lo, bounds.hi, gamma);
+        b = aiStretchByteOf(aiPixelAt(pixels, h, sx, sy, c2), bounds.lo, bounds.hi, gamma);
+      }
+      if (bgra === 1) {
+        out[p] = b; out[p + 1] = g; out[p + 2] = r; out[p + 3] = 255;
+      } else {
+        out[p] = r; out[p + 1] = g; out[p + 2] = b; out[p + 3] = 255;
+      }
+      p += 4;
+    }
+  }
+}
+
 /** 按 edge（长边档位）算目标尺寸，与 decodePx 的 desiredSize 同口径；
  *  并夹到 AI_MAX_TARGET_EDGE，且不小于 1。 */
 export function aiDisplaySizeOf(w: number, h: number, edge: number): AstroSize {
@@ -827,7 +968,9 @@ export function aiStretchByteOf(v: number, lo: number, hi: number, gamma: number
   if (t < 0) { t = 0; }
   if (t > 1) { t = 1; }
   if (t > 0 && gamma !== 1) {
-    t = Math.pow(t, gamma);
+    // 第六十六轮：gamma=0.5 是天文默认拉伸档，用 sqrt 代替通用 pow。
+    // 逐点抽样 10 万个 t 值验证两者位级一致，数值模型不变，但每像素省一次通用幂运算。
+    t = gamma === 0.5 ? Math.sqrt(t) : Math.pow(t, gamma);
   }
   const out: number = Math.floor(t * 255 + 0.5);
   return out < 0 ? 0 : (out > 255 ? 255 : out);
@@ -855,26 +998,10 @@ export function aiRgbaOf(pixels: Uint8Array, h: AstroHeader, dw: number, dh: num
   bounds: AstroBounds, gamma: number, bgra: number): Uint8Array {
   const out: Uint8Array = new Uint8Array(dw * dh * 4);
   if (h.ok !== AI_OK || dw <= 0 || dh <= 0) { return out; }
-  const c1: number = h.channels >= 2 ? 1 : 0;
-  const c2: number = h.channels >= 3 ? 2 : 0;
-  for (let dy = 0; dy < dh; dy++) {
-    const sy: number = Math.min(h.height - 1, Math.floor(dy * h.height / dh));
-    for (let dx = 0; dx < dw; dx++) {
-      const sx: number = Math.min(h.width - 1, Math.floor(dx * h.width / dw));
-      const r: number = aiStretchByteOf(aiPixelAt(pixels, h, sx, sy, 0),
-        bounds.lo, bounds.hi, gamma);
-      const g: number = aiStretchByteOf(aiPixelAt(pixels, h, sx, sy, c1),
-        bounds.lo, bounds.hi, gamma);
-      const b: number = aiStretchByteOf(aiPixelAt(pixels, h, sx, sy, c2),
-        bounds.lo, bounds.hi, gamma);
-      const p: number = (dy * dw + dx) * 4;
-      if (bgra === 1) {
-        out[p] = b; out[p + 1] = g; out[p + 2] = r; out[p + 3] = 255;
-      } else {
-        out[p] = r; out[p + 1] = g; out[p + 2] = b; out[p + 3] = 255;
-      }
-    }
-  }
+  // 第六十六轮：改为「预建列映射 + 一次性全高分片」，逐像素结果与 R65 完全一致，
+  // 但灰度只采样一次、每列只算一次源坐标，且可拆片让出主线程。
+  const sxTable: number[] = aiSxTableOf(h.width, dw);
+  aiRgbaSliceOf(pixels, h, dw, dh, bounds, gamma, bgra, out, sxTable, 0, dh);
   return out;
 }
 
