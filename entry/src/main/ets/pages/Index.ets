@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R66 主线（R39 起组件化）· FITS/XISF 天文图像预览
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R67 主线（R39 起组件化）· FITS/XISF 天文图像预览
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -176,6 +176,16 @@ import { DC_PENDING, DC_FAIL, DC_LABEL_PENDING, DC_TTL_DEFAULT_MS,
   dcIdleOf, dcAppIdleOf, dcScanActionOf, dcCountOf, dcImageCountOf,
   dcStateOf, dcEntryLabelOf, dcNeedRescanOf, dcEvictCountOf,
   dcTtlHintOf, dcTtlLabelOf } from '../common/DirCount';
+// 第六十七轮：放大镜高质量显示的关键参数 / 能力分级 / AA 档决策真值源（零 SDK / 零 IO）。
+// 画质档位只由「逻辑倍率」（与设备密度解耦）决定，密度只进像素预算 ⇒ 跨 DPI 一致；
+// 系统 native 级 AA 缩放的护栏（倍率 / 总像素 / 长边 / 稳定阈值 / 真实增益）全在这里。
+import { LQ_CAP_COMPONENT, LQ_CAP_SYSTEM_AA, LQ_MAX_EDGE, LQ_MAX_FACTOR,
+  LQ_STABLE_MIN_DELTA, LQ_MIN_GAIN,
+  lqDensityOf, lqLogicalScaleOf, lqEffectiveScaleOf, lqConsistentTierOf,
+  lqKindOf, lqAaLevelOf, lqInterpolationOf, lqFilterModeOf,
+  lqFactorOf, lqTargetEdgeOf, lqShouldRebuildOf, lqHasGainOf } from '../common/LoupeQuality';
+// 第六十七轮：系统 native 级抗锯齿缩放（唯一碰 SDK 的实现在 model/Preview.ets）。
+import { loupeCapabilityOf, loupeSystemScaledPx } from '../model/Preview';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -185,7 +195,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R66';
+const ESC_BUILD_TAG: string = 'R67';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -577,6 +587,22 @@ interface DirRowsCacheEntry {
   at: number;         // 写入时刻（调试 / 淘汰参考）
 }
 const DIR_ROWS_CACHE_MAX: number = 12;
+
+/** 第六十七轮：一次放大镜重采样的完整画质决策（全由 LoupeQuality 纯函数产出）。
+ *  tier / aa / interpolation / filter 只由**逻辑倍率**决定，density 只进 effective
+ *  与像素预算 —— 不同 DPI 屏在同一倍率下落同一档，视觉稳定一致。 */
+interface LoupeScalePlan {
+  cap: number;              // 运行时能力档（0 组件级回退 / 1 系统 AA / 2 裁剪+缩放）
+  logical: number;          // 逻辑倍率 = LOUPE_ZOOM × zoom（刻意不含密度）
+  effective: number;        // 有效像素倍率 = 逻辑倍率 × 真实密度
+  tier: number;             // 跨密度一致档 0/1/2
+  kind: number;             // 内容种类：影像 / 图形 / 文字
+  aa: number;               // 系统级 AA 档（LQ_AA_*）
+  want: number;             // 期望系统级缩放倍率（再交给 lqSafeFactorOf 夹预算）
+  target: number;           // 目标长边（夹到原图长边与 LQ_MAX_EDGE）
+  interpolation: number;    // 回退路径用的组件插值档（LQ_IP_*）
+  filter: number;           // 硬件采样 FilterMode（LQ_FILTER_*）
+}
 
 /** 受支持的图片后缀。第六十五轮追加 FITS / XISF 天文图像后缀 —— 系统 codec 不认，
  *  由 model/Preview.ets 的 decodeAstroPx 自解析；后缀进本表即自动获得左栏列出 /
@@ -1350,6 +1376,18 @@ struct Index {
    *  SDK 26 @ohos.display: display.getDefaultDisplaySync().densityPixels ∈ [0.5, 4.0]。
    *  写在放大镜字段区，绝不进 aboutToAppear 启动路径（启动只打常量快照）。 */
   private loupeDensity: number = 0;
+
+  // ---- 第六十七轮：系统 native 级 AA 缩放产物（放大镜专用，自有、由本类 release）----
+  /** createScaledPixelMap 产出的一张「可直接 1:1 贴图」；undefined = 走 R17 组件级链。
+   *  刻意不进 previews 缓存：它只是某张图在某个倍率档下的临时重采样结果。 */
+  @State loupeSysPx: image.PixelMap | undefined = undefined;
+  private loupeSysUri: string = '';
+  private loupeSysPane: number = LOUPE_PANE_NONE;
+  private loupeSysEdge: number = 0;
+  private loupeSysToken: number = 0;
+  /** 运行时能力档：懒探测一次（只在首次拿到放大镜图源时读方法存在性），绝不进启动路径。 */
+  private loupeCap: number = LQ_CAP_COMPONENT;
+  private loupeCapProbed: boolean = false;
 
   // ---- 滚轮翻页：去抖 + 合并（见 onWheel / flushWheel 注释）----
   private lastAxisMs: number = 0;     // 最近一次轴事件（滚轮/触控板）的时刻，用于屏蔽「被当成拖拽」的伪平移
@@ -4384,6 +4422,83 @@ struct Index {
       loupeNeedsResampleOf(this.loupeScale());
   }
 
+  // ---- 第六十七轮：系统 native 级 AA 缩放决策（纯函数真值源 → 一次重采样）----
+
+  /** 一次算出本帧完整画质决策。档位（tier / aa / interpolation / filter）
+   *  只认**逻辑倍率**，密度只进 effective 与像素预算 ⇒ 不同 DPI 屏同一档、同一视觉。
+   *  · target = 圆内放大图所需的物理长边（画布长边 × 有效倍率，夹到 LQ_MAX_EDGE）；
+   *  · current = R17 实际补解出的长边（desiredSize 只能降采样，小图会卡在原图边）；
+   *  · want = 两者缺口，交给 lqFactorOf 按内容种类收敛、再交给 lqSafeFactorOf 夹预算。 */
+  private loupeSystemPlan(uri: string): LoupeScalePlan {
+    const logical: number = lqLogicalScaleOf(LOUPE_ZOOM, this.zoom);
+    const density: number = lqDensityOf(this.loupeDensityOf());
+    const effective: number = lqEffectiveScaleOf(logical, density);
+    const kind: number = lqKindOf(uri);
+    const base: number = Math.max(this.frameW(), this.frameH());
+    // srcLong 传 0：系统级缩放**可以升采样**，不受 decodePx 的 desiredSize 限制。
+    const target: number = lqTargetEdgeOf(base, effective, 0, LQ_MAX_EDGE);
+    const current: number = this.loupeHiEdge > 0 ? this.loupeHiEdge : this.viewEdge();
+    const deficit: number = target / Math.max(1, current);
+    const plan: LoupeScalePlan = {
+      cap: this.loupeCap,
+      logical: logical,
+      effective: effective,
+      tier: lqConsistentTierOf(logical, density),
+      kind: kind,
+      aa: lqAaLevelOf(logical, kind, this.loupeCap),
+      want: lqFactorOf(deficit, kind, LQ_MAX_FACTOR),
+      target: target,
+      interpolation: lqInterpolationOf(logical),
+      filter: lqFilterModeOf(logical)
+    };
+    return plan;
+  }
+
+  /** 稳定阈值（鼠标在圆内高频微动不重算）+ 真实像素增益（补不出像素就不做）。 */
+  private loupeSysRebuildWanted(target: number): boolean {
+    return lqShouldRebuildOf(this.loupeSysEdge, target, LQ_STABLE_MIN_DELTA) &&
+      lqHasGainOf(target, this.loupeHiEdge, LQ_MIN_GAIN);
+  }
+
+  /** 圆内统一图源出口：系统级 AA 产物优先，R17 高清重解码兜底，能力不足再退组件级链。
+   *  uri / pane 双重对账 —— 切图换页绝不把上一张的系统级产物错画到新图上。 */
+  private loupeDisplayPx(uri: string, pane: number): image.PixelMap {
+    if (this.loupeSysPx !== undefined && this.loupeSysUri === uri &&
+      this.loupeSysPane === pane) {
+      return this.loupeSysPx!;
+    }
+    return this.loupeHiPx!;
+  }
+
+  /** 系统级产物是否与当前页匹配（诊断 / 未来扩展用，不改变绘制分支）。 */
+  private loupeSysUsable(uri: string, pane: number): boolean {
+    return this.loupeSysPx !== undefined &&
+      this.loupeSysUri === uri && this.loupeSysPane === pane &&
+      this.loupeCap >= LQ_CAP_SYSTEM_AA;
+  }
+
+  /** 释放系统级产物并作废旧代号（关闭 / 换图 / 模式切换 / 页面销毁 / 能力回退）。 */
+  private clearLoupeSysPx(): void {
+    this.loupeSysToken++;
+    const oldSys: image.PixelMap | undefined = this.loupeSysPx;
+    this.loupeSysPx = undefined;
+    this.loupeSysUri = '';
+    this.loupeSysPane = LOUPE_PANE_NONE;
+    this.loupeSysEdge = 0;
+    this.releaseLoupeSysPx(oldSys);
+  }
+
+  private releaseLoupeSysPx(px: image.PixelMap | undefined): void {
+    if (px === undefined) {
+      return;
+    }
+    try {
+      px.release();
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'loupe R67 release skipped');
+    }
+  }
+
   /** >1:1 时按放大后像素需求补解一张高分辨率 PixelMap 给放大镜 —— 画质修复核心。
    *  第十七轮修正：ArkUI `.interpolation()` 对 PixelMap **生效**（SDK 26
    *  `component/image.d.ts` L1070 只排除 SVG / AnimatedDrawableDescriptor；
@@ -4437,6 +4552,38 @@ struct Index {
       this.loupeHiEntry = e;
       this.loupeHiPx = e.px;
       this.releaseUncachedEntry(old);
+      // 第六十七轮：能力探测（只读方法存在性）→ 画质决策 → 一次系统 native 级 AA 缩放。
+      // 全链路异步、只在倍率档变化时重算；失败 / 能力不足 / 预算不足都留在 R17 组件级链。
+      if (!this.loupeCapProbed) {
+        this.loupeCap = loupeCapabilityOf(e.px);
+        this.loupeCapProbed = true;
+      }
+      const plan: LoupeScalePlan = this.loupeSystemPlan(uri);
+      if (plan.cap < LQ_CAP_SYSTEM_AA || !this.loupeSysRebuildWanted(plan.target)) {
+        this.clearLoupeSysPx();
+        return;
+      }
+      this.loupeSysUri = uri;
+      this.loupeSysPane = pane;
+      this.loupeSysEdge = plan.target;
+      const sysToken: number = ++this.loupeSysToken;
+      loupeSystemScaledPx(e.px, plan.want, plan.aa, plan.cap).then(
+        (scaled: image.PixelMap | undefined): void => {
+          if (sysToken !== this.loupeSysToken) {
+            this.releaseLoupeSysPx(scaled); // 迟到作废结果不接手、不泄漏
+            return;
+          }
+          if (scaled === undefined) {
+            this.clearLoupeSysPx(); // SDK 缩放失败：静默回退 R17 高清图源
+            return;
+          }
+          const oldSys: image.PixelMap | undefined = this.loupeSysPx;
+          this.loupeSysPx = scaled;
+          this.releaseLoupeSysPx(oldSys);
+          hilog.info(DOMAIN, TAG,
+            'loupe R67 cap=%{public}d tier=%{public}d aa=%{public}d ip=%{public}d fm=%{public}d',
+            plan.cap, plan.tier, plan.aa, plan.interpolation, plan.filter);
+        });
     });
   }
 
@@ -4450,6 +4597,7 @@ struct Index {
     this.loupeHiPane = LOUPE_PANE_NONE;
     this.loupeHiEdge = 0;
     this.releaseUncachedEntry(old);
+    this.clearLoupeSysPx(); // 第六十七轮：同步释放系统级 AA 产物并作废旧代号
   }
 
   /** fillSizes 补测到体积后同步到左栏行（rows 与 items 可能是不同对象） */
@@ -8301,7 +8449,9 @@ struct Index {
           // 真实像素补足 → 无像素块 / 无锯齿；objectFit(Contain) 保证与主图逐点对应、不变形。
           // SDK 26 官方：.interpolation() 对 PixelMap 生效（High=Cubic 放大最高质量），
           // .antialiased(true) 再补 PixelMap 边缘 AA（默认关闭，since 23）。
-          Image(this.loupeHiPx!)
+          // 第六十七轮：系统 native 级 AA 缩放产物优先（一次 Cubic 重采样、跨帧稳定），
+          // 失败 / 能力不足自动回落到 R17 高清重解码图源，五个图源分支与交互逐字不变。
+          Image(this.loupeDisplayPx(uri, pane))
             .objectFit(ImageFit.Contain)
             .interpolation(this.loupeInterpolation())
             .antialiased(LOUPE_AA_ENABLED)

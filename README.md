@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R66`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R67`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -555,15 +555,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R63（文本预览 scrollbar 恢复显示：内容驱动 @State + 视口高兜底）、
 > R64（左栏目录内容量统计与展示：空闲扫描 + TTL 缓存 + 四态显示）、
 > R65（FITS / XISF 天文图像预览：自解析头 + 灰度拉伸 + 真异步读字节）、
-> R66（天文像素计算让出主线程：总像素硬上限 + 24 行分片 + 宏任务让出 + 并发槽位）
-> 见下方十一个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R66（天文像素计算让出主线程：总像素硬上限 + 24 行分片 + 宏任务让出 + 并发槽位）、
+> R67（放大镜高质量显示：系统 native 抗锯齿缩放 + 能力分级 + 跨密度一致档）
+> 见下方十二个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R66`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R66` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R67`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R67` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （`tests/dirname.test.mjs:3912`；R66 测试 import 再顺延 8 行，行号由 3904 顺延至 3912）
+  （行号随 R67 新增 import 顺延，以 `grep -n 真机步骤 R67 tests/dirname.test.mjs` 为准：8413–8421）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -594,6 +595,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R54 | 选段改为按住左键拖选 | 6427–6428 |
 | R55 | 预览区常显角标取消 | 6452–6453 |
 | R66 | 天文像素计算让出主线程（THREAD_BLOCK_6S：尺寸护栏 + 分片 + 并发槽位） | 8177–8185 |
+| R67 | 放大镜高质量显示（系统 native AA + 能力分级 + 跨密度一致档） | 8413–8421 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1855,6 +1857,160 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第六十七轮：放大镜高质量显示 —— 系统 native 抗锯齿缩放 + 能力分级 + 跨密度一致档（2026-11-24，R67）
+
+> 用户诉求：优化放大镜圆内的显示质量 —— ① 文字 / 图形 / 影像都要清晰；
+> ② 边缘平滑、无锯齿毛边；③ 不同放大倍率、不同屏幕密度下表现稳定一致；
+> ④ 不卡顿、不延迟、不过度占用资源；**可用且相容时**再用系统级渲染优化 / 硬件加速能力。
+
+### 一、先判读现状与 SDK 26 真实声明（按源码判读，不凭缓存推断）
+
+| 层 | R14–R17 既有基线 | 本轮新增 |
+| --- | --- | --- |
+| 画质档 | ArkUI **组件级** `.interpolation(High/Low)` + `.antialiased(true)`，只有 High / Low 二值 | 系统 **native 级** `createScaledPixelMap(x, y, AntiAliasingLevel)`，四档可选 |
+| 重采样时机 | 每帧由 UI 合成层 GPU 采样；鼠标在圆内高频微动即反复重采样 | 只在**倍率档变化**时做一次，产物跨帧稳定一致 |
+| 像素来源 | `loupeHiPx` 按真实像素需求重解码（`desiredSize` 只能降采样） | 同一张高清源再经一次系统 AA 缩放，**可以升采样**，补出小图 / 高倍段缺的真实像素 |
+| 失败路径 | 五个图源分支兜底 | 能力不足 / 预算不足 / SDK 抛错 → **逐字回退 R17 链**，零回归 |
+
+SDK 26 声明核实（`sdk/default/openharmony/ets/api`）：
+
+- `@ohos.multimedia.image.d.ts` L2495 `enum AntiAliasingLevel`：`NONE=0`（最近邻）/ `LOW=1`（双线性）/
+  `MEDIUM=2`（双线性 + mipmap linear，官方建议缩小用）/ `HIGH=3`（Cubic，放大最高质量档）。
+- 同文件 L5302 `createScaledPixelMap(x, y, level?): Promise<PixelMap>` **since 18**；
+  L6013 `createCroppedAndScaledPixelMap(region, x, y, level?): Promise<PixelMap>` **since 22**。
+- `@ohos.graphics.drawing.d.ts` L1519 `enum FilterMode`：`FILTER_MODE_NEAREST=0` / `FILTER_MODE_LINEAR=1`（since 20）。
+
+⚠️ 「编译 SDK 26 有声明」≠「运行时一定有」：低版本 ROM 上方法不存在。故能力分级是
+**API 等级 + 运行时函数存在性双判据**，任一不满足即回退组件级，绝不因新 API 让放大镜空白。
+
+### 二、关键参数设定（唯一真值源 `common/LoupeQuality.ts`）
+
+| 组 | 参数 | 取值 / 语义 |
+| --- | --- | --- |
+| 能力档 | `LQ_CAP_COMPONENT / SYSTEM_AA / HW_CROP` | `0 / 1 / 2`；门槛 `since 18 / since 22`，探测基准 SDK 26 |
+| 内容种类 | `LQ_KIND_IMAGE / GRAPHIC / TEXT` | `0 / 1 / 2`；按后缀 + 文件名关键字粗分（含中文「扫描 / 截图 / 报表 / 图形 / 图表」），未知一律影像 |
+| AA 档 | `LQ_AA_NONE / LOW / MEDIUM / HIGH` | `0 / 1 / 2 / 3`，与 SDK 枚举**逐值对应**，不另造语义 |
+| 组件插值 | `LQ_IP_LOW / MEDIUM / HIGH` | `0 / 1 / 2`，与 R62 `RQ_*` 同序 |
+| 硬件采样 | `LQ_FILTER_NEAREST / LINEAR` | `0 / 1`，只有 1:1 才允许 NEAREST |
+| 密度 | `[0.5, 4.0]` / 参考 1.0 / 回退 1.0 | 密度**只进像素预算，绝不进画质档** ⇒ 跨 DPI 一致 |
+| 护栏 | 总像素 `4M` / 倍率 `3.0` / 长边 `8192` | 与 R66 `AI_MAX_TARGET_PIXELS` 同量级；`ceil` 上浮后逐档收缩复核 |
+| 稳定 | 重算阈值 `64px` / 最小真实增益 `96px` | 鼠标微动不重算、补不出像素就不分配 |
+
+**跨密度一致的唯一判据**：`lqLogicalScaleOf(LOUPE_ZOOM, zoom)` 刻意不含密度，
+`lqConsistentTierOf(logical, density)` 的密度参数不参与计算（只保留在签名里供验证
+「传不同密度结果相同」）。同一倍率在 0.5 / 1 / 2 / 3 / 4 密度下恒落同一档、同一视觉。
+
+### 三、为什么高倍文字 / 图形必须改走 MEDIUM（数值证据，不是拍脑袋）
+
+Cubic 的 Catmull-Rom 核在 `1<|x|<2` 有**负 lobe**：`lqCubicWeightOf(1.5) = -0.0625`；
+双线性 tent 核恒非负。对阶跃边缘 `[0×4, 255×4, 0×4]` 放大 3 倍：
+
+| 模式 | 边缘抖动 `lqEdgeJitterOf` | 过冲 `lqOvershootOf` |
+| --- | --- | --- |
+| NEAREST | 1020（阶梯最重） | 0 |
+| LINEAR | 340 | 0 |
+| CUBIC | 491.1111 | **113.3333**（负 lobe 振铃 / 光晕） |
+| MIPMAP | **170**（最低） | 0 |
+
+故 `lqAaLevelOf` 定为：≤1:1 → LOW；温和放大 → HIGH(Cubic)；**>2 高倍的文字 / 图形 →
+MEDIUM(mipmap linear)** 抑制振铃与毛边，影像仍 HIGH 保细节；脏值一律 LOW 安全兜底，
+绝不落到 NONE（最近邻，锯齿之源）。
+
+### 四、实现（三层分工，与 R62 / R65 / R66 的分层完全一致）
+
+1. **`common/LoupeQuality.ts`（新增，纯函数真值源）**：零 SDK / 零 IO / 零 `await` /
+   零 `throw` / 零定时器 / 零全局可变状态。决策函数（能力 / 密度 / 逻辑与有效倍率 /
+   一致档 / 内容种类 / AA 档 / 插值 / 硬件采样 / 倍率 / 目标边 / 资源护栏 / 稳定阈值 /
+   真实增益）供运行时调用；核 / 重采样 / 边缘抖动 / 过冲四个数值模型只用于回归用例。
+2. **`model/Preview.ets`（全工程唯一碰该 SDK 的地方）**：
+   `loupeCapabilityOf(px)` 只读 `typeof px.createScaledPixelMap === 'function'` 与 crop 版存在性，
+   交 `lqCapabilityOf` 收敛成能力档；`lqSdkAaLevelOf` 把 `LQ_AA_*` 映射成
+   `image.AntiAliasingLevel`；`loupeSystemScaledPx()` `await src.getImageInfo()` 拿真实宽高 →
+   `lqSafeFactorOf` 夹预算 → `lqScaleAllowedOf` 复核 → `await src.createScaledPixelMap(factor,
+   factor, level)`；能力不足 / 尺寸脏值 / 预算放不下 / SDK 抛错一律返回 `undefined`。
+   **全异步、零新增 `Promise` 构造、零同步 IO**。
+3. **`pages/Index.ets`（接线，不动既有交互）**：
+   - `interface LoupeScalePlan` + `loupeSystemPlan(uri)` 一次算出本帧全部决策；
+     `target = lqTargetEdgeOf(画布长边, effective, 0, LQ_MAX_EDGE)` —— `srcLong` 传 0 是因为
+     系统级缩放**可以升采样**，不受 `decodePx.desiredSize` 限制；`want` 取「目标边 / R17 实际
+     解码边」的缺口，经 `lqFactorOf` 按内容种类收敛。
+   - `loupeSysRebuildWanted()` 双闸门：`lqShouldRebuildOf`（微动不重算）+ `lqHasGainOf`
+     （补不出真实像素就不分配）。
+   - `ensureLoupeHiRes()` 的解码回调里懒探测一次能力 → 起一次系统缩放；
+     `loupeSysToken` 作废迟到结果并 `release()`，失败静默 `clearLoupeSysPx()` 回退 R17。
+   - `loupeDisplayPx(uri, pane)` 统一图源出口：系统级产物优先、`uri/pane` 双重对账，
+     切图换页绝不把上一张错画到新图上；`clearLoupeHiRes()` 同步释放系统级产物。
+   - `loupeLayer()` **只把第一个分支的图源换成 `loupeDisplayPx(uri, pane)`**：
+     五个图源分支、`.interpolation(this.loupeInterpolation())` ×5、`.antialiased()` ×5、
+     整像素尺寸 / 偏移、圆裁剪、命中模式全部逐字不变。
+
+**回退链**：`cap=0`（低版本 ROM / 方法缺失）→ 完全走 R17 组件级链 → 再退四个既有兜底源；
+解码失败 / 系统缩放失败同样不空白、不花屏、不崩溃。
+
+### 五、验证用例（`tests/dirname.test.mjs` R67 组）
+
+- ① 关键参数：SDK 枚举逐值对应 / 相容门槛 / 4M·3×·8192·64·96 护栏；
+- ② 密度归一化、逻辑倍率不含密度、跨 DPI 同档（0.5/1/2/3/4 密度全等）；
+- ③ 内容种类 / AA 档 / 组件插值 / 硬件采样 / 能力分级双判据；
+- ④ 倍率、目标边、`lqScaleAllowedOf` 四重拒绝、`lqSafeFactorOf` 预算夹界、稳定阈值与增益；
+- ⑤ 一维边缘信号数值模型（Cubic 负 lobe、抖动 / 过冲排序、mipmap 抑制振铃）；
+- ⑥ 源码静态契约：真值源纯净 / SDK 唯一出口 / 接线 / 显示层 / 零回归；
+- ⑦ 构建标记迁移：历史 29 条 `ESC_BUILD_TAG` 断言由 `R66` 升到 `R67`，
+  `R66 / R65` 旧标记定义仍被显式断言为不存在。
+
+### 六、改动范围
+
+| 文件 | 改动 |
+| --- | --- |
+| `entry/src/main/ets/common/LoupeQuality.ts` | **新增** 纯函数真值源（决策 + 数值模型） |
+| `entry/src/main/ets/model/Preview.ets` | 新增能力探测 / AA 档映射 / 系统级 AA 缩放函数 |
+| `entry/src/main/ets/pages/Index.ets` | import / 计划接口 / 状态 / 决策与释放 / 图源出口 / 构建标记 `R67` |
+| `tests/dirname.test.mjs` | 新增 R67 组 + 29 条历史构建标记迁移 |
+| `README.md` | 本章 |
+
+未升版本（`1.0.7 / versionCode 7`）、未加任何常显控件、未改三按钮 / 三栏 / 四态统计 /
+文本 scrollbar / 并排 / 全屏 / ESC / R64 / R65 / R66 行为。
+
+### 七、验证结果（三类证据严格分开）
+
+- **静态契约 + 构造数值回归**：`node --experimental-strip-types tests/dirname.test.mjs`
+  → `ALL PASS  2126 passed, 0 failed`（含 R67 新增 24 条、29 条标记迁移）。
+- **真实 ArkTS 编译**：`./build.sh`（`hvigorw assembleHap --no-daemon`）→
+  **`BUILD SUCCESSFUL in 1 min 37 s 248 ms`**，`Finished :entry:default@CompileArkTS... after
+  1 min 6 s 643 ms`（**CompileArkTS 非 UP-TO-DATE**）；**0 ERROR / 9 WARN**，全部是
+  `Index.ets` 既有的 `READ_IMAGEVIDEO` 权限提示与 2in1 不支持 API 提示，
+  R67 新增的 `LoupeQuality.ts` / `Preview.ets` 缩放函数零 WARN。
+- **产物核验**：签名 HAP **1,507,725 B**、未签名 **1,469,337 B**、
+  `ets/modules.abc` **861,652 B**；从签名 HAP 解出的字节码检出
+  **`R67=5 / R66=0`**，且 `lqAaLevelOf` / `loupeSystemScaledPx` /
+  `createScaledPixelMap` / `loupeDisplayPx` / `LoupeQuality` 全部进入产物。
+- **静态契约复核**：编译后重跑 `node --experimental-strip-types tests/dirname.test.mjs`
+  → **`ALL PASS  2126 passed, 0 failed`**；`git diff --check` 通过。
+- **真机验证**：本机无 `hdc` / 真机环境，**未做**；编译校验 ≠ 真机验证，步骤见第八节。
+
+### 八、真机步骤（逐字取自 `tests/dirname.test.mjs` R67 组）
+
+- **R67-A**：装新包后 `Ctrl+D` 角标必须是 `R67`；右键开放大镜，在文字截图 / 线条图表 /
+  照片上分别移动光标，圆内笔画与曲线边缘平滑、无锯齿毛边 / 无光晕。
+- **R67-B**：同一张图在 100% / 200% / 400% 与不同缩放密度下对比，档位由逻辑倍率决定，
+  不应出现「换倍率 / 换屏幕就忽糊忽锐」；鼠标在圆内小幅抖动应不重新计算、不卡顿。
+- **R67-C**：`hilog` 出现 `loupe R67 cap=1|2` 表示系统 native AA 生效；`cap=0` 或
+  `createScaledPixelMap FAIL` 时自动回退 R17 组件级链，放大镜仍可用、不空白、不崩溃。
+- **R67-D**：既有 HEIC/JPG/PNG / 文本预览 scrollbar / 并排 / 全屏 / ESC / R64 内容量统计 /
+  R65 天文解析 / R66 主线程让出 / 三栏三按钮 / 版本 `1.0.7/7` 全部零回归。
+
+### 九、边界
+
+- `createScaledPixelMap` 的「高质量」是系统图像管线的一次重采样，**不是**凭空恢复不存在的
+  原始细节；小图 / 低分辨率原图仍受信息量限制，本轮只保证放大后的边缘平滑与跨帧稳定。
+- `LQ_CAP_HW_CROP`（since 22 的裁剪+缩放一次成型）本轮只做能力探测与档位记录，
+  未改 `loupeLayer()` 的几何 / 偏移链；`drawing.SamplingOptions` 的 `FilterMode` 同理只落在
+  画质决策与诊断日志里，未引入新的 Canvas 绘制层。两者都是为避免改动既有 5 图源契约。
+- 系统级产物是「某张图在某个倍率档下的临时重采样结果」，**刻意不进 `previews` 缓存**；
+  由 `loupeSysToken` + `clearLoupeSysPx()` 精确释放，不会污染 LRU 与解码档位复用判据。
 
 ---
 

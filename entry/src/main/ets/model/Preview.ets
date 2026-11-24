@@ -29,6 +29,10 @@ import { AI_OK, AI_COMP_ZLIB, AI_STRETCH_GAMMA, AI_OUTPUT_BGRA,
   aiPixelsLongEnough, aiTargetSizeSafeOf, aiSxTableOf, aiRgbaSliceOf,
   aiSliceCountOf, aiSliceI0Of, aiSliceI1Of, aiUnshuffleSliceOf,
   aiAllocAllowedOf, aiRenderSlotAllowedOf } from '../common/AstroImage';
+// 第六十七轮：高质量放大镜显示的关键参数 / 能力分级 / 抗锯齿档决策真值源（零 SDK / 零 IO）。
+import { LQ_CAP_SYSTEM_AA, LQ_AA_LOW, LQ_AA_MEDIUM, LQ_AA_HIGH,
+  LQ_API_PROBE_LEVEL, LQ_MAX_TARGET_PIXELS, LQ_MAX_EDGE,
+  lqCapabilityOf, lqSafeFactorOf, lqScaleAllowedOf } from '../common/LoupeQuality';
 
 // hilog 域（原 pages/Index.ets 顶部同值迁入；Index.ets 反向 import 本定义）。
 export const TAG = 'HeicViewer';
@@ -640,5 +644,72 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
         hilog.warn(DOMAIN, TAG, 'close file skipped');
       }
     }
+  }
+}
+
+// ====================================================================
+// 第六十七轮：放大镜系统 native 级抗锯齿缩放（本模块是全工程唯一碰该 SDK 的地方）
+//
+//  · 组件级 `.interpolation(High)` 是每帧由 UI 合成层做的 GPU 采样，倍率档只有
+//    High/Low 二值，鼠标在圆内高频微动就反复重采样（R14–R17 基线）。
+//  · SDK 26 `PixelMap.createScaledPixelMap(x, y, AntiAliasingLevel)`（since 18）
+//    把「一次高质量重采样」下沉到系统图像管线：LOW=双线性 / MEDIUM=mipmap linear /
+//    HIGH=Cubic。产物可直接 1:1 贴图，跨帧稳定一致，且只在倍率档变化时重算一次。
+//  · 能力探测只读「方法是否存在」：低版本 ROM 上方法不存在 → lqCapabilityOf 自动
+//    回退到组件级链（零回归）；方法存在但该 PixelMap 格式不支持 → catch 同样回退。
+//  · 全部护栏（倍率 / 总像素 / 长边 / 脏值）由 common/LoupeQuality.ts 纯函数判定；
+//    getImageInfo / createScaledPixelMap 全是 await 异步版，绝不占住 UI 主线程。
+// ====================================================================
+
+/** SDK image.AntiAliasingLevel 映射：数值与 LQ_AA_* 一一对应，不另造语义。
+ *  脏值 / NONE 一律落到 LOW（双线性），绝不落到最近邻这个锯齿之源。 */
+function lqSdkAaLevelOf(level: number): image.AntiAliasingLevel {
+  if (level === LQ_AA_HIGH) {
+    return image.AntiAliasingLevel.HIGH;
+  }
+  if (level === LQ_AA_MEDIUM) {
+    return image.AntiAliasingLevel.MEDIUM;
+  }
+  return image.AntiAliasingLevel.LOW;
+}
+
+/** 运行时能力探测：API 达标（编译 SDK 26）+ 运行时方法确实存在才升档。
+ *  只读函数存在性，不调用、不分配、不进启动路径，探针失败恒回退组件级。 */
+export function loupeCapabilityOf(px: image.PixelMap): number {
+  const hasScaled: boolean = typeof px.createScaledPixelMap === 'function';
+  const hasCropped: boolean = typeof px.createCroppedAndScaledPixelMap === 'function';
+  return lqCapabilityOf(LQ_API_PROBE_LEVEL, hasScaled, hasCropped);
+}
+
+/** 一次系统级 AA 缩放。成功返回**新** PixelMap（调用方自有，必须 release），
+ *  能力不足 / 尺寸脏值 / 预算放不下 / SDK 抛错一律返回 undefined —— 页面侧
+ *  继续用 R17 的高清重解码图源，放大镜绝不空白、绝不花屏、绝不回归。 */
+export async function loupeSystemScaledPx(src: image.PixelMap, want: number,
+  aa: number, cap: number): Promise<image.PixelMap | undefined> {
+  if (cap < LQ_CAP_SYSTEM_AA) {
+    return undefined;
+  }
+  let w: number = 0;
+  let h: number = 0;
+  try {
+    const info: image.ImageInfo = await src.getImageInfo();
+    w = info.size.width;
+    h = info.size.height;
+  } catch (e) {
+    hilog.warn(DOMAIN, TAG, 'loupe R67 getImageInfo FAIL err=%{public}s', JSON.stringify(e));
+    return undefined;
+  }
+  // 先按总像素 / 长边预算把「想要的倍率」夹成实际可用倍率，再复核是否允许分配。
+  const factor: number = lqSafeFactorOf(w, h, want, LQ_MAX_TARGET_PIXELS, LQ_MAX_EDGE);
+  if (!lqScaleAllowedOf(w, h, factor, cap, LQ_MAX_TARGET_PIXELS, LQ_MAX_EDGE)) {
+    return undefined;
+  }
+  try {
+    return await src.createScaledPixelMap(factor, factor, lqSdkAaLevelOf(aa));
+  } catch (e) {
+    // HDR / 特殊 pixelFormat / 低版本 ROM 的方法缺失都会走到这里：静默回退组件级链。
+    hilog.warn(DOMAIN, TAG, 'loupe R67 createScaledPixelMap FAIL err=%{public}s',
+      JSON.stringify(e));
+    return undefined;
   }
 }
