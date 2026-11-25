@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R71 主线（R39 起组件化）· FITS/XISF 天文图像预览
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R72 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -205,6 +205,12 @@ import { HB_LABEL, HB_MARGIN_VP, HB_HINT_H_VP, HB_HINT_GAP_VP,
   hbVisibleOf, hbLeftOf, hbTopOf } from '../common/HdrBadge';
 // 第七十一轮：HDR 保真结果的原因码门控（正常态不显示任何提示）。
 import { hpShowHintOf } from '../common/HdrPreview';
+// 第七十二轮：左栏档案列表右键菜单的纯函数真值源（命中判定 / 菜单动作 / 详情字段 /
+// 所在目录 / 复制文本 / 状态文案）。唯一碰 SDK 的菜单组件在 SidebarView，pasteboard、
+// openFolder 与详情面板落在本文件；common/ 层保持零 SDK / 零 IO。
+import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COPY_NAME,
+  fcHitOf, fcHasActOf, fcDetailFieldsOf, fcDetailTitleOf, fcRevealTargetOf,
+  fcRevealWantedOf, fcCopyTextOf, fcStatusHintOf, FcDetailField } from '../common/FileContextMenu';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -214,7 +220,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R71';
+const ESC_BUILD_TAG: string = 'R72';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1240,6 +1246,11 @@ struct Index {
   // ---- 交互 ----
   @State playing: boolean = false;
   @State status: string = '点左栏「选择文件夹」浏览目录';
+  /** 第七十二轮：右键「详情」面板。只存面板自己要画的纯字符串字段，
+   *  不碰 items / rows / cur / browseBase —— 关掉面板后一切浏览状态原样。 */
+  @State ctxDetailOn: boolean = false;
+  @State ctxDetailTitle: string = '';
+  @State ctxDetailFields: Array<FcDetailField> = [];
   /** 真全屏：应用内三块栏 + 系统标题栏 / dock / 状态栏 / 导航栏全部不显示，画面只剩图片。
    *  2026-11-11 起 applyWindowFullScreen() 会调 window 最大化沉浸接口，详见该方法注释。 */
   @State fullscreen: boolean = false;
@@ -8879,6 +8890,11 @@ struct Index {
               // 后消费挂起的定位请求；纯滚动过程 pending=false，护栏恒不动作，
               // 绝不把用户正在滚走的高亮拉回，也不改变既有滚动体验。
               this.guardHighlightVisible('onScrollIndex');
+            },
+            // 第七十二轮：档案行右键菜单动作。SidebarView 只负责弹原生菜单，
+            // 全部真实行为（打开 / 详情 / 所在目录 / 复制）都收口到 Index。
+            onContextAction: (act: string, i: number): void => {
+              this.onFileContextAction(act, i);
             }
           })
 
@@ -9395,6 +9411,66 @@ struct Index {
         .position({ x: 0, y: 0 })
         .onKeyPreIme((event: KeyEvent): boolean => this.onKeyCapture(event))
         .onKeyEvent((event: KeyEvent): boolean => this.onKeyConsumed(event))
+
+      // 第七十二轮：右键「详情」面板。根 Stack 直接子项、绝对定位铺满窗口，
+      // zIndex 20 高于贴顶唤出层（10）；点遮罩或「关闭」即收，纯显示层，
+      // 不碰 items / rows / cur / browseBase / 放大镜 / 滚轮 / 任何既有交互。
+      if (this.ctxDetailOn) {
+        Stack({ alignContent: Alignment.Center }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor('#99000000')
+            .onClick(() => {
+              this.ctxDetailOn = false;
+            })
+          Column() {
+            Text(this.ctxDetailTitle)
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#e8ecf4')
+              .width('100%')
+              .margin({ bottom: 12 })
+            ForEach(this.ctxDetailFields, (f: FcDetailField) => {
+              Row() {
+                Text(f.label)
+                  .fontSize(12)
+                  .fontColor('#8b95a8')
+                  .width(84)
+                Text(f.value)
+                  .fontSize(12)
+                  .fontColor('#dfe5ef')
+                  .layoutWeight(1)
+                  .maxLines(2)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+              }
+              .width('100%')
+              .padding({ top: 5, bottom: 5 })
+            }, (f: FcDetailField) => f.label)
+            Button('关闭')
+              .type(ButtonType.Normal)
+              .fontSize(12)
+              .fontColor('#e8ecf4')
+              .backgroundColor('#2a2f3a')
+              .borderRadius(6)
+              .height(30)
+              .width('100%')
+              .margin({ top: 14 })
+              .onClick(() => {
+                this.ctxDetailOn = false;
+              })
+          }
+          .width(460)
+          .padding(20)
+          .backgroundColor('#1c212a')
+          .border({ width: 1, color: '#3a4150' })
+          .borderRadius(10)
+        }
+        .width('100%')
+        .height('100%')
+        .position({ x: 0, y: 0 })
+        .zIndex(20)
+      }
     }
     .width('100%')
     .height('100%')
@@ -10278,5 +10354,80 @@ struct Index {
       }
     }
     this.setDirCountTtl(next);
+  }
+
+  // ==================================================================
+  // 第七十二轮：档案列表右键菜单动作总收口
+  // 真值源在 common/FileContextMenu.ts；本方法只做「读 rows → 真行为」。
+  // 刻意放在文件末尾：既有静态契约的切片全部以注释 / 方法签名为锚点，
+  // 落在这里不会把新方法混进 build / topBar / applyItems 等既有切片。
+  // ==================================================================
+  /** 右键菜单五个动作：打开 / 详情 / 打开档案所在目录 / 复制路径 / 复制档案名称。
+   *  · 二次复核 fcHitOf + fcHasActOf：「..」伪行、空白区、越权动作一律拒绝。
+   *  · 「打开」完全复用 onRowTap（图片预览 / 进目录 / 文本预览 / 灰行提示逐字不变）。
+   *  · 「详情」只写三个 @State 显示字段，绝不碰 items / rows / cur / browseBase。
+   *  · 「打开所在目录」按原生「在文件夹中显示」语义：目标层不同才真实重列举，
+   *    已在所在层则直接定位并高亮该档案；父级判不出给明确提示，不静默无反应。
+   *  · 复制走既有 pasteboard 链（第五十一轮同款），失败有明确提示。 */
+  private onFileContextAction(act: string, rowIdx: number): void {
+    this.markUserActive();   // 第六十四轮：菜单动作也算用户输入，空闲闸门重新计时
+    if (rowIdx < 0 || rowIdx >= this.rows.length) {
+      return;
+    }
+    const r: ImageItem = this.rows[rowIdx];
+    const kind: number = r.kind ?? ROW_IMAGE;
+    if (!fcHitOf(kind) || !fcHasActOf(kind, act)) {
+      return;
+    }
+    const path: string = realPathOf(r.uri);
+    const parent: string = parentDirOf(path);
+    const hint: string = fcStatusHintOf(act, r.name);
+
+    if (act === FC_ACT_OPEN) {
+      this.onRowTap(rowIdx);
+      return;
+    }
+    if (act === FC_ACT_DETAIL) {
+      this.ctxDetailTitle = fcDetailTitleOf(r.name);
+      this.ctxDetailFields = fcDetailFieldsOf({
+        name: r.name,
+        bytes: r.size,
+        mtime: r.mtime ?? 0,
+        kind: kind,
+        uri: r.uri,
+        location: parent
+      });
+      this.ctxDetailOn = true;
+      this.status = hint + ' · ' + ESC_BUILD_TAG;
+      return;
+    }
+    if (act === FC_ACT_REVEAL) {
+      const target: string = fcRevealTargetOf(parent, this.browseBase);
+      if (target.length === 0) {
+        this.status = '无法判定「' + r.name + '」所在目录 · ' + ESC_BUILD_TAG;
+        return;
+      }
+      if (fcRevealWantedOf(target, this.browseBase)) {
+        this.openFolder(target, false, false, true);
+      } else {
+        // 已在所在目录：定位并高亮该档案（原生「在文件夹中显示」的 in-app 落地）。
+        this.onRowTap(rowIdx);
+      }
+      this.status = hint + ' · ' + ESC_BUILD_TAG;
+      return;
+    }
+    const text: string = fcCopyTextOf(act, path, r.name);
+    if (text.length === 0) {
+      return;
+    }
+    const data: pasteboard.PasteData =
+      pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+    pasteboard.getSystemPasteboard().setData(data)
+      .then(() => {
+        this.status = hint + ' · ' + ESC_BUILD_TAG;
+      })
+      .catch(() => {
+        this.status = '复制失败（剪贴板不可用）· ' + ESC_BUILD_TAG;
+      });
   }
 }

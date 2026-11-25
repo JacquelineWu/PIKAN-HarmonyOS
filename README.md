@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R71`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R72`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -560,15 +560,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R68（右边预览图优化 / resize 最高质素：系统 native AA 精炼 + 内容自适应档 + 跨密度一致）、
 > R69（左栏档案名行上下留白各减 0.8mm：总行高减 1.6mm，其余逐字不变）、
 > R70（HDR 标识：仅 HDR 相片在预览区左上角叠加清晰可辨标识，深浅背景恒清晰 / 交互零回归）、
-> R71（HEIC HDR 保真解码与预览：显式 HDR 档 / 产物 isHdr 校验 / 原始尺寸·色彩·亮度保真 / 三类异常明确提示）
+> R71（HEIC HDR 保真解码与预览：显式 HDR 档 / 产物 isHdr 校验 / 原始尺寸·色彩·亮度保真 / 三类异常明确提示）、
+> R72（档案列表右键菜单：原生文案五项 / 仅档案项触发 / 详情面板 / 打开所在目录 / 复制 / 放大镜零回归）
 > 见下方十四个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R71`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R71` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R72`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R72` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R71 新增断言顺延，以 `grep -n 真机步骤 R71 tests/dirname.test.mjs` 为准：9086–9097）
+  （行号随 R72 新增断言顺延，以 `grep -n 真机步骤 R72 tests/dirname.test.mjs` 为准：9312–9322）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -604,6 +605,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R69 | 左栏档案名行上下留白各减 0.8mm（总行高减 1.6mm，其余逐字不变） | 8738–8745 |
 | R70 | HDR 标识（仅 HDR 相片预览区左上角叠加 / 深浅背景恒清晰 / 交互零回归） | 8897–8904 |
 | R71 | HEIC HDR 保真解码与预览（显式 HDR / 产物校验 / 原始尺寸保真 / 三类异常明确提示） | 9086–9097 |
+| R72 | 档案列表右键菜单（原生文案五项 / 仅档案项 / 详情 / 所在目录 / 复制 / 放大镜零回归） | 9312–9322 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1865,6 +1867,143 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十二轮：档案列表右键菜单 —— 原生文案五项 / 仅档案项触发 / 详情面板 / 打开所在目录 / 放大镜零回归（2026-11-25，R72）
+
+> 用户诉求（原文）：「请在档案列表中实现右键菜单：当用户 right-click 任一档案项目时，
+> 弹出与原生鸿蒙OS档案管理员一致的档案管理选项，至少包含「档案 detail」「打开档案所在目录」
+> 等选项。菜单仅在档案项目上触发，空白区域不显示；选项文案与行为对齐原生鸿蒙OS档案管理员，
+> 且不影响列表其他交互。」
+
+### 一、现状判读（按真实源码 + 官方 API 语义，不凭缓存推断）
+
+- **原生文案有官方依据**：华为消费者支持文档对鸿蒙电脑档案管理员的用词是「**详情**」
+  （`选中文件，打开右键菜单，点击详情，查看打开方式`、`Alt+Enter` 同义），以及
+  「打开所在文件夹 / 在文件夹中显示 / 一键打开所在文件夹」。故用户口中的
+  「档案 detail」按官方对齐为「详情」，「打开档案所在目录」沿用用户原话。
+- **本 APP 是只读看图器**：`module.json5` 只申请 `ohos.permission.READ_IMAGEVIDEO`，
+  不具备写入 / 删除 / 重命名 / 分享能力。因此**不摆出做不到的假选项**
+  （重命名 / 删除 / 剪切 / 分享 / 压缩），只落地五项真实可执行动作，沿用本项目
+  「不假装支持、失败态明确」的一贯口径。
+- **右键已被占用**：第十五轮起，根容器 `onRootMouse` 在**任何**右键 `Press` 上 toggle
+  放大镜（注释明确「左栏 / 空白处也能切换」）。若直接给行绑菜单，右键会「弹菜单 + 翻转
+  放大镜」双响应，属交互回归。而 R15 静态契约要求 `onMouseButton()` 的
+  `event.stopPropagation()` 与 `applyLoupeToggle(true)` 形态存在，**不能粗暴删除**。
+- **SDK 26 API 真实核验**（非文档推断）：从
+  `hmos-clt_1.0.0/sdk/default/openharmony/ets/component/common.d.ts` /
+  `enums.d.ts` / `menu_item.d.ts` 确认
+  `bindContextMenu(content: CustomBuilder, responseType: ResponseType, options?: ContextMenuOptions): T`、
+  `ResponseType.RightClick`、`MenuItemOptions.content`、`MenuItem.onClick` 均可用；
+  菜单由系统样式渲染（独立子窗口、点击自动收起），最贴近「与原生档案管理员一致」。
+- **一次右键 = Press + Release**：处理逻辑只认其一，避免双触发。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/FileContextMenu.ts` | **新增** 284 行唯一真值源，**43 个导出**（24 常量 + 16 纯函数 + 3 结构）：行种类、动作码 / 菜单文案、命中判定、菜单项、越权拒绝、放大镜抑制、类型名 / 字节档 / 时间格式、详情六字段、目录归一、所在目录决策、复制文本、状态反馈。零 SDK / 零 IO / 零异步 / 零 throw / 零定时器 / 零 Promise / 零 `Date.now` / 零全局可变状态 |
+| `components/SidebarView.ets` | +89 / −20：新增 `@Builder archiveRowOf()`（两条分支共用同一份 `ArchiveRow` 构造）、`@Builder fileContextMenuOf()`（原生 `Menu()` / 五个 `MenuItem()`）、`onContextAction` 上抛；`LazyForEach` 的 `ListItem` 改为 `fcHitOf()` 条件分支，**仅命中行**绑 `.bindContextMenu(..., ResponseType.RightClick)` 并在右键 Press 用 `fcStopPropagationOf()` 拦冒泡 |
+| `pages/Index.ets` | +153 / −2：文件头主线号与 `ESC_BUILD_TAG` `R71 → R72`；新增 `FileContextMenu` import；新增 `@State ctxDetailOn/ctxDetailTitle/ctxDetailFields`；`SidebarView` 下传 `onContextAction`；根 `Stack` 末尾新增条件详情浮层（遮罩 / 关闭两种收起、`zIndex(20)`、六字段 `ForEach`）；文件末新增 `onFileContextAction()` 五动作总收口 |
+| `tests/dirname.test.mjs` | +261 / −36：`import` FileContextMenu 全套导出；**33 处以上**历史 `ESC_BUILD_TAG` 断言整批升位 `R72`；新增 R72 组 **26 条**断言与真机步骤 A~D（`9312–9322`） |
+| `README.md` / 记忆文件 | 抬头 / 手册 / 步骤对照表同步（`R71 → R72`），新增本章 |
+
+**逐字不变**：`components/ArchiveRow.ets` **零改动**（行内属性、hover、点击 / 双击、行高 0.2
+全部保持）；根 `onRootMouse` / `onMouseButton` / `applyLoupeToggle` 形态未删；预览区与空白区
+右键 toggle 放大镜照常；`onRowTap` / `onDblTap` / `openFolder` / `pasteboard` 既有链路复用；
+`new Promise` 恰 2 处 / `Promise.race` 1 处 / 无 worker；`APP_VERSION 1.0.7` / `versionCode 7`。
+
+### 三、设计要点（全部是纯函数可回归判定）
+
+- **菜单只在档案项上触发**：`fcHitOf(kind)` 只认图片 / 文本 / 其它档案 / 文件夹四类真实行；
+  「`..`」往上层是导航伪行、列表下方空白 / 空态 / 标题栏 / 三个按钮都不是 `ListItem`，
+  **根本没有 `bindContextMenu` 绑定** ⇒ 右键绝不弹菜单。`fcItemsOf()` 对未命中行返回空数组，
+  每次返回新数组，零共享可变状态；未知 / 负数 / `NaN` 一律不命中。
+- **放大镜零回归（关键冲突）**：命中行 `ListItem` 的 `.onMouse` 只在
+  `MouseAction.Press` + `MouseButton.Right` + 命中三项同时成立时
+  `event.stopPropagation()`（`fcStopPropagationOf(isPress, isRight, hit)`）；`Release` /
+  左键 / 空白区 / 「`..`」行一律放行，根容器右键 toggle 放大镜完全不受影响。
+  绑定层选在 `SidebarView` 的 `ListItem` 而非 `ArchiveRow`，避免改动行组件源码形态。
+- **五项动作与真实行为**：`打开`（复用 `onRowTap`，图片预览 / 进目录 / 文本预览逐字不变）、
+  `详情`（居中面板六字段：名称 / 类型 / 大小 / 修改时间 / 所在位置 / 完整路径，缺值一律
+  `--` 兜底，绝不空串 / 抛错）、`打开档案所在目录`（`fcRevealTargetOf` 父级优先、
+  判不出退回当前浏览目录；`fcRevealWantedOf` 只在目标层与当前层不同才
+  `openFolder(target, false, false, true)` 真实重列举，同层直接定位并高亮该档案，
+  两者皆空给明确状态提示，不静默无反应）、`复制路径` / `复制档案名称`（走既有
+  `pasteboard` 链，失败有明确提示）。
+- **防御式分发**：`onFileContextAction()` 二次复核 `fcHitOf` + `fcHasActOf`，越权动作 /
+  未命中行 / 越界下标一律拒绝；五个动作各有明确中文状态反馈，点了看得见反应。
+- **详情面板只存纯字符串字段**，不碰 `items / rows / cur / browseBase / 放大镜 / 滚轮`，
+  收起后一切浏览状态原样。
+
+### 四、验证用例（`tests/dirname.test.mjs` R72 组）
+
+26 条：① 真值源纯净（零 SDK/IO/await/throw/定时器/Promise/Date.now/全局状态）；② 行种类与
+`ArchiveRow.ets` 的 `ROW_*` 严格一致；③ 五项文案对齐原生；④ 用户点名的两项恒在菜单；
+⑤ 顺序 / 动作码唯一 / 文案非空；⑥ **不假装支持**（代码级五条 `FC_LABEL_` 声明与运行时
+菜单标签都不含重命名 / 删除 / 剪切 / 分享 / 压缩，只读依据写在文件头注释按原文核验）；
+⑦ 命中判定（含 `NaN`）；⑧ 空白区零菜单 / 命中恒 5 项 / 返回新数组；⑨ 越权动作被拒；
+⑩ 仅「右键 Press + 命中行」才 `stopPropagation`；⑪ `SidebarView` 条件分支接线；
+⑫ `ArchiveRow.ets` 逐字未改的放大镜零回归；⑬ 详情六字段；⑭ 缺值逐项兜底；⑮ 类型名 /
+字节档 / 时间格式；⑯ 详情标题恒非空；⑰ 目录归一；⑱ 所在目录父级优先；⑲ 同层只定位；
+⑳ 复制文本仅由复制类动作产生；㉑ 五动作状态反馈；㉒ `Index` 接线与二次复核；㉓ 行为接线；
+㉔ 详情面板接线；㉕ 零回归（R71 HDR 保真 / R70 徽标 / R69 行高 / R64 四态 / 版本 / Promise 计数）；
+㉖ 构建标记 `R72` / 旧标记 `R71` 与 `R70` 已清 / 历史断言整批升位。
+
+> 收口时发现并修正一处**测试契约自身**的误写：原第 ⑥ 条把只读设计依据
+> `只读看图器` 放在已剥注释的 `FC72_CODE` 上核验，而该依据只存在于文件头注释，恒为 false。
+> 改为「运行时菜单标签 + 代码级五条 `FC_LABEL_` 声明（剥注释）双重核验」+「原文按未剥注释
+> 核验」，断言更严且不再自相矛盾；**源码零改动**。
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2227 passed, 0 failed`**（R71 基线 2201，+26 条 R72）；`git diff --check` 通过 |
+| 独立零回归脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**（R71 HDR 真值源零回归） |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 11 s 891 ms`**；`Finished :entry:default@CompileArkTS... after 7 s 520 ms`（**非 UP-TO-DATE**，UP-TO-DATE 计数 0）；33 tasks：17 executed / 16 up-to-date；**0 ERROR / 17 WARN**（与 R69/R70/R71 完全一致，全为 `Index.ets` 既有 2in1 / `READ_IMAGEVIDEO` 提示）；成功日志 `/tmp/r72-build2.log` |
+| 首次编译失败与修复 | `/tmp/r72-build.log`：详情面板插在根 `Stack` 闭合 `}` 之后、`.width('100%')` 之前，打断属性链 ⇒ `Declaration or statement expected` / `Cannot find name 'width'` / `build()` 多根节点，`COMPILE RESULT:FAIL`。修复：删去原闭合 `}`，把详情面板作为根 `Stack` 内最后子项，之后补 `}` 再接 `.width('100%')`；重编译成功 |
+| 产物核验 | 签名 HAP **1,671,036 B**（R71 1,625,883 B）/ 未签名 **1,633,907 B**（R71 1,590,355 B）/ `ets/modules.abc` **956,388 B**（R71 927,812 B）；产物 mtime **12:37:22–23** 晚于三份源码 **12:30:39 / 12:31:45 / 12:37:03**，即 HAP 由最终源码编译；字节码 **`R72=1 / R71=0 / 1.0.7=1`**，`FileContextMenu=3` / `fcHitOf=2` / `fcItemsOf=2` / `fcDetailFieldsOf=2` / `fcStopPropagationOf=2` / `bindContextMenu=1` / `打开档案所在目录=1` / `复制档案名称=2` 全部进包；签名 HAP 内 `R72=1 / R71=0 / 1.0.7=3` |
+| SDK 语义 | `bindContextMenu` / `ResponseType.RightClick` / `MenuItem.onClick` 在目标 SDK 26 真编译通过（0 ERROR），非仅文档推断 |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志 / 旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+> `只读看图器` 在字节码中为 0 属预期（仅存在于文件头注释，编译器不写入产物）。
+>
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 R72-A~D）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:9312` R72 组）
+
+> ⚠️ 本组是源码静态契约 + 纯函数数值模型，不替代真机右键菜单验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R72-A：装新包后 Ctrl+D 角标必须是 R72；左栏右键任一档案 → 弹出系统样式菜单，
+>     依次为「打开 / 详情 / 打开档案所在目录 / 复制路径 / 复制档案名称」；右键「..」行、
+>     列表下方空白区、标题行、三个按钮一律不弹菜单。
+> ⚠️ 真机步骤 R72-B：点「详情」→ 居中面板显示名称 / 类型 / 大小 / 修改时间 / 所在位置 /
+>     完整路径六项；点遮罩或「关闭」即收；点「打开档案所在目录」→ 左栏定位并高亮该档案，
+>     状态栏给出明确反馈；「复制路径」「复制档案名称」可在任意文本输入框 Ctrl+V 验出。
+> ⚠️ 真机步骤 R72-C：右键档案行**不再**顺带翻转放大镜；预览区 / 空白区右键 toggle 放大镜照常；
+>     左键单击选图、双击进全屏、hover 缩略图、滚轮切图、列表滚动、往上层、排序、选择文件夹零回归。
+> ⚠️ 真机步骤 R72-D：HEIC/JPG/PNG / FITS·XISF / 文本预览 / 并排右页 / HDR 徽标 / R71 HDR 保真 /
+>     R68 resize 画质 / R69 行高 / R64 内容量 / 三栏三按钮 / ESC / 版本 1.0.7/7 全部零回归。
+
+### 七、边界
+
+- **未升版本**（`1.0.7 / versionCode 7`）、未跑 `build.sh`、未把 HAP 放桌面、
+  **本轮未 push**（用户未授权；R63–R70 此前已在明确授权下同步完毕）。
+- **只读语义如实标注**：「打开档案所在目录」是**应用内**定位 / 高亮 / 重列举，
+  不调起系统档案管理员窗口（本 APP 无该能力，不假装支持）；「打开」沿用应用内预览，
+  不是「打开方式」选择框；五项之外不提供重命名 / 删除 / 剪切 / 分享 / 压缩。
+- **详情面板是条件浮层**（`ctxDetailOn` 为真才画，点遮罩 / 关闭即收），不是 R55 所禁止的
+  常显角标；`zIndex(20)` 只压过既有贴顶唤出层（10），不接管滚轮 / 拖拽 / 放大镜。
+- **`bindContextMenu` 的系统菜单样式、弹出位置、暗色 / 浅色适配由系统渲染**，
+  静态契约只能验「绑定层 + 文案 + 命中」；真机菜单观感仍需用户按 R72-A 验证。
+- **R71 真机验证仍由用户完成**（HDR 显示、色彩亮度、设备 / SDK 是否真输出 HDR、
+  损坏 / 不兼容 / 缺 HDR 信息提示），`编译校验 ≠ 真机验证`。
+- 零新增定时器 / 全局可变状态 / worker；R71 HDR 保真、R70 徽标、R69 行高、R68 resize 画质、
+  R67 放大镜、R64 内容量四态、三栏三按钮、文本预览 scrollbar、ESC 全部零回归。
+- **编译校验 ≠ 真机验证**；静态契约 ≠ 系统菜单实际观感；纯函数数值模型 ≠ 系统剪贴板 /
+  目录列举实际行为。
 
 ---
 

@@ -14,6 +14,12 @@ import { ToolButton } from './ToolButton';
 import { GalleryDataSource, ImageItem } from '../model/GalleryData';
 // 第五十九轮：往上层后反色标记的行级命中判定（名字严格相等 + 目录类行）。
 import { upReturnInvertOf } from '../common/UpReturn';
+// 第七十二轮：档案列表右键菜单的纯函数真值源（文案 / 命中判定 / 放大镜抑制）。
+// 菜单用 ArkUI 原生 Menu / MenuItem + bindContextMenu(ResponseType.RightClick)，
+// 样式与系统档案管理员一致；只在真实档案 / 文件夹行上绑定，空白区与「..」伪行零菜单。
+import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COPY_NAME,
+  FC_LABEL_OPEN, FC_LABEL_DETAIL, FC_LABEL_REVEAL, FC_LABEL_COPY_PATH, FC_LABEL_COPY_NAME,
+  fcHitOf, fcStopPropagationOf } from '../common/FileContextMenu';
 
 /** 收起态固定宽（只留档案名一列），保持原有交互不变；原 Index.ets 同值迁入。 */
 const LIST_COLLAPSED_W: number = 224;
@@ -52,6 +58,10 @@ export struct SidebarView {
   };
   onScrollIndex: (first: number, last: number) => void = (first: number, last: number): void => {
   };
+  /** 第七十二轮：右键菜单动作上抛（闭包在 Index 侧定义，读的永远是 Index 最新状态）。
+   *  idx 是左栏 rows 下标；菜单只由本组件产生，Index 仍会用 fcHitOf 复核一次。 */
+  onContextAction: (act: string, idx: number) => void = (act: string, idx: number): void => {
+  };
 
   /** 第六十四轮：取某一行的内容量文案。读两个 @Prop 建立 V1 依赖，
    *  统计落地换数组 / 版本号 +1 时可见行随之重算；非目录行返回空串。 */
@@ -62,6 +72,64 @@ export struct SidebarView {
       return '';
     }
     return labels[idx];
+  }
+
+  /** 第七十二轮：把原有的 ArchiveRow 构造原样收进 @Builder，让「带菜单 / 不带菜单」
+   *  两条 ListItem 分支共用同一份构造代码 —— 行内属性、hover、点击、双击逐字不变。
+   *  绝不在 ArchiveRow 里塞菜单：行组件只负责画与既有交互，零回归最稳。 */
+  @Builder
+  archiveRowOf(item: ImageItem, idx: number) {
+    ArchiveRow({
+      uri: item.uri,
+      name: item.name,
+      bytes: item.size,
+      mtime: item.mtime ?? 0,
+      kind: item.kind ?? ROW_IMAGE,
+      idx: idx,
+      selected: (item.itemIndex ?? idx) === this.cur,
+      // 第五十九轮：只对「返回前所在子目录」那一行反色，其余行默认样式不变。
+      inverted: upReturnInvertOf(item.name, this.upReturnName,
+        item.kind ?? ROW_IMAGE, ROW_FOLDER, ROW_OTHER),
+      countText: this.dirCountLabelOf(idx),
+      collapsed: this.listCollapsed,
+      thumbDisabled: this.restoreReadonly(),
+      onTap: (i: number) => {
+        this.onRowTap(i);
+      },
+      onDblTap: (i: number) => {
+        this.onDblTap(i);
+      }
+    })
+  }
+
+  /** 第七十二轮：原生档案管理员右键菜单。用 ArkUI 系统 Menu / MenuItem 组件，
+   *  系统统一样式、点击自动收起、在鼠标点击位置弹出（独立子窗口）。
+   *  五项文案全部来自 common/FileContextMenu.ts 的常量真值源，顺序即原生顺序。
+   *  本 APP 只读，故不摆「重命名 / 删除 / 剪切 / 分享 / 压缩」等做不到的假选项。 */
+  @Builder
+  fileContextMenuOf(idx: number) {
+    Menu() {
+      MenuItem({ content: FC_LABEL_OPEN })
+        .onClick(() => {
+          this.onContextAction(FC_ACT_OPEN, idx);
+        })
+      MenuItem({ content: FC_LABEL_DETAIL })
+        .onClick(() => {
+          this.onContextAction(FC_ACT_DETAIL, idx);
+        })
+      MenuItem({ content: FC_LABEL_REVEAL })
+        .onClick(() => {
+          this.onContextAction(FC_ACT_REVEAL, idx);
+        })
+      MenuItem({ content: FC_LABEL_COPY_PATH })
+        .onClick(() => {
+          this.onContextAction(FC_ACT_COPY_PATH, idx);
+        })
+      MenuItem({ content: FC_LABEL_COPY_NAME })
+        .onClick(() => {
+          this.onContextAction(FC_ACT_COPY_NAME, idx);
+        })
+    }
   }
 
   build() {
@@ -139,28 +207,29 @@ export struct SidebarView {
         // 内存与节点数随图片数线性增长 —— 这是图片一多就崩的原因之一。
         List({ scroller: this.scroller, space: LIST_ROW_GAP_VP }) {
           LazyForEach(this.dataSource, (item: ImageItem, idx: number) => {
-            ListItem() {
-              ArchiveRow({
-                uri: item.uri,
-                name: item.name,
-                bytes: item.size,
-                mtime: item.mtime ?? 0,
-                kind: item.kind ?? ROW_IMAGE,
-                idx: idx,
-                selected: (item.itemIndex ?? idx) === this.cur,
-                // 第五十九轮：只对「返回前所在子目录」那一行反色，其余行默认样式不变。
-                inverted: upReturnInvertOf(item.name, this.upReturnName,
-                  item.kind ?? ROW_IMAGE, ROW_FOLDER, ROW_OTHER),
-                 countText: this.dirCountLabelOf(idx),
-                 collapsed: this.listCollapsed,
-                 thumbDisabled: this.restoreReadonly(),
-                 onTap: (i: number) => {
-                  this.onRowTap(i);
-                },
-                onDblTap: (i: number) => {
-                  this.onDblTap(i);
+            // 第七十二轮：右键菜单**只绑在真实档案 / 文件夹行上**。
+            //  · 「..」往上层是导航伪行、列表下方空白 / 空态 / 标题 / 按钮都不是 ListItem，
+            //    根本没有 bindContextMenu 绑定 ⇒ 右键绝不弹菜单（用户硬要求）。
+            //  · 命中行的右键 Press 用 stopPropagation 阻断冒泡到根 .onMouse，
+            //    避免顺带翻转放大镜；预览区与空白区的右键 toggle 逐字保留（零回归）。
+            //  · 两条分支共用 archiveRowOf()，行内一切属性 / 交互零差异。
+            if (fcHitOf(item.kind ?? ROW_IMAGE)) {
+              ListItem() {
+                this.archiveRowOf(item, idx);
+              }
+              .onMouse((event: MouseEvent) => {
+                if (fcStopPropagationOf(event.action === MouseAction.Press,
+                  event.button === MouseButton.Right, true)) {
+                  event.stopPropagation();
                 }
               })
+              .bindContextMenu(() => {
+                this.fileContextMenuOf(idx);
+              }, ResponseType.RightClick)
+            } else {
+              ListItem() {
+                this.archiveRowOf(item, idx);
+              }
             }
           }, (item: ImageItem) => item.uri)
         }
