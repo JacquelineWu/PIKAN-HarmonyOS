@@ -23,6 +23,19 @@
  *  已有多轮真机证据的 ListItem.onMouse 右键 Press 直接捕获窗口坐标并上抛，菜单改画成
  *  应用内条件浮层（与 R72 详情面板同一套机制）。文案 / 行为 / 命中 / 放大镜抑制全复用，
  *  新增的只有「浮层定位与尺寸」这一组纯数值判定，仍严格零 SDK / 零 IO。
+ *
+ *  第七十四轮（R74）真机修复：用户要求「打开档案所在目录」交给 **OS 自带文件管理器**
+ *  打开【目录】，而不是把文件本身作为打开目标。R72/R73 该分支走的是应用内
+ *  openFolder / onRowTap：同层时 onRowTap 直接把文件本身打开预览，且 fcRevealTargetOf
+ *  对目录行也一律返回父目录 —— 两层都不对。R74 只改这一项的打开目标与渠道：
+ *    · 文件行（图片 / 文本 / 其它）→ 剥掉文件名后的父目录（所在目录）；
+ *    · 目录行（文件夹）→ 该行 URI 自身（目录本身）；
+ *    · 目标恒为「目录」，绝不返回文件；判不出退回 browseBase，都空返回 ''；
+ *    · Index 用 startAbility 拉起系统文件管理器（显式华为文件管理器 → 隐式
+ *      viewData + general.directory 兜底），两级都有明确状态反馈与 hilog。
+ *  菜单文案 / 其余四项动作 / 详情面板 / 复制 / 浮层 / 放大镜抑制逐字不变。
+ *  本文件仍严格零 SDK / 零 IO / 零异步：只产出目标 URI 与 Want 契约常量（纯字符串 /
+ *  纯数值），真正的 startAbility 落在 Index。
  */
 
 // --------------------------------------------------------------------
@@ -365,4 +378,112 @@ export function fcMenuTitleOf(name: string): string {
 /** 第七十三轮：浮层是否真该显示 —— 开关为真且菜单项非空，避免出现空壳菜单。 */
 export function fcMenuVisibleOf(on: boolean, count: number): boolean {
   return on && count > 0;
+}
+
+// --------------------------------------------------------------------
+// 第七十四轮（R74）：「打开档案所在目录」→ 交给 OS 自带文件管理器打开【目录】
+//
+//  纯函数约束不变：零 SDK / 零 IO / 零异步 / 零 throw / 零全局可变状态。
+//  这里只负责「目标目录 URI 是什么」与「Want 契约常量是什么」，
+//  真正的 startAbility 调用落在 Index（唯一碰 SDK 的地方）。
+// --------------------------------------------------------------------
+
+/** 系统文件管理器（华为 HarmonyOS 2in1）的显式 Want 契约。
+ *  来自华为开发者问答「鸿蒙如何打开当前文件位置，并显示资源管理器」：
+ *  bundleName=com.huawei.hmos.filemanager / abilityName=MainAbility /
+ *  parameters.fileUri=<目标 URI>。 */
+export const FC_OSFM_BUNDLE: string = 'com.huawei.hmos.filemanager';
+export const FC_OSFM_ABILITY: string = 'MainAbility';
+export const FC_OSFM_PARAM_FILE_URI: string = 'fileUri';
+
+/** 兜底的隐式 Want 契约：官方「拉起文件处理类应用」固定 action，
+ *  UTD 目录类型 general.directory，以及只读 URI 授权 flag（0x00000001）。 */
+export const FC_VIEW_DATA_ACTION: string = 'ohos.want.action.viewData';
+export const FC_DIR_UTD: string = 'general.directory';
+export const FC_URI_READ_FLAG: number = 0x00000001;
+
+/**
+ * 目标目录 URI —— 本轮修复的核心：恒返回【目录】，绝不返回文件本身。
+ *
+ *   · 目录行（FC_KIND_FOLDER）→ 该行 URI 自身（打开该目录本身）；
+ *   · 文件行（图片 / 文本 / 其它）→ 剥掉最后一段文件名后的父目录（所在目录）；
+ *   · 剥不出父级（含 '..' 伪行 / 空白 / 未知 kind）→ 退回 browseBase；
+ *   · 两者皆空 → 空串，Index 据此给出明确提示，绝不静默无反应。
+ *
+ *  刻意**不用** parentDirOf(realPathOf(uri))：本项目 r.uri 是 picker 逐 URI 授权的
+ *  `file://docs/...` / NAS `file://192.168.x/...` 形态，转成真实路径会丢掉授权段，
+ *  系统文件管理器拿到裸路径反而打不开。这里在「URI 字符串」层直接剥文件名，
+ *  保留原 scheme / authority / 百分号编码，交给系统应用时授权链完整。
+ */
+export function fcRevealDirUriOf(kind: number, itemUri: string,
+  browseBase: string): string {
+  if (!fcHitOf(kind)) {
+    // 「..」伪行 / 空白区 / 未知类型：根本不该有菜单，返回空串让调用方短路。
+    return '';
+  }
+  const u: string = fcNormDirOf(itemUri);
+  if (kind === FC_KIND_FOLDER) {
+    // 目录行：目标就是它自己（不再取父目录 —— 这正是 R72/R73 的错）。
+    if (u.length > 0) {
+      return u;
+    }
+    return fcNormDirOf(browseBase);
+  }
+  // 文件行：剥掉最后一段文件名，剩下的就是所在目录。
+  const parent: string = fcParentUriOf(u);
+  if (parent.length > 0) {
+    return parent;
+  }
+  return fcNormDirOf(browseBase);
+}
+
+/**
+ * 剥掉 URI 最后一段路径，返回父目录 URI；保留 scheme://authority 与分隔符。
+ *
+ *  `file://docs/storage/Users/x/a.HEIC` → `file://docs/storage/Users/x`
+ *  `/storage/Users/x/a.HEIC`            → `/storage/Users/x`
+ *  `file://docs` / `''` / 无父级         → `''`（绝不返回 '/..' 之类伪路径）
+ *
+ *  只做字符串处理：去 ? 参数与尾斜杠 → 找最后一个 '/' → 判 authority 边界。
+ *  若切点之前没有第二个 '/'，说明切到的是 `file://authority` 本身，返回空串。
+ */
+export function fcParentUriOf(u: string): string {
+  const s: string = fcNormDirOf(u);
+  const i: number = s.lastIndexOf('/');
+  if (i <= 0) {
+    return '';
+  }
+  const head: string = s.substring(0, i);
+  // 纯路径 `/a` → head=''；`file://docs` → head=`file:/`（切在 scheme 的 `//` 上）：
+  // 两种都判不出父目录，返回空串交给 browseBase 兜底。
+  if (head.length === 0 || head.charAt(head.length - 1) === '/') {
+    return '';
+  }
+  // `file://docs/a` → head=`file://docs`，斜杠只剩 scheme 的 `//`：
+  // authority 之后没有路径段，父目录同样判不出。
+  const sch: number = head.indexOf('://');
+  if (sch >= 0 && head.indexOf('/', sch + 3) < 0) {
+    return '';
+  }
+  return head;
+}
+
+/** 目标是否「目录行」—— 供 Index 组装显式 Want 时选用（纯判定，零 SDK）。 */
+export function fcRevealIsDirOf(kind: number): boolean {
+  return kind === FC_KIND_FOLDER;
+}
+
+/** REVEAL 动作的状态栏反馈：把「打开的是目录」和「由系统文件管理器打开」说清楚。
+ *  成功 / 失败两态都恒非空，点了必须看得见反应。 */
+export function fcRevealStatusOf(name: string, ok: boolean, isDir: boolean,
+  tag: string): string {
+  const n: string = name.length > 0 ? name : FC_UNKNOWN;
+  const tail: string = tag.length > 0 ? ' · ' + tag : '';
+  if (!ok) {
+    return '系统文件管理器未能打开「' + n + '」' + (isDir ? '目录' : '所在目录') + tail;
+  }
+  if (isDir) {
+    return '已用系统文件管理器打开目录「' + n + '」' + tail;
+  }
+  return '已用系统文件管理器打开「' + n + '」所在目录' + tail;
 }

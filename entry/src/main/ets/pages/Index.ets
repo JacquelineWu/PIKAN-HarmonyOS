@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R73 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R74 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -209,9 +209,15 @@ import { hpShowHintOf } from '../common/HdrPreview';
 // 所在目录 / 复制文本 / 状态文案）。pasteboard、openFolder、菜单浮层与详情面板落在
 // 本文件；common/ 层保持零 SDK / 零 IO。
 // 第七十三轮：新增菜单浮层尺寸 / 定位 / 标题 / 显隐判定；触发层不再依赖系统右键手势。
+// 第七十四轮：「打开档案所在目录」改由 startAbility 拉起 OS 文件管理器打开【目录】，
+// 目标由 fcRevealDirUriOf 按行种类判定（文件→所在目录 / 目录→该目录自身）。
+import Want from '@ohos.app.ability.Want';
 import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COPY_NAME,
-  fcHitOf, fcHasActOf, fcDetailFieldsOf, fcDetailTitleOf, fcRevealTargetOf,
-  fcRevealWantedOf, fcCopyTextOf, fcStatusHintOf, FcDetailField,
+  fcHitOf, fcHasActOf, fcDetailFieldsOf, fcDetailTitleOf,
+  fcRevealDirUriOf, fcRevealIsDirOf, fcRevealStatusOf,
+  FC_OSFM_BUNDLE, FC_OSFM_ABILITY, FC_OSFM_PARAM_FILE_URI,
+  FC_VIEW_DATA_ACTION, FC_DIR_UTD, FC_URI_READ_FLAG,
+  fcCopyTextOf, fcStatusHintOf, FcDetailField,
   fcItemsOf, fcMenuHeightOf, fcMenuPosOf, fcMenuTitleOf, fcMenuVisibleOf,
   FC_MENU_W, FC_MENU_ITEM_H, FC_MENU_TITLE_H, FC_MENU_PAD_V,
   FcMenuItem, FcMenuPos } from '../common/FileContextMenu';
@@ -224,7 +230,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R73';
+const ESC_BUILD_TAG: string = 'R74';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -10479,18 +10485,16 @@ struct Index {
       return;
     }
     if (act === FC_ACT_REVEAL) {
-      const target: string = fcRevealTargetOf(parent, this.browseBase);
-      if (target.length === 0) {
-        this.status = '无法判定「' + r.name + '」所在目录 · ' + ESC_BUILD_TAG;
+      // 第七十四轮：交给 OS 自带文件管理器打开【目录】，不再走应用内 openFolder / onRowTap。
+      //   · 文件行 → 剥掉文件名后的所在目录；目录行 → 该目录自身；
+      //   · 目标恒为「目录」，绝不把文件本身作为打开目标；判不出退回 browseBase。
+      // 菜单文案 / 其余四项动作 / 浮层 / 放大镜抑制逐字不变。
+      const dirUri: string = fcRevealDirUriOf(kind, r.uri, this.browseBase);
+      if (dirUri.length === 0) {
+        this.status = fcRevealStatusOf(r.name, false, fcRevealIsDirOf(kind), ESC_BUILD_TAG);
         return;
       }
-      if (fcRevealWantedOf(target, this.browseBase)) {
-        this.openFolder(target, false, false, true);
-      } else {
-        // 已在所在目录：定位并高亮该档案（原生「在文件夹中显示」的 in-app 落地）。
-        this.onRowTap(rowIdx);
-      }
-      this.status = hint + ' · ' + ESC_BUILD_TAG;
+      this.openDirInSystemFileManager(dirUri, r.name, fcRevealIsDirOf(kind));
       return;
     }
     const text: string = fcCopyTextOf(act, path, r.name);
@@ -10533,5 +10537,72 @@ struct Index {
     this.ctxMenuY = pos.y;
     this.ctxMenuHover = '';
     this.ctxMenuOn = true;
+  }
+
+  /** 第七十四轮：用 OS 自带文件管理器打开目标【目录】。
+   *  目标 dirUri 由 fcRevealDirUriOf 判定：文件行=所在目录，目录行=该目录自身，
+   *  恒为「目录」而非文件本身 —— 这是本轮修复的核心（不再 onRowTap 打开文件、
+   *  不再 openFolder 在应用内重列举、不再把目录行误开到它的父目录）。
+   *
+   *  两级 Want 依次兜底，每级都有明确状态反馈与 hilog，绝不静默无反应：
+   *   ① 显式系统文件管理器（华为 HarmonyOS 2in1：com.huawei.hmos.filemanager /
+   *      MainAbility），parameters.fileUri = 目标目录 URI（官方问答「打开当前文件
+   *      位置，并显示资源管理器」口径）；
+   *   ② 隐式 ohos.want.action.viewData + general.directory + 只读 URI 授权 flag
+   *      （官方「拉起文件处理类应用」口径，交给系统匹配能打开目录的应用）。
+   *
+   *  context 复用 quitApp() 已真机验证过的双通道：AppStorage('abilityContext') +
+   *  getUIContext().getHostContext()，零新增全局状态、零新增 SDK import（Want 除外）。
+   *  ⚠️ 系统应用是否存在、是否接受该 URI 形态属真机事实，编译 / 静态契约证明不了；
+   *     两级都失败会在状态栏明确提示，真机按 R74 步骤回传 hilog 即可继续定位。 */
+  private openDirInSystemFileManager(dirUri: string, name: string, isDir: boolean): void {
+    let ability: common.UIAbilityContext | undefined =
+      AppStorage.get<common.UIAbilityContext>('abilityContext');
+    const host: common.Context | undefined = this.getUIContext().getHostContext();
+    if (host !== undefined) {
+      ability = host as common.UIAbilityContext;
+    }
+    if (ability === undefined) {
+      this.status = fcRevealStatusOf(name, false, isDir, ESC_BUILD_TAG);
+      hilog.warn(DOMAIN, TAG, 'fcReveal: no UIAbilityContext, dir=%{public}s', dirUri);
+      return;
+    }
+    const okHint: string = fcRevealStatusOf(name, true, isDir, ESC_BUILD_TAG);
+    const failHint: string = fcRevealStatusOf(name, false, isDir, ESC_BUILD_TAG);
+
+    // ① 显式系统文件管理器：parameters.fileUri 传【目录】URI（不是文件 URI）。
+    const params: Record<string, Object> = {};
+    params[FC_OSFM_PARAM_FILE_URI] = dirUri;
+    const primary: Want = {
+      bundleName: FC_OSFM_BUNDLE,
+      abilityName: FC_OSFM_ABILITY,
+      parameters: params
+    };
+    // ② 隐式兜底：让系统按 action + UTD 目录类型匹配能打开该目录的应用。
+    const fallback: Want = {
+      action: FC_VIEW_DATA_ACTION,
+      uri: dirUri,
+      type: FC_DIR_UTD,
+      flags: FC_URI_READ_FLAG
+    };
+    const ctx: common.UIAbilityContext = ability;
+    hilog.info(DOMAIN, TAG, 'fcReveal primary: dir=%{public}s', dirUri);
+    ctx.startAbility(primary)
+      .then(() => {
+        this.status = okHint;
+        hilog.info(DOMAIN, TAG, 'fcReveal primary ok: dir=%{public}s', dirUri);
+      })
+      .catch(() => {
+        hilog.warn(DOMAIN, TAG, 'fcReveal primary failed, try viewData: dir=%{public}s', dirUri);
+        ctx.startAbility(fallback)
+          .then(() => {
+            this.status = okHint;
+            hilog.info(DOMAIN, TAG, 'fcReveal fallback ok: dir=%{public}s', dirUri);
+          })
+          .catch(() => {
+            this.status = failHint;
+            hilog.warn(DOMAIN, TAG, 'fcReveal both failed: dir=%{public}s', dirUri);
+          });
+      });
   }
 }

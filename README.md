@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R73`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R74`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -562,15 +562,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R70（HDR 标识：仅 HDR 相片在预览区左上角叠加清晰可辨标识，深浅背景恒清晰 / 交互零回归）、
 > R71（HEIC HDR 保真解码与预览：显式 HDR 档 / 产物 isHdr 校验 / 原始尺寸·色彩·亮度保真 / 三类异常明确提示）、
 > R72（档案列表右键菜单：原生文案五项 / 仅档案项触发 / 详情面板 / 打开所在目录 / 复制 / 放大镜零回归）、
-> R73（右键菜单真机不弹出修复：改走 .onMouse 通道 / 应用内浮层 / 零系统手势依赖）
-> 见下方十五个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R73（右键菜单真机不弹出修复：改走 .onMouse 通道 / 应用内浮层 / 零系统手势依赖）、
+> R74（「打开档案所在目录」改走 OS 自带文件管理器 / 目标恒为目录 / 文件与目录两类生效）
+> 见下方十六个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R73`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R73` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R74`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R74` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R73 新增断言顺延，以 `grep -n 真机步骤 R73 tests/dirname.test.mjs` 为准：9463–9475）
+  （行号随 R74 新增断言顺延，以 `grep -n 真机步骤 R74 tests/dirname.test.mjs` 为准：9626–9638）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -608,6 +609,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R71 | HEIC HDR 保真解码与预览（显式 HDR / 产物校验 / 原始尺寸保真 / 三类异常明确提示） | 9086–9097 |
 | R72 | 档案列表右键菜单（原生文案五项 / 仅档案项 / 详情 / 所在目录 / 复制 / 放大镜零回归） | 9312–9322 |
 | R73 | 右键菜单真机不弹出修复（.onMouse 驱动 / 应用内浮层 / 零系统手势） | 9463–9475 |
+| R74 | 所在目录改走 OS 文件管理器 / 目标恒为目录 / 文件与目录两类生效 | 9626–9638 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1869,6 +1871,127 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十四轮：「打开档案所在目录」改走 OS 自带文件管理器 —— 目标恒为目录 / 文件与目录两类分别生效（2026-11-25，R74）
+
+> 用户要求（原文）：「请修复右键点击条目并选择『打开目录』时的行为：应使用 OS 自带的文件管理器
+> 打开对应目录，而不是把文件本身作为打开目标。若选中的是文件，打开其所在目录；若选中的是目录，
+> 打开该目录本身。仅修正此选项的打开目标，保持菜单文案、其他右键功能和现有交互不变」。
+
+### 一、现状判读（按真实源码 + SDK / 官方契约，不凭缓存推断）
+
+- **两层都不对，且互相叠加**：`Index.ets` 的 `FC_ACT_REVEAL` 分支走的是纯应用内行为 ——
+  `fcRevealWantedOf(...)` 为真时 `openFolder(target, false, false, true)`（在 APP 内重列举目录），
+  为假（即档案已在当前目录）时 `onRowTap(rowIdx)`（**把文件本身打开预览**）。这两条都不是
+  「OS 自带的文件管理器」，其中 `onRowTap` 正是用户点名的「把文件本身作为打开目标」。
+- **目录行的目标也算错**：`fcRevealTargetOf(parent, browseBase)` 对**文件夹行同样返回父目录**，
+  而用户明确要求「目录 → 打开该目录本身」。R72/R73 的 `fcRevealTargetOf` / `fcRevealWantedOf`
+  只服务于应用内列举，无法表达「目录自身」这一语义。
+- **系统能力真实核验**（SDK 26）：`UIAbilityContext.startAbility(want: Want): Promise<void>`
+  在 `@ohos.app.ability.common.d.ts:61` / `application/UIAbilityContext.d.ts:247` 真实存在；
+  `Want`（`@ohos.app.ability.Want.d.ts:31`，`export default class Want`）字段含
+  `bundleName / abilityName / action / uri / type / flags / parameters`；
+  `EntryAbility.onCreate` 已把 `this.context` 存入 `AppStorage('abilityContext')`，
+  `quitApp()` 里 `AppStorage.get<common.UIAbilityContext>('abilityContext')` +
+  `getUIContext().getHostContext()` 双通道是多轮真机验证过的可靠取 context 方式。
+- **官方 / 社区两种 Want 契约**：
+  ① 华为开发者问答「打开当前文件位置，并显示资源管理器」= 显式
+  `com.huawei.hmos.filemanager` / `MainAbility` + `parameters.fileUri`；
+  ② 官方「拉起文件处理类应用(startAbility)」= 隐式 `ohos.want.action.viewData` +
+  `file://` URI + `type` + `flags`；SDK `uniformTypeDescriptor.d.ts:1147` 确有
+  `DIRECTORY = 'general.directory'`。两条都保留、逐级兜底，不赌单一通道。
+- **URI 形态的关键约束**：本项目 `r.uri` / `browseBase` 是 picker **逐 URI 授权**的
+  `file://docs/...` / NAS `file://192.168.x/...` 形态。**不能**用 `fileUri.getUriFromPath()`
+  把 `realPathOf()` 后的裸路径转 URI —— SDK 明确该函数只接受「应用沙箱内路径」，
+  转出来会丢掉授权段，系统文件管理器反而打不开。故在「URI 字符串」层直接剥文件名，
+  保留原 scheme / authority / 百分号编码。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/FileContextMenu.ts` | 新增 6 个 Want 契约常量（`FC_OSFM_BUNDLE` / `FC_OSFM_ABILITY` / `FC_OSFM_PARAM_FILE_URI` / `FC_VIEW_DATA_ACTION` / `FC_DIR_UTD` / `FC_URI_READ_FLAG`）与 4 个纯函数（`fcRevealDirUriOf` / `fcParentUriOf` / `fcRevealIsDirOf` / `fcRevealStatusOf`）。仍严格零 SDK / 零 IO / 零异步 / 零 throw / 零定时器 / 零 Promise / 零 `Date.now` / 零全局可变状态；既有 R72/R73 常量与函数（含 `fcRevealTargetOf` / `fcRevealWantedOf`）**逐字保留**，只是 Index 不再调用 |
+| `pages/Index.ets` | `ESC_BUILD_TAG` → `R74`；`FC_ACT_REVEAL` 分支改为 `fcRevealDirUriOf(kind, r.uri, this.browseBase)` 判定目标**目录 URI** 后交给新增的 `openDirInSystemFileManager()`；新增 `import Want`；文件末尾追加 `openDirInSystemFileManager()`（两级 Want + 明确状态反馈 + hilog）。**其余四项动作、菜单文案、详情面板、复制、菜单浮层、放大镜门控、`onFileContextMenu()` 逐字未改** |
+| `tests/dirname.test.mjs` | 构建标记 39 处整批升位 `R73 → R74`；订正 2 条与旧 in-app 接线绑定的断言 + 1 条「五动作逐字未改」标签；新增 R74 组 18 条断言与真机步骤 `R74-A~D`（`9626–9638`） |
+| `README.md` / 记忆 | 抬头 / 手册 / 步骤表升位 `R74`，新增本章，追加当日与长期记忆 |
+
+### 三、设计要点
+
+- **目标恒为「目录」**：`fcRevealDirUriOf` 按行种类分流 —— 图片 / 文本 / 其它档案行 →
+  `fcParentUriOf` 剥掉文件名取所在目录；文件夹行 → **该行 URI 自身**（不再取父目录）；
+  未命中 kind（`..` 伪行 / 空白 / 未知）→ 空串直接短路；父级判不出 → 退回 `browseBase`；
+  两者皆空 → 空串，状态栏明确提示，绝不静默。
+- **URI 保留授权链**：`fcParentUriOf` 只在字符串层切最后一个 `/`，并挡住
+  `file://docs/a`（authority 边界）、`/a`（根）、`file://`（scheme 斜杠）等伪父级。
+  支持 `file://docs/...`、NAS `file://192.168.x/...`、`smb://`、带 `?` 参数、尾斜杠、纯路径。
+- **两级 Want 逐级兜底**：① 显式华为文件管理器 + `parameters.fileUri = 目录 URI`；
+  ② 隐式 `viewData` + `general.directory` + `FLAG_AUTH_READ_URI_PERMISSION`。
+  每级 `.then/.catch` 都写状态栏与 hilog（`fcReveal primary / fallback / both failed`），
+  两级都失败明确显示「系统文件管理器未能打开…」。context 复用 `quitApp()` 双通道。
+- **只改这一项**：菜单五项文案、打开 / 详情 / 复制路径 / 复制档案名称四项动作、
+  `SidebarView.onMouse` 触发链、`ArchiveRow.ets` 行内交互、放大镜门控、详情面板、
+  浮层定位全部零改动；R71 HDR / R70 徽标 / 版本 `1.0.7 / 7` 零回归。
+
+### 四、验证用例
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2262 passed, 0 failed`**（R73 基线 2244，+18 条 R74）；`git diff --check` 通过 |
+| 独立零回归脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**（R71 HDR 真值源零回归） |
+| 纯函数新增覆盖 | 文件→所在目录 / 目录→自身 / 未命中短路 / 双兜底 / `?` 与尾斜杠归一 / NAS 授权段 / 父 URI 边界 / 目录判定 / 状态四态 / Want 契约常量值，共 8 条 |
+| 代码级契约 | `REVEAL` 分支（剥注释）内 `onRowTap` / `openFolder` / `fcRevealTargetOf` / `fcRevealWantedOf` 全为 0；`common/` 层无 `startAbility` / `@ohos` / `import` / `: Want`；`ctx.startAbility(` 恰 2 处 |
+| 零回归契约 | 五项文案逐字未改、`fcItemCountOf(FOLDER)=5`、其余四项动作接线逐字保留、`SidebarView.onMouse` 与 `ArchiveRow.ets` 未动、版本 `1.0.7 / 7` |
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 50 s 534 ms`**；`Finished :entry:default@CompileArkTS... after 30 s 840 ms`（**非 UP-TO-DATE**，`UP-TO-DATE :entry:default@CompileArkTS` 计数 0）；**0 ERROR / 17 WARN**（与 R69–R73 完全一致）；日志 `/tmp/r74-build-final.log` |
+| 产物核验 | 签名 HAP **1,694,430 B**（R73 1,687,640 B）/ 未签名 **1,662,037 B** / `ets/modules.abc` **973,956 B**；产物 mtime **18:39:04–06** 晚于三份源码 **18:18:32 / 18:34:24 / 18:37:47**，即 HAP 由最终源码编译 |
+| 字节码 | `modules.abc`：**`R74=1 / R73=0 / R72=0 / R71=0 / 1.0.7=1`**；`fcRevealDirUriOf=2` / `fcParentUriOf=2` / `fcRevealStatusOf=2` / `openDirInSystemFileManager=2`；`com.huawei.hmos.filemanager=1` / `ohos.want.action.viewData=1` / `general.directory=1` / **`startAbility=1`**；**`openFolder(target=0`** 证明应用内重列举通道确已移出 REVEAL 产物路径。`fcRevealWantedOf=2` 仍在字节码里是 R72 遗留纯函数（真值源 + 测试保留，Index 已不调用），非回归 |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志 / 旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 `R74-A~D`）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:9626` R74 组）
+
+> ⚠️ 本组是源码静态契约 + 纯函数数值模型，不替代真机系统文件管理器验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R74-A：装新包后 Ctrl+D 角标必须是 R74（R73-A 里的 R73 是历史锚点，以本条为准）；
+>     右键任一【文件】→ OS 自带文件管理器弹出并定位到该文件所在目录，绝不在 APP 内预览该文件；
+>     状态栏显示「已用系统文件管理器打开「xxx」所在目录 · R74」。
+> ⚠️ 真机步骤 R74-B：右键任一【文件夹】→ OS 文件管理器打开【该文件夹自身】（不是它的父目录）；
+>     状态栏显示「已用系统文件管理器打开目录「xxx」 · R74」；文件与目录两类都要各测一次。
+> ⚠️ 真机步骤 R74-C：若本机未装该系统文件管理器 / 不接受该目录 URI 形态，状态栏必须明确显示
+>     「系统文件管理器未能打开…」；请回传 hilog 里 fcReveal primary / fallback / both failed
+>     与 dir= 值（含 file://docs 或 NAS 授权段），据此调整 bundleName / abilityName / URI 形态。
+> ⚠️ 真机步骤 R74-D：菜单五项文案、打开 / 详情 / 复制路径 / 复制档案名称四项动作、
+>     放大镜 toggle、详情面板、菜单定位与收起、「..」行与空白区零菜单逐字零回归；
+>     HEIC/JPG/PNG / FITS·XISF / 文本预览 / 并排右页 / HDR 徽标 / R71 HDR 保真 /
+>     R68 resize 画质 / R69 行高 / R64 内容量 / 三栏三按钮 / ESC / 版本 1.0.7/7 全部零回归。
+
+### 七、边界
+
+- **「OS 自带文件管理器」是用户明确要求的系统通道**，与 R72/R73 未验证的
+  `bindContextMenu` 手势不同：`startAbility` 是官方跨应用调用契约、SDK 定义完整。
+  但该 bundleName / abilityName 是否装在**本机**、是否接受 picker 授权 URI 形态，
+  属**真机事实** —— SDK 有 `startAbility`、编译能过、字节码有标记都证明不了。
+  因此做两级 Want 兜底 + 明确失败提示，`R74-A/B/C` 请分别按文件 / 目录两类实测。
+- **真机若两级都失败**，按 `R74-C` 回传 `hilog`（`fcReveal primary / fallback / both failed`
+  与 `dir=` 完整值）；据此调整显式 bundleName / abilityName，或改用本机实际的目录打开
+  action / URI 形态（例如把授权 URI 换成系统可识别的 `file://` 写法）。**不假装支持、不静默吞掉**。
+- **URI 形态不做二次转换**：目标目录 URI 直接沿用 picker 授权的原始 scheme / authority，
+  刻意不经过 `getUriFromPath()`，以免把外部目录误转成本 APP 沙箱 URI。
+- **菜单文案「打开档案所在目录」逐字未改**（用户要求保持菜单文案）；改的只是这一项的
+  **打开目标**与**打开渠道**。其余四项动作、现有交互全部零回归。
+- **版本恒定 `1.0.7 / versionCode 7`**，未跑 `build.sh`、未把 HAP 放桌面、
+  **本轮未 push**（用户未授权；R71 `903e544`、R72 `e0223d5`、R73 `71a4b66` 仍在本地）。
+- 零新增定时器 / 全局可变状态 / worker；R71 HDR 保真、R70 徽标、R69 行高、R68 resize 画质、
+  R67 放大镜、R64 内容量四态、三栏三按钮、文本预览 scrollbar、ESC 全部零回归。
+- **编译校验 ≠ 真机验证**；静态契约 ≠ 系统应用真的被拉起；纯函数数值模型 ≠ 目录在文件
+  管理器里的实际呈现。
 
 ---
 
