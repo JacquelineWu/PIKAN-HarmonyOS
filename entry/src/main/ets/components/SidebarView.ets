@@ -14,12 +14,12 @@ import { ToolButton } from './ToolButton';
 import { GalleryDataSource, ImageItem } from '../model/GalleryData';
 // 第五十九轮：往上层后反色标记的行级命中判定（名字严格相等 + 目录类行）。
 import { upReturnInvertOf } from '../common/UpReturn';
-// 第七十二轮：档案列表右键菜单的纯函数真值源（文案 / 命中判定 / 放大镜抑制）。
-// 菜单用 ArkUI 原生 Menu / MenuItem + bindContextMenu(ResponseType.RightClick)，
-// 样式与系统档案管理员一致；只在真实档案 / 文件夹行上绑定，空白区与「..」伪行零菜单。
-import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COPY_NAME,
-  FC_LABEL_OPEN, FC_LABEL_DETAIL, FC_LABEL_REVEAL, FC_LABEL_COPY_PATH, FC_LABEL_COPY_NAME,
-  fcHitOf, fcStopPropagationOf } from '../common/FileContextMenu';
+// 第七十二轮：档案列表右键菜单的纯函数真值源（命中判定 / 放大镜抑制）。
+// 第七十三轮真机修复：R72 的 bindContextMenu(ResponseType.RightClick) 依赖系统右键手势，
+// 2in1 真机实测「右键完全没反应」；改由 ListItem.onMouse 的右键 Press 直接上抛窗口坐标，
+// 菜单改画成 Index 里的应用内条件浮层（与 R72 详情面板同一套机制，零系统手势依赖）。
+// 只在真实档案 / 文件夹行上绑定，空白区与「..」伪行零菜单。
+import { fcHitOf, fcStopPropagationOf } from '../common/FileContextMenu';
 
 /** 收起态固定宽（只留档案名一列），保持原有交互不变；原 Index.ets 同值迁入。 */
 const LIST_COLLAPSED_W: number = 224;
@@ -58,10 +58,13 @@ export struct SidebarView {
   };
   onScrollIndex: (first: number, last: number) => void = (first: number, last: number): void => {
   };
-  /** 第七十二轮：右键菜单动作上抛（闭包在 Index 侧定义，读的永远是 Index 最新状态）。
-   *  idx 是左栏 rows 下标；菜单只由本组件产生，Index 仍会用 fcHitOf 复核一次。 */
-  onContextAction: (act: string, idx: number) => void = (act: string, idx: number): void => {
-  };
+  /** 第七十三轮：右键 Press 命中档案行 → 上抛 (rows 下标, 窗口 X, 窗口 Y)。
+   *  x/y 取 MouseEvent.displayX/displayY（SDK 15+ 的窗口坐标系，单位 vp），
+   *  缺失时退回相对组件的 x/y，由 Index 侧 fcMenuPosOf 再裁剪，绝不让 NaN 进浮层。
+   *  Index 侧仍会用 fcHitOf 复核一次，菜单项与全部行为都由 Index 收口。 */
+  onContextMenu: (idx: number, x: number, y: number) => void =
+    (idx: number, x: number, y: number): void => {
+    };
 
   /** 第六十四轮：取某一行的内容量文案。读两个 @Prop 建立 V1 依赖，
    *  统计落地换数组 / 版本号 +1 时可见行随之重算；非目录行返回空串。 */
@@ -100,36 +103,6 @@ export struct SidebarView {
         this.onDblTap(i);
       }
     })
-  }
-
-  /** 第七十二轮：原生档案管理员右键菜单。用 ArkUI 系统 Menu / MenuItem 组件，
-   *  系统统一样式、点击自动收起、在鼠标点击位置弹出（独立子窗口）。
-   *  五项文案全部来自 common/FileContextMenu.ts 的常量真值源，顺序即原生顺序。
-   *  本 APP 只读，故不摆「重命名 / 删除 / 剪切 / 分享 / 压缩」等做不到的假选项。 */
-  @Builder
-  fileContextMenuOf(idx: number) {
-    Menu() {
-      MenuItem({ content: FC_LABEL_OPEN })
-        .onClick(() => {
-          this.onContextAction(FC_ACT_OPEN, idx);
-        })
-      MenuItem({ content: FC_LABEL_DETAIL })
-        .onClick(() => {
-          this.onContextAction(FC_ACT_DETAIL, idx);
-        })
-      MenuItem({ content: FC_LABEL_REVEAL })
-        .onClick(() => {
-          this.onContextAction(FC_ACT_REVEAL, idx);
-        })
-      MenuItem({ content: FC_LABEL_COPY_PATH })
-        .onClick(() => {
-          this.onContextAction(FC_ACT_COPY_PATH, idx);
-        })
-      MenuItem({ content: FC_LABEL_COPY_NAME })
-        .onClick(() => {
-          this.onContextAction(FC_ACT_COPY_NAME, idx);
-        })
-    }
   }
 
   build() {
@@ -207,11 +180,14 @@ export struct SidebarView {
         // 内存与节点数随图片数线性增长 —— 这是图片一多就崩的原因之一。
         List({ scroller: this.scroller, space: LIST_ROW_GAP_VP }) {
           LazyForEach(this.dataSource, (item: ImageItem, idx: number) => {
-            // 第七十二轮：右键菜单**只绑在真实档案 / 文件夹行上**。
-            //  · 「..」往上层是导航伪行、列表下方空白 / 空态 / 标题 / 按钮都不是 ListItem，
-            //    根本没有 bindContextMenu 绑定 ⇒ 右键绝不弹菜单（用户硬要求）。
-            //  · 命中行的右键 Press 用 stopPropagation 阻断冒泡到根 .onMouse，
-            //    避免顺带翻转放大镜；预览区与空白区的右键 toggle 逐字保留（零回归）。
+            // 第七十三轮：右键菜单**只由命中档案行的 .onMouse 右键 Press 触发**。
+            //  · R72 用 bindContextMenu(ResponseType.RightClick) 依赖系统右键手势，
+            //    2in1 真机实测「右键完全没反应」；本轮整条系统手势依赖移除，
+            //    改走项目里已有多轮真机证据的 MouseEvent 通道（放大镜 toggle 同款）。
+            //  · 「..」往上层是导航伪行、列表下方空白 / 空态 / 标题 / 按钮都不是
+            //    命中 ListItem，根本没有 .onMouse 绑定 ⇒ 右键绝不弹菜单（用户硬要求）。
+            //  · 命中行右键 Press 先上抛窗口坐标，再 stopPropagation 阻断冒泡到根
+            //    .onMouse，避免顺带翻转放大镜；预览区 / 空白区右键 toggle 逐字保留。
             //  · 两条分支共用 archiveRowOf()，行内一切属性 / 交互零差异。
             if (fcHitOf(item.kind ?? ROW_IMAGE)) {
               ListItem() {
@@ -220,12 +196,12 @@ export struct SidebarView {
               .onMouse((event: MouseEvent) => {
                 if (fcStopPropagationOf(event.action === MouseAction.Press,
                   event.button === MouseButton.Right, true)) {
+                  const dx: number = Number(event.displayX ?? event.x);
+                  const dy: number = Number(event.displayY ?? event.y);
+                  this.onContextMenu(idx, dx, dy);
                   event.stopPropagation();
                 }
               })
-              .bindContextMenu(() => {
-                this.fileContextMenuOf(idx);
-              }, ResponseType.RightClick)
             } else {
               ListItem() {
                 this.archiveRowOf(item, idx);

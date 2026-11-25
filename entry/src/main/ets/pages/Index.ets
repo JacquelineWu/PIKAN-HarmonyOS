@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R72 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R73 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -206,11 +206,15 @@ import { HB_LABEL, HB_MARGIN_VP, HB_HINT_H_VP, HB_HINT_GAP_VP,
 // 第七十一轮：HDR 保真结果的原因码门控（正常态不显示任何提示）。
 import { hpShowHintOf } from '../common/HdrPreview';
 // 第七十二轮：左栏档案列表右键菜单的纯函数真值源（命中判定 / 菜单动作 / 详情字段 /
-// 所在目录 / 复制文本 / 状态文案）。唯一碰 SDK 的菜单组件在 SidebarView，pasteboard、
-// openFolder 与详情面板落在本文件；common/ 层保持零 SDK / 零 IO。
+// 所在目录 / 复制文本 / 状态文案）。pasteboard、openFolder、菜单浮层与详情面板落在
+// 本文件；common/ 层保持零 SDK / 零 IO。
+// 第七十三轮：新增菜单浮层尺寸 / 定位 / 标题 / 显隐判定；触发层不再依赖系统右键手势。
 import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COPY_NAME,
   fcHitOf, fcHasActOf, fcDetailFieldsOf, fcDetailTitleOf, fcRevealTargetOf,
-  fcRevealWantedOf, fcCopyTextOf, fcStatusHintOf, FcDetailField } from '../common/FileContextMenu';
+  fcRevealWantedOf, fcCopyTextOf, fcStatusHintOf, FcDetailField,
+  fcItemsOf, fcMenuHeightOf, fcMenuPosOf, fcMenuTitleOf, fcMenuVisibleOf,
+  FC_MENU_W, FC_MENU_ITEM_H, FC_MENU_TITLE_H, FC_MENU_PAD_V,
+  FcMenuItem, FcMenuPos } from '../common/FileContextMenu';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -220,7 +224,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R72';
+const ESC_BUILD_TAG: string = 'R73';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1251,6 +1255,16 @@ struct Index {
   @State ctxDetailOn: boolean = false;
   @State ctxDetailTitle: string = '';
   @State ctxDetailFields: Array<FcDetailField> = [];
+  /** 第七十三轮：档案列表右键菜单浮层。由 ListItem.onMouse 右键 Press 上抛窗口坐标后
+   *  条件渲染，不依赖 bindContextMenu / ResponseType.RightClick 的系统手势通道。
+   *  idx + 菜单项快照在打开时一次写入，之后行数据变化也不会让浮层自己跳内容。 */
+  @State ctxMenuOn: boolean = false;
+  @State ctxMenuIdx: number = -1;
+  @State ctxMenuX: number = 0;
+  @State ctxMenuY: number = 0;
+  @State ctxMenuName: string = '';
+  @State ctxMenuItems: Array<FcMenuItem> = [];
+  @State ctxMenuHover: string = '';
   /** 真全屏：应用内三块栏 + 系统标题栏 / dock / 状态栏 / 导航栏全部不显示，画面只剩图片。
    *  2026-11-11 起 applyWindowFullScreen() 会调 window 最大化沉浸接口，详见该方法注释。 */
   @State fullscreen: boolean = false;
@@ -7918,7 +7932,11 @@ struct Index {
     // 预览区右键 Press 已被 onMouseButton 的 stopPropagation 拦下，只由它自己的
     // Release 分支翻转一次；根容器只认 Press，故两处不会重复翻转。
     if (event.action === MouseAction.Press) {
-      this.applyLoupeToggle(event.button === MouseButton.Right);
+      // 第七十三轮：应用内菜单打开时，右键不再顺带翻转放大镜（收起由浮层遮罩统一处理）。
+      // 只做门控，不改任何既有状态；左键 / 预览区 / 空白区右键 toggle 逐字保留。
+      if (!(this.ctxMenuOn && event.button === MouseButton.Right)) {
+        this.applyLoupeToggle(event.button === MouseButton.Right);
+      }
     }
     if (!this.fullscreen && event.action === MouseAction.Move) {
       const yTop: number = Number(event.y);
@@ -8891,10 +8909,10 @@ struct Index {
               // 绝不把用户正在滚走的高亮拉回，也不改变既有滚动体验。
               this.guardHighlightVisible('onScrollIndex');
             },
-            // 第七十二轮：档案行右键菜单动作。SidebarView 只负责弹原生菜单，
-            // 全部真实行为（打开 / 详情 / 所在目录 / 复制）都收口到 Index。
-            onContextAction: (act: string, i: number): void => {
-              this.onFileContextAction(act, i);
+            // 第七十三轮：档案行右键 Press → 上抛窗口坐标，由 Index 画应用内菜单浮层；
+            // 全部真实行为（打开 / 详情 / 所在目录 / 复制）仍收口到 onFileContextAction。
+            onContextMenu: (i: number, x: number, y: number): void => {
+              this.onFileContextMenu(i, x, y);
             }
           })
 
@@ -9470,6 +9488,65 @@ struct Index {
         .height('100%')
         .position({ x: 0, y: 0 })
         .zIndex(20)
+      }
+
+      // 第七十三轮：档案列表右键菜单（应用内条件浮层）。
+      // R72 的 bindContextMenu(ResponseType.RightClick) 依赖系统右键手势，2in1 真机实测
+      // 「右键完全没反应」；本轮改由 ListItem.onMouse 右键 Press 上抛窗口坐标，这里按坐标
+      // 画浮层 —— 与 R72 详情面板同一套机制，零系统手势依赖、零子窗口依赖。
+      // zIndex 21 高于详情面板（20）；点遮罩 / 点任一菜单项即收，不接管滚轮与拖拽。
+      if (fcMenuVisibleOf(this.ctxMenuOn, this.ctxMenuItems.length)) {
+        Stack({ alignContent: Alignment.TopStart }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .onClick(() => {
+              this.ctxMenuOn = false;
+              this.ctxMenuHover = '';
+            })
+          Column() {
+            Text(this.ctxMenuName)
+              .fontSize(11)
+              .fontColor('#8b95a8')
+              .width('100%')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .height(FC_MENU_TITLE_H)
+              .padding({ left: 12, right: 12 })
+            ForEach(this.ctxMenuItems, (it: FcMenuItem) => {
+              Row() {
+                Text(it.label)
+                  .fontSize(13)
+                  .fontColor('#e8ecf4')
+              }
+              .width('100%')
+              .height(FC_MENU_ITEM_H)
+              .padding({ left: 12, right: 12 })
+              .backgroundColor(this.ctxMenuHover === it.act ? '#333b4a' : '#00000000')
+              .borderRadius(4)
+              .onHover((on: boolean) => {
+                this.ctxMenuHover = on ? it.act : '';
+              })
+              .onClick(() => {
+                const act: string = it.act;
+                const idx: number = this.ctxMenuIdx;
+                this.ctxMenuOn = false;
+                this.ctxMenuHover = '';
+                this.onFileContextAction(act, idx);
+              })
+            }, (it: FcMenuItem) => it.act)
+          }
+          .width(FC_MENU_W)
+          .padding({ top: FC_MENU_PAD_V, bottom: FC_MENU_PAD_V })
+          .backgroundColor('#262b35')
+          .border({ width: 1, color: '#3a4150' })
+          .borderRadius(8)
+          .position({ x: this.ctxMenuX, y: this.ctxMenuY })
+        }
+        .width('100%')
+        .height('100%')
+        .position({ x: 0, y: 0 })
+        .zIndex(21)
       }
     }
     .width('100%')
@@ -10429,5 +10506,32 @@ struct Index {
       .catch(() => {
         this.status = '复制失败（剪贴板不可用）· ' + ESC_BUILD_TAG;
       });
+  }
+
+  /** 第七十三轮：档案行右键 Press → 打开应用内菜单浮层。
+   *  只负责「显示」：复核命中、快照菜单项、把鼠标窗口坐标裁进可视区。
+   *  五项真实行为仍全部收口到 onFileContextAction，此处不执行任何动作。
+   *  刻意放在文件末尾，避免既有静态契约按注释 / 方法签名切片时混入 build()。 */
+  private onFileContextMenu(rowIdx: number, x: number, y: number): void {
+    this.markUserActive();
+    if (rowIdx < 0 || rowIdx >= this.rows.length) {
+      return;
+    }
+    const r: ImageItem = this.rows[rowIdx];
+    const kind: number = r.kind ?? ROW_IMAGE;
+    if (!fcHitOf(kind)) {
+      return;
+    }
+    const items: Array<FcMenuItem> = fcItemsOf(kind);
+    const h: number = fcMenuHeightOf(items.length);
+    const pos: FcMenuPos = fcMenuPosOf(x, y, this.lastRootW, this.lastRootH,
+      FC_MENU_W, h);
+    this.ctxMenuIdx = rowIdx;
+    this.ctxMenuName = fcMenuTitleOf(r.name);
+    this.ctxMenuItems = items;
+    this.ctxMenuX = pos.x;
+    this.ctxMenuY = pos.y;
+    this.ctxMenuHover = '';
+    this.ctxMenuOn = true;
   }
 }

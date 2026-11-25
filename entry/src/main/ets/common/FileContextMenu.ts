@@ -15,8 +15,14 @@
  *
  *  真值源与 UI 的分工：
  *    · 命中判定 / 菜单项 / 详情字段 / 复制文本 / 状态文案 / 放大镜抑制 → 本文件。
- *    · bindContextMenu / Menu / MenuItem / pasteboard / openFolder / 对话框 → Index
- *      与 SidebarView（唯一碰 SDK 的地方）。
+ *    · 菜单浮层 / pasteboard / openFolder / 详情面板 → Index（唯一碰 SDK 的地方）。
+ *
+ *  第七十三轮（R73）真机修复：R72 用 bindContextMenu(ResponseType.RightClick) 依赖系统
+ *  右键手势，真机实测「右键完全没反应」。同一 ListItem 又在右键 Press 调 stopPropagation
+ *  掐断冒泡，与系统手势识别争抢同一个事件。R73 不再依赖任何系统手势通道：改由项目里
+ *  已有多轮真机证据的 ListItem.onMouse 右键 Press 直接捕获窗口坐标并上抛，菜单改画成
+ *  应用内条件浮层（与 R72 详情面板同一套机制）。文案 / 行为 / 命中 / 放大镜抑制全复用，
+ *  新增的只有「浮层定位与尺寸」这一组纯数值判定，仍严格零 SDK / 零 IO。
  */
 
 // --------------------------------------------------------------------
@@ -69,6 +75,28 @@ export interface FcMenuItem {
 export interface FcDetailField {
   label: string;
   value: string;
+}
+
+// --------------------------------------------------------------------
+// 第七十三轮：应用内菜单浮层的尺寸与定位（纯数值，零 SDK / 零 IO）
+// --------------------------------------------------------------------
+/** 菜单宽（vp）。与原生档案管理员右键菜单接近的单列宽度。 */
+export const FC_MENU_W: number = 200;
+/** 单个菜单项行高（vp）。 */
+export const FC_MENU_ITEM_H: number = 34;
+/** 菜单顶部档案名标题行高（vp）。 */
+export const FC_MENU_TITLE_H: number = 24;
+/** 菜单上下内边距（vp），每项左右内边距另在 UI 里给 12。 */
+export const FC_MENU_PAD_V: number = 6;
+/** 菜单距窗口边缘的最小留白（vp），避免贴边 / 越界。 */
+export const FC_MENU_EDGE_V: number = 8;
+/** 标题名超过该长度就截断加省略号，绝不撑破菜单。 */
+export const FC_MENU_NAME_MAX: number = 28;
+
+/** 菜单浮层在根 Stack 中的绝对位置（vp）。 */
+export interface FcMenuPos {
+  x: number;
+  y: number;
 }
 
 /** 详情面板入参：全部是纯数据，location 由 Index 用 parentDirOf(realPathOf(uri)) 算好传入。 */
@@ -281,4 +309,60 @@ export function fcStatusHintOf(act: string, name: string): string {
     default:
       return '';
   }
+}
+
+/** 第七十三轮：菜单浮层总高。项数非法 / 为 0 时返回 0，绝不返回负高或 NaN。 */
+export function fcMenuHeightOf(count: number): number {
+  if (count <= 0 || count !== count) {
+    return 0;
+  }
+  return count * FC_MENU_ITEM_H + FC_MENU_TITLE_H + FC_MENU_PAD_V * 2;
+}
+
+/** 第七十三轮：把鼠标窗口坐标裁成菜单左上角坐标。
+ *  右下越界时向内翻转，NaN / 负坐标一律收进安全区；窗口尺寸未测出（<= 0）时只做下限裁剪。
+ *  纯数值：只依赖入参，返回新对象，不读任何全局状态。 */
+export function fcMenuPosOf(x: number, y: number, rootW: number, rootH: number,
+  menuW: number, menuH: number): FcMenuPos {
+  const ax: number = x !== x ? 0 : x;
+  const ay: number = y !== y ? 0 : y;
+  const rw: number = rootW !== rootW ? 0 : rootW;
+  const rh: number = rootH !== rootH ? 0 : rootH;
+  let px: number = ax;
+  let py: number = ay;
+  if (rw > 0 && menuW > 0 && px + menuW > rw - FC_MENU_EDGE_V) {
+    px = rw - menuW - FC_MENU_EDGE_V;
+  }
+  if (rh > 0 && menuH > 0 && py + menuH > rh - FC_MENU_EDGE_V) {
+    py = rh - menuH - FC_MENU_EDGE_V;
+  }
+  if (px < FC_MENU_EDGE_V) {
+    px = FC_MENU_EDGE_V;
+  }
+  if (py < FC_MENU_EDGE_V) {
+    py = FC_MENU_EDGE_V;
+  }
+  return { x: px, y: py };
+}
+
+/** 第七十三轮：点击是否落在菜单矩形之外（决定点遮罩是否收起）。边界算在菜单内。 */
+export function fcMenuOutsideOf(px: number, py: number, mx: number, my: number,
+  mw: number, mh: number): boolean {
+  return px < mx || py < my || px > mx + mw || py > my + mh;
+}
+
+/** 第七十三轮：菜单标题用档案名，空名兜底、超长截断，绝不开天窗或撑破布局。 */
+export function fcMenuTitleOf(name: string): string {
+  if (name.length === 0) {
+    return '档案';
+  }
+  if (name.length <= FC_MENU_NAME_MAX) {
+    return name;
+  }
+  return name.substring(0, FC_MENU_NAME_MAX - 1) + '…';
+}
+
+/** 第七十三轮：浮层是否真该显示 —— 开关为真且菜单项非空，避免出现空壳菜单。 */
+export function fcMenuVisibleOf(on: boolean, count: number): boolean {
+  return on && count > 0;
 }
