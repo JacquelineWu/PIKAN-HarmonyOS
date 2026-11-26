@@ -25,12 +25,22 @@ import { ROW_GAP_VP } from './RowGap.ts';
 
 /** 左栏占根窗口宽的比例上限：相对量而非固定宽度，窗口越大上限越大。 */
 export const AC_SIDEBAR_RATIO: number = 0.62;
-/** 收起态占根窗口宽的比例：同样随容器尺寸动态伸缩，不再写死 224vp。 */
+/** 第七十八轮：收起态只作「上限保护」的比例 —— **不再是下限留白**。
+ *  旧实现 collapsedW = floor(rootW * 0.30)，1440 窗口会给出 432vp 的空白栏；
+ *  R78 起收起宽由 acCollapsedContentOf() 按名称 + 图标按钮的可见内容撑开，
+ *  仅当内容宽超过本比例时才被压窄，绝不再凭容器比例凭空留白。 */
 export const AC_COLLAPSED_RATIO: number = 0.30;
 /** 日期列既有 margin（间距，不是列宽）。 */
 export const AC_DATE_GAP_VP: number = 6;
 /** 行既有右 padding（内边距，不是列宽）。 */
 export const AC_ROW_PAD_VP: number = 6;
+/** 左栏 List 既有右 padding（内边距，不是列宽）。 */
+export const AC_LIST_PAD_VP: number = 8;
+/** 第七十八轮：三个图标按钮并排所需的最小可读宽（按内容推导，不是固定栏宽）。
+ *  单个按钮 = padding 左右各 10 + margin 左右各 3 + 图案本身约 16vp。 */
+export const AC_ICON_BTN_MIN_VP: number = 42;
+export const AC_ICON_BTN_COUNT: number = 3;
+export const AC_ICON_ROW_PAD_VP: number = 12;
 /** 日期列显示格式（按这个内容长度估宽，而不是写死列宽）。 */
 export const AC_DATE_SAMPLE: string = 'YY-MM-DD HH:mm';
 /** 三列字号，与 ArchiveRow 的 fontSize 逐字一致。 */
@@ -41,7 +51,7 @@ export const AC_DATE_FONT_VP: number = 10;
 /** 一次自适应测量的全部结果，逐层下传给 SidebarView / ArchiveRow。 */
 export interface AcLayout {
   sidebarW: number;    // 左栏展开宽（按内容 / 容器动态）
-  collapsedW: number;  // 左栏收起宽（按容器动态，不再固定 224）
+  collapsedW: number;  // 左栏收起宽（R78：按当前可见内容推导，不再按容器比例留白）
   nameW: number;       // 名称列动态宽（供诊断 / 兜底，UI 仍用 layoutWeight 吸收）
   sizeW: number;       // 大小 / 内容数目列动态宽（按本列最长内容）
   dateW: number;       // 日期列动态宽（按日期格式内容长度）
@@ -69,6 +79,20 @@ export function acTextWidestOf(texts: Array<string>, fontVp: number): number {
   return Math.ceil(w);
 }
 
+/** 第七十八轮：紧凑（缩进按钮按下）态左栏的「当前可见内容宽」。
+ *  按下态只显示档案名 / 目录名 + 左栏上方三个图标按钮，时间 / 大小 / 状态 /
+ *  辅助标签全部隐藏，所以宽度只由两样可见内容决定：
+ *    · 名称列最长文本估宽 + 行右 padding + List 右 padding；
+ *    · 三个图标按钮并排的最小可读宽 + 按钮行 padding（保证点击区域不被压扁）；
+ *  两者取大 ⇒ 既贴合内容、不留多余空白，又不会把按钮挤到看不清 / 点不中。
+ *  严格零 SDK / 零 IO / 零异步，入参脏值一律按空数组处理。 */
+export function acCollapsedContentOf(names: Array<string>): number {
+  const nameVp: number = acTextWidestOf(names, AC_NAME_FONT_VP);
+  const nameNeed: number = nameVp + AC_ROW_PAD_VP + AC_LIST_PAD_VP;
+  const btnNeed: number = AC_ICON_BTN_COUNT * AC_ICON_BTN_MIN_VP + AC_ICON_ROW_PAD_VP;
+  return nameNeed > btnNeed ? nameNeed : btnNeed;
+}
+
 /** 两列间距 + 日期列既有 margin + 行右 padding 的固定开销（间距 / 内边距，非列宽）。 */
 export function acOverheadOf(): number {
   return ROW_GAP_VP * 2 + AC_DATE_GAP_VP + AC_ROW_PAD_VP;
@@ -78,7 +102,10 @@ export function acOverheadOf(): number {
  *  · rootW=0（首帧还没 onAreaChange）→ 纯按内容长度撑开，窗口尺寸到手后再重算；
  *  · 容器变窄 → 先压左栏整体，名称列再由 layoutWeight(1) + Ellipsis 吸收，
  *    大小 / 日期两列始终按本列最长内容保持可读，不会被挤成省略号；
- *  · 全程没有任何 min/max 固定 vp 夹逼，结果只由入参决定。 */
+ *  · 全程没有任何 min/max 固定 vp 夹逼，结果只由入参决定。
+ *  · 第七十八轮：收起宽不再随容器比例放大（旧 0.30 下限会留一大片空白），
+ *    改由 acCollapsedContentOf(names) 按「最长名称 + 三个图标按钮」撑开，
+ *    比例只在内容宽超过根窗口承载时作上限保护。 */
 export function acLayoutOf(rootW: number, names: Array<string>,
   sizeTexts: Array<string>): AcLayout {
   const rw: number = posOf(rootW);
@@ -93,9 +120,11 @@ export function acLayoutOf(rootW: number, names: Array<string>,
   const sidebarW: number = cap > 0 && need > cap ? cap : need;
   // 名称列吸收剩余（UI 侧仍由 layoutWeight(1) 弹性决定，这里只作诊断 / 兜底量）。
   const nameW: number = sidebarW - sizeW - dateW - overhead;
-  const collapsedW: number = rw > 0
-    ? Math.floor(rw * AC_COLLAPSED_RATIO)
-    : nameVp + AC_ROW_PAD_VP;
+  // 第七十八轮：收起宽只由「当前可见内容」推导（名称 + 三个图标按钮），
+  //  AC_COLLAPSED_RATIO 仅作上限保护（只可能收窄，绝不再制造比例留白）。
+  const contentW: number = acCollapsedContentOf(names);
+  const capW: number = rw > 0 ? Math.floor(rw * AC_COLLAPSED_RATIO) : 0;
+  const collapsedW: number = capW > 0 && contentW > capW ? capW : contentW;
   return {
     sidebarW: sidebarW > 0 ? Math.ceil(sidebarW) : need,
     collapsedW: collapsedW > 0 ? Math.ceil(collapsedW) : nameVp,

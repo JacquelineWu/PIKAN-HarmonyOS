@@ -767,11 +767,14 @@ export function pathChainOf(path: string): string[] {
   return out;
 }
 
-/** APP 内上层清单的提示文案。**明确写「不会弹出系统选择器」**，
- *  避免用户以为按钮又没反应（按钮与列表恒可点，点了必须有可见反馈）。 */
+/** 第七十八轮：「APP 内上层xxx」提醒整体移除。
+ *  用户要求该文案及其关联提示内容不再出现：Index.ets 的三处调用 / 状态栏拼接全部删除、
+ *  左栏 dirHint 提示条与列表里的「— 上层清单（APP 内）… —」伪说明行一并移除。
+ *  保留函数签名与导出仅为不破坏既有纯函数回归的 import 契约：**恒返回空串**，
+ *  源码里不再有「APP 内上层…」文案字面串。「往上层」进入 APP 内上层清单的功能本身不变，
+ *  旧快照里的伪行仍由 isUpListPseudoName() 过滤，不会漏进清单。 */
 export function inAppUpListHint(dirName: string, count: number, tag: string): string {
-  return 'APP 内上层「' + dirName + '」清单（' + count +
-    ' 项）· 点目录名进入 · 不弹系统选择器 · ' + tag;
+  return '';
 }
 
 // --------------------------------------------------------------------

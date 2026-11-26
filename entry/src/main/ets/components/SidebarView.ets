@@ -2,15 +2,19 @@
  * components/SidebarView.ets —— 左侧档案列表栏（R40：Index.ets 拆分 Phase 3 迁出）
  *
  *  从 pages/Index.ets 的 build() **原样迁出**（UI 描述逐行等价）：
- *    · 标题行（来源 + 档案张数）→ 工具行（排序 / 往上层 / 选择文件夹）→ dirHint 提示条
+ *    · 标题行（来源 + 档案张数）→ 工具行（第七十八轮起三个纯图案按钮）
  *    → 空态 / LazyForEach 档案列表（ArchiveRow 行 + 悬停缩略图）
+ *  第七十八轮：dirHint 提示条随「APP 内上层xxx」提醒一并移除；缩进按钮按下时
+ *  左栏切紧凑显示，只留档案名 / 目录名，隐藏全部非名称信息，栏宽按可见内容自适应。
  *  状态仍归 pages/Index.ets（Phase 3 约定）：本组件只收 @Prop 快照 + 回调上抛，
  *  不持有任何业务状态；scroller / dataSource 是共享对象引用，由 Index 创建。
  *  依赖方向：pages/Index.ets → 本组件 → components/ArchiveRow + model/，无环。
  */
 
 import { ArchiveRow, ROW_IMAGE, ROW_FOLDER, ROW_OTHER } from './ArchiveRow';
-import { ToolButton } from './ToolButton';
+// 第七十八轮：左栏三个按钮改「仅图案标识」专用组件；ToolButton.ets 仍供顶栏「全屏」
+// 与 Ctrl+D 诊断层「内容量 TTL」使用，本组件不再引入它 ⇒ 顶栏 / 诊断层零回归。
+import { SideToolButton } from './SideToolButton';
 import { GalleryDataSource, ImageItem } from '../model/GalleryData';
 // 第五十九轮：往上层后反色标记的行级命中判定（名字严格相等 + 目录类行）。
 import { upReturnInvertOf } from '../common/UpReturn';
@@ -32,7 +36,8 @@ export struct SidebarView {
   @Prop source: string = '';
   @Prop itemCount: number = 0;
   @Prop sortAsc: boolean = true;
-  @Prop dirHint: string = '';
+  /** 第七十八轮：「APP 内上层xxx」提醒整体移除 —— 左栏不再接收 / 渲染 dirHint 提示条。
+   *  Index 侧仍保留 @State dirHint 供右侧预览空态判空，属另一界面区域，行为不变。 */
   @Prop rowCount: number = 0;
   @Prop resumeHint: string = '';
   @Prop cur: number = -1;
@@ -122,39 +127,38 @@ export struct SidebarView {
           .layoutWeight(1)
         // 第十一轮：版本号只在最顶部标题栏（topBar 的 PIKAN 版本号）显示一次，
         // 第二栏不再重复；这里只留档案张数，样式 / 位置都不变。
-        Text(this.itemCount > 0 ? this.itemCount + ' 张' : '')
-          .fontSize(12)
-          .fontColor('#7f88a3')
+        // 第七十八轮：缩进按钮按下（紧凑态）只显示名称，隐藏「N 张」这类状态 / 辅助标签。
+        if (!this.listCollapsed) {
+          Text(this.itemCount > 0 ? this.itemCount + ' 张' : '')
+            .fontSize(12)
+            .fontColor('#7f88a3')
+        }
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 10, bottom: 8 })
 
-      // 11-10 起：排序 / 往上层 / 选择文件夹 三个按钮水平排在同一行。
-      // ToolButton 的 layoutWeight(1) 三等分宽度 → 水平间距由统一的 margin(3) 决定，一致；
-      // 统一 height(30) + Row 垂直居中 → 垂直对齐整齐；
-      // 合并掉原来的第二行后，按钮区不再有多余垂直空白，也不会重叠 / 错位。
+      // 第七十八轮：三个按钮统一改为「仅图案标识、零文字标签」。
+      //  · 排序：'↑' / '↓' 随 sortAsc 切换，方向本身即状态；降序再叠加 active 高亮底色。
+      //  · 往上层：'⇧' 层级上移图案；选择文件夹：'▣' 清晰几何 / 文件夹格图案。
+      //  · SideToolButton 逐字沿用旧 ToolButton 的 height(30) / padding / margin /
+      //    layoutWeight(1) 三等分 / borderRadius，点击区域大小与位置完全不变；
+      //    功能仍由 act → doAction('sort' / 'up' / 'folder') 收口，恒亮恒可点。
+      //  · 按下 / 未按下：组件内 down 瞬时高亮 + active 持续高亮两态反馈。
       Row() {
-        ToolButton({ label: this.sortAsc ? '排序 ↑' : '排序 ↓', act: 'sort', flex: true, onAction: this.onAction })
+        SideToolButton({ glyph: this.sortAsc ? '↑' : '↓', act: 'sort', flex: true,
+          active: !this.sortAsc, onAction: this.onAction })
         // 「往上层」恒亮恒可点（2026-11-11：不要 grey out、不能禁用）。
         // canGoUp 只用于状态栏 / 诊断串 / browseUp 行为判据，不传进按钮。
-        ToolButton({ label: '往上层', act: 'up', flex: true, onAction: this.onAction })
-        ToolButton({ label: '选择文件夹', act: 'folder', flex: true, onAction: this.onAction })
+        SideToolButton({ glyph: '⇧', act: 'up', flex: true, onAction: this.onAction })
+        SideToolButton({ glyph: '▣', act: 'folder', flex: true, onAction: this.onAction })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
       .padding({ left: 6, right: 6, bottom: 6 })
       .border({ width: { bottom: 1 }, color: '#2a2f3a' })
 
-      // 目录里零图片但有一堆子文件夹时，列表照常渲染，只是在上面补一行说明，
-      // 别让用户把「本层没有图片」误看成「又空白了」。
-      if (this.dirHint.length > 0 && this.rowCount > 0) {
-        Text(this.dirHint)
-          .fontSize(11)
-          .fontColor('#8b95a8')
-          .width('100%')
-          .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-          .backgroundColor('#1c212a')
-      }
+      // 第七十八轮：「APP 内上层xxx」提醒及其关联的左栏 dirHint 提示条整体移除，
+      //  该文案 / 提示内容在左栏不再出现；下方仍是原来的空态 / LazyForEach 档案列表。
 
       // ⚠️ 判空态用 rowCount（左栏实际行数），不能用 itemCount（只算图片）：
       // 「人像」这类全是子文件夹、零图片的目录 itemCount=0 但 rows 有内容，
@@ -165,17 +169,21 @@ export struct SidebarView {
             .fontSize(13)
             .fontColor('#7f88a3')
             .margin({ bottom: 6 })
-          if (this.resumeHint.length > 0) {
-            Text(this.resumeHint)
+          // 第七十八轮：紧凑态隐藏恢复提示 / 操作指引等所有非名称辅助标签，
+          //  只保留上方那一行空态占位；展开时逐字恢复原来的完整辅助文案。
+          if (!this.listCollapsed) {
+            if (this.resumeHint.length > 0) {
+              Text(this.resumeHint)
+                .fontSize(11)
+                .fontColor('#7f88a3')
+                .textAlign(TextAlign.Center)
+                .margin({ bottom: 6 })
+            }
+            Text('点左栏「选择文件夹」浏览目录')
               .fontSize(11)
-              .fontColor('#7f88a3')
+              .fontColor('#5a6272')
               .textAlign(TextAlign.Center)
-              .margin({ bottom: 6 })
           }
-          Text('点左栏「选择文件夹」浏览目录')
-            .fontSize(11)
-            .fontColor('#5a6272')
-            .textAlign(TextAlign.Center)
         }
         .width('100%')
         .layoutWeight(1)

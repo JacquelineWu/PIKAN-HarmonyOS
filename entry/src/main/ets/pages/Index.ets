@@ -57,7 +57,7 @@ import util from '@ohos.util';
 import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
-  upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
+  upContextBaseOf, upContextRawOf, pathChainOf,
   realPathOf, hierPathOf,
   isStrictParentOf, sameEntryNames,
   isUpListPseudoName, mergeUpListNames, rootFormParentOf,
@@ -245,7 +245,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R77';
+const ESC_BUILD_TAG: string = 'R78';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1202,7 +1202,10 @@ struct Index {
   /** 当前浏览目录的完整路径（Win64 07c1eee：搬到标题栏）。鸿蒙没有 setWindowTitle，
    *  就放在顶栏 PIKAN 右边，显示时中间省略保住末尾目录名。 */
   @State titlePath: string = '';
-  /** 左栏收起态（Ctrl+B / « 按钮）。收起后只留档案名一列，抬头与三个按钮仍保留。 */
+  /** 左栏收起态（Ctrl+B / « 按钮）= 第七十八轮「缩进按钮按下」态。
+   *  紧凑显示：只留档案名 / 目录名，隐藏时间 / 大小 / 状态 / 辅助标签；
+   *  栏宽由 acCollapsedContentOf() 按当前可见内容自适应（名称 + 三个图案按钮），
+   *  不保留比例空白；取消按下即恢复完整三栏与默认 adaptive 宽度。 */
   @State listCollapsed: boolean = false;
   /** 第七十七轮：adaptive 布局的四个动态量，全部由 acLayoutOf 推出，无预设固定宽度。 */
   @State listW: number = acLayoutOf(0, ['选择文件夹'], ['12.34 MB']).sidebarW;
@@ -2835,7 +2838,7 @@ struct Index {
     this.cur = -1;
     this.resetView();
     this.inAppUpList = true;
-    this.dirHint = inAppUpListHint(label, rows.length - 1, UP_LIST_TAG);
+    this.dirHint = '';  // R78：「APP 内上层xxx」提醒移除，恢复态左栏不再显示提示条
     if (this.dirPollTimer !== -1) {
       clearInterval(this.dirPollTimer);
       this.dirPollTimer = -1;
@@ -3844,7 +3847,9 @@ struct Index {
   /** 第七十七轮：adaptive column width 的唯一收口点。
    *  三列宽 / 左栏展开宽 / 收起宽全部由「内容长度（最长档案名 / 大小文案 / 日期格式）
    *  + 容器尺寸（lastRootW）」实时推出，源码里不再有任何预设 / 固定宽度限制。
-   *  换源 / 恢复 / 往上层 / 窗口 resize 都走这里，所有行共用同一套动态值 ⇒ 三栏仍对齐。 */
+   *  换源 / 恢复 / 往上层 / 窗口 resize 都走这里，所有行共用同一套动态值 ⇒ 三栏仍对齐。
+   *  第七十八轮：收起宽改由 acCollapsedContentOf(names) 按「最长名称 + 三个图标按钮」
+   *  推导，容器比例只作上限保护，不再按 rootW 比例留下空白。 */
   private refreshAdaptiveLayout(rowNames: Array<string>): void {
     const sizeTexts: Array<string> = [];
     for (let i = 0; i < this.rows.length; i++) {
@@ -6939,8 +6944,9 @@ struct Index {
       }
       this.refreshSpread();
       if (imgs.length === 0) {
-        // 全是子文件夹、本层零图片（例如「人像」）：目录表照常列出，
-        // 左栏再加一条提示条，别让用户以为又白屏了。
+        // 全是子文件夹、本层零图片（例如「人像」）：目录表照常列出。
+        // 第七十八轮：左栏 dirHint 提示条已整体移除，这里的状态值只供状态栏 /
+        // 右侧预览区空态判空使用（属另一界面区域，行为不变）。
         this.dirHint = '本层没有图片 · ' + dirs.length + ' 个子文件夹（点名称进入）' +
           (texts.length > 0 ? ' · ' + texts.length + ' 个文本文件（点名称预览）' : '');
         this.status = '目录 ' + dirLabel + '：本层没有图片 · ' + dirs.length +
@@ -7783,9 +7789,9 @@ struct Index {
     //    volumeRootOf 已修正 NAS 卷根，这里再彻底切断「层级链 → 目录清单」的映射：
     //    左栏只呈现父目录的真实子目录，不再显示任何其他层级的文件夹列表。
     const chain: string[] = pathChainOf(target);
-    // ③ 一行说明：明确告诉用户清单在 APP 内、不会弹系统选择器。
-    rows.push({ uri: '', name: '— 上层清单（APP 内）· 点目录名进入 · ' + UP_LIST_TAG + ' —',
-      size: -1, mtime: 0, kind: ROW_OTHER, itemIndex: -1 });
+    // ③ 第七十八轮：原「— 上层清单（APP 内）· 点目录名进入 · ul1 —」伪说明行整体移除。
+    //    「往上层」进入 APP 内上层清单的功能本身不变，只不再出现该提醒文案；
+    //    旧快照里若仍存有这条伪行，仍由 isUpListPseudoName() 过滤，绝不漏进清单。
     // 提交纯清单态：不动 restoreMode / restoreHintText，不触发任何 uri IO。
     this.items = [];
     this.rows = rows;
@@ -7801,7 +7807,7 @@ struct Index {
     // （curName）交给左栏反色。**必须在 dataSource.reload 之前**设好，让本次
     // LazyForEach 建出来的可见行就带上新标记；清单里该行名字与 curName 严格相等、
     // 种类优先取快照真实种类（带点目录名可能是 ROW_OTHER，upReturnInvertOf 同样认），
-    // 其余行（'..' / 伪说明 / 兄弟目录）逐字保持默认样式。
+    // 其余行（'..' / 兄弟目录）逐字保持默认样式。
     this.upReturnName = upReturnRefreshOf(this.upReturnName,
       upReturnMarkOf(curName, true, true));
     this.dataSource.reload(this.rows);
@@ -7810,7 +7816,7 @@ struct Index {
     this.pickRootUri = '';
     this.titlePath = target;
     this.canGoUp = canGoUpFrom(target);
-    this.dirHint = inAppUpListHint(targetName, rows.length - 2, UP_LIST_TAG);
+    this.dirHint = '';  // R78：「APP 内上层xxx」提醒及提示条整体移除
     this.cur = -1;
     this.resetView();
     this.inAppUpList = true;
@@ -7824,7 +7830,9 @@ struct Index {
       clearTimeout(this.rescanTimer);
       this.rescanTimer = -1;
     }
-    this.status = inAppUpListHint(targetName, rows.length - 2, UP_LIST_TAG) +
+    // 第七十八轮：「APP 内上层xxx」提醒及状态栏拼接整体移除，只留中性目录态说明；
+    //  计数由 rows.length - 2 改为 - 1（伪说明行已删，只扣 '..' 一行）。
+    this.status = '「' + targetName + '」· ' + (rows.length - 1) + ' 个条目 · ' + ESC_BUILD_TAG +
       (this.restoreMode === RESTORE_READONLY
         ? ' · 图片授权已失效，点「选择文件夹」重新打开该目录即可看图' : '');
     this.diagLine = 'up LIST | ' + UP_LIST_TAG + ' | st=' + state +
@@ -9026,7 +9034,6 @@ struct Index {
             source: this.source,
             itemCount: this.itemCount,
             sortAsc: this.sortAsc,
-            dirHint: this.dirHint,
             rowCount: this.rowCount,
             resumeHint: this.resumeHint,
             cur: this.cur,
