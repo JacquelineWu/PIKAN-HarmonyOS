@@ -118,7 +118,7 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   loupeInFrame, loupeEligibleOf, LOUPE_PANE_NONE, LOUPE_PANE_LEFT,
   LOUPE_PANE_RIGHT, LOUPE_CM_14, loupePaneActiveOf, loupePaneAfterHover,
   loupeResetOnModeChange, loupeHoverAfterModeChange,
-  LOUPE_DEFAULT_ENABLED, loupeEnabledAfterRightPress,
+  LOUPE_DEFAULT_ENABLED, loupeEnabledAfterLeftClick,
   loupeVisibleOf, ESC_ACT_NONE, ESC_ACT_EXIT_FULL, ESC_ACT_QUIT_APP,
   shouldCaptureWindowRect, shouldRestoreWindowRect,
   escActionByState, shouldArmSystemEcho, shouldCaptureRectAll,
@@ -223,6 +223,15 @@ import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COP
   fcItemsOf, fcMenuHeightOf, fcMenuPosOf, fcMenuTitleOf, fcMenuVisibleOf,
   FC_MENU_W, FC_MENU_ITEM_H, FC_MENU_TITLE_H, FC_MENU_PAD_V,
   FcMenuItem, FcMenuPos } from '../common/FileContextMenu';
+// 第七十六轮：预览区「相片右键菜单 / EXIF 图标 / EXIF 资料框 / 预览模式」唯一真值源。
+// 与左栏 FileContextMenu 两套菜单互不影响：本套只在预览区相片上右键触发，恒三项。
+import { PM_ACT_EXIF, PM_EXIF_LABEL, PM_EXIF_MARGIN_VP, PM_EXIF_EMPTY,
+  PM_MENU_W, PM_MENU_ITEM_H, PM_MENU_TITLE_H, PM_MENU_PAD_V,
+  PM_MODE_AUTO, PmMenuItem, PmMenuPos, PmExifField,
+  pmItemsOf, pmHasActOf, pmModeAfterAct, pmSpreadWantedOf,
+  pmExifBadgeVisibleOf, pmPhotoReadyOf, pmExifPanelTitleOf, pmExifEmptyOf,
+  pmRightHitOf, pmMenuHeightOf, pmMenuPosOf, pmMenuVisibleOf,
+  pmMenuTitleOf, pmStatusOf } from '../common/PictureMenu';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -232,7 +241,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R75';
+const ESC_BUILD_TAG: string = 'R76';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1273,6 +1282,22 @@ struct Index {
   @State ctxMenuName: string = '';
   @State ctxMenuItems: Array<FcMenuItem> = [];
   @State ctxMenuHover: string = '';
+  // ---- 第七十六轮：预览区相片右键菜单 / EXIF 图标 / 资料框 / 预览模式 ----
+  /** 相片右键菜单浮层：只在预览区相片上右键时置位，与左栏 ctxMenuOn 互不干扰。 */
+  @State pmMenuOn: boolean = false;
+  @State pmMenuX: number = 0;
+  @State pmMenuY: number = 0;
+  @State pmMenuName: string = '';
+  @State pmMenuItems: Array<PmMenuItem> = [];
+  @State pmMenuHover: string = '';
+  /** 当前相片是否确有 EXIF 段（字节级判据，来自 PreviewEntry.hasExif）。 */
+  @State viewHasExif: boolean = false;
+  @State viewExifFields: Array<PmExifField> = [];
+  /** 「显示exif资料框」动作的独立浮层。 */
+  @State exifPanelOn: boolean = false;
+  @State exifPanelTitle: string = '';
+  /** 自动 / 单张 / 并排三态；默认自动 = 既有竖图对开行为逐字不变。 */
+  @State previewMode: number = PM_MODE_AUTO;
   /** 真全屏：应用内三块栏 + 系统标题栏 / dock / 状态栏 / 导航栏全部不显示，画面只剩图片。
    *  2026-11-11 起 applyWindowFullScreen() 会调 window 最大化沉浸接口，详见该方法注释。 */
   @State fullscreen: boolean = false;
@@ -1472,6 +1497,9 @@ struct Index {
   private pressX: number = 0;
   private pressY: number = 0;
   private pressMoved: boolean = false;
+  /** 第七十六轮：右键 Press 时的窗口坐标，供 picture menu 浮层定位（根 Stack 与窗口同尺寸）。 */
+  private pressDX: number = 0;
+  private pressDY: number = 0;
 
   // ---- 上次浏览位置（preferences 持久化）----
   private prefs: preferences.Preferences | undefined = undefined;
@@ -4112,19 +4140,23 @@ struct Index {
     this.status = '缩放 ' + this.zoomPercentText();
   }
 
-  /** 鼠标按键（第七轮：取消左键放大；第十五轮：右键改为 toggle 放大镜）：
-   *  左键 = **不缩放**（单击只当作双击的第一下，视图保持原样）；
-   *  右键点击 = toggle 放大镜总开关（原「还原视图」按用户要求移除，复位仍走键盘 0 / F）；
-   *  双击 = 切换全屏，由 TapGesture(count: 2) 收口。
+  /** 鼠标按键（第七轮：取消左键放大；第七十六轮：右键不再触发放大镜，改由左键切换）：
+   *  · 左键单击（仅预览区相片上）= toggle 放大镜总开关：首次开、再点还原、可无限重复；
+   *  · 右键 Press（仅预览区相片上）= 触发 picture contact menu，绝不翻转放大镜；
+   *  · 双击 = 切换全屏，由 TapGesture(count: 2) 收口，视图缩放仍恒不动。
    *  用「按下→抬起位移」区分点击与拖拽：拖拽是平移手势，不应顺带触发点击语义。 */
   private onMouseButton(event: MouseEvent): void {
     if (event.action === MouseAction.Press) {
       this.pressBtn = event.button;
       this.pressX = event.x;
       this.pressY = event.y;
+      this.pressDX = Number(event.displayX ?? event.x);
+      this.pressDY = Number(event.displayY ?? event.y);
       this.pressMoved = false;
-      // 右键别让系统弹菜单
       if (event.button === MouseButton.Right) {
+        // 第七十六轮：右键不再 toggle 放大镜；改由本通道在相片上弹 picture contact menu。
+        // 仍 stopPropagation：不弹系统右键菜单，也不冒泡到根容器触发别的行为。
+        this.openPictureMenu(this.pressDX, this.pressDY);
         event.stopPropagation();
       }
       return;
@@ -4145,26 +4177,27 @@ struct Index {
         return; // 拖拽平移，不算点击
       }
       if (btn === MouseButton.Right) {
-        // 第十五轮：右键点击 = toggle 放大镜总开关（原「还原视图」按用户要求移除）。
-        // 仍位于 !moved 判定之后：右键拖拽是平移手势，不得顺带翻转开关。
-        this.applyLoupeToggle(true);
+        // 第七十六轮：菜单已在 Press 打开，Release 只清按键态，右键彻底不触发放大镜。
         return;
       }
       if (btn !== MouseButton.Left) {
         return;
       }
-      // 第七轮：左键单击不再放大（用户要求「取消左 click 放大功能，仅保留双击进入全屏」）。
-      // 只把「无待撤销放大」的状态写清楚：双击的 TapGesture 随后收口切全屏，
+      // 第七十六轮：仅预览区相片上左键 = toggle 放大镜（空态 / 文本预览 / 左栏一律不触发）。
+      if (pmPhotoReadyOf(this.viewPixelMap !== undefined, this.textMode)) {
+        this.applyLoupeToggle(true);
+      }
+      // 左键单击仍不缩放：双击的 TapGesture 随后收口切全屏，
       // 双击第一下不会改变视图，onDoubleTapCanvas / undoLastClickZoom 也无需回退任何缩放。
       this.clickSnapZoom = -1;
       this.clickSnapAt = Date.now();
     }
   }
 
-  /** 第十五轮：右键 toggle 放大镜总开关（纯函数驱动，预设关闭）。
-   *  非右键事件一律保持原状；只在真正翻转时写 @State，避免每次 Move 触发无效刷新。 */
-  private applyLoupeToggle(rightClick: boolean): void {
-    const next: boolean = loupeEnabledAfterRightPress(this.loupeEnabled, rightClick);
+  /** 第七十六轮：预览区相片上左键 toggle 放大镜总开关（纯函数驱动，预设关闭）。
+   *  非左键事件一律保持原状；只在真正翻转时写 @State，避免每次 Move 触发无效刷新。 */
+  private applyLoupeToggle(leftClick: boolean): void {
+    const next: boolean = loupeEnabledAfterLeftClick(this.loupeEnabled, leftClick);
     if (next !== this.loupeEnabled) {
       this.loupeEnabled = next;
       // 第十六轮：关闭时立刻释放专用高清图源（不占内存）；开启时若鼠标已在某页上，
@@ -5497,6 +5530,12 @@ struct Index {
     this.viewHdrWanted = false;
     this.hdrCode = 0;
     this.hdrHint = '';
+    // 第七十六轮：换图立即清掉上一张的 EXIF 徽标 / 资料框 / 相片菜单，杜绝错张残留。
+    // 预览模式是用户显式选择的视图偏好，跨图保持，不在这里归零。
+    this.viewHasExif = false;
+    this.viewExifFields = [];
+    this.exifPanelOn = false;
+    this.pmMenuOn = false;
     // 只读名单态：不解码，也不让 viewFailed 变 true —— 否则 previewImage 会画
     // Image(uri) 交给系统对死 uri 反复重试。画面留中灰，由预览区指引卡接管。
     if (!bulkIoAllowed(this.restoreMode)) {
@@ -5555,6 +5594,9 @@ struct Index {
     // 第七十一轮：解码链给出的 HDR 保真结果与明确提示直接落到 UI。
     this.hdrCode = e.hdrCode;
     this.hdrHint = e.hdrHint;
+    // 第七十六轮：EXIF 图标显隐与资料框字段唯一取自 PreviewEntry 的字节级判据。
+    this.viewHasExif = e.hasExif;
+    this.viewExifFields = e.exifFields;
   }
 
   /** 这张图按当前画布 / zoom 实际需要解到多少（长边）。
@@ -6262,7 +6304,11 @@ struct Index {
     const self: string = this.items[this.cur].uri;
     const hasNext: boolean = (this.cur + 1) < this.items.length;
     const sz: Size2 = this.leftImageSize(self, seq);
-    if (!spreadRightWantedOf(sz.w, sz.h, hasNext, SPREAD_PORTRAIT)) {
+    // 第七十六轮：自动模式原样沿用 R56 判据（零回归）；单张强制关右页；
+    // 并排只要有下一张就强制开右页（尺寸未知也能并排），三者由纯函数统一收口。
+    const wanted: boolean = pmSpreadWantedOf(this.previewMode, hasNext,
+      spreadRightWantedOf(sz.w, sz.h, hasNext, SPREAD_PORTRAIT));
+    if (!wanted) {
       this.spreadB = -1;
       this.clearRightPage();
       return;
@@ -7936,16 +7982,9 @@ struct Index {
    *  y 是相对根 Stack 的坐标。 */
   private onRootMouse(event: MouseEvent): void {
     this.markUserActive();   // 第六十四轮：鼠标一动就不算空闲（零 IO、零状态写入量）
-    // 第十五轮：右键 toggle 放大镜（非预览区的兜底，左栏 / 空白处也能切换）。
-    // 预览区右键 Press 已被 onMouseButton 的 stopPropagation 拦下，只由它自己的
-    // Release 分支翻转一次；根容器只认 Press，故两处不会重复翻转。
-    if (event.action === MouseAction.Press) {
-      // 第七十三轮：应用内菜单打开时，右键不再顺带翻转放大镜（收起由浮层遮罩统一处理）。
-      // 只做门控，不改任何既有状态；左键 / 预览区 / 空白区右键 toggle 逐字保留。
-      if (!(this.ctxMenuOn && event.button === MouseButton.Right)) {
-        this.applyLoupeToggle(event.button === MouseButton.Right);
-      }
-    }
+    // 第七十六轮：放大镜改由【预览区相片上左键】切换，根容器不再有任何 toggle 兜底 ——
+    // 左栏档案行 / 按钮 / 空白区 / 右键一律不翻转。左栏档案行与预览区的右键 Press
+    // 都已各自 stopPropagation，两套应用内菜单互不干扰；这里只保留顶栏滞回与空闲计时。
     if (!this.fullscreen && event.action === MouseAction.Move) {
       const yTop: number = Number(event.y);
       if (yTop === yTop) {
@@ -8994,7 +9033,7 @@ struct Index {
                 .fontSize(13)
                 .fontColor('#5a6272')
                 .margin({ top: 12 })
-              Text('双击进入全屏 · 右键放大镜 · 拖拽平移')
+              Text('双击进入全屏 · 左键放大镜 · 右键相片菜单 · 拖拽平移')
                 .fontSize(11)
                 .fontColor('#454c5a')
                 .margin({ top: 6 })
@@ -9118,6 +9157,34 @@ struct Index {
             .borderRadius(HB_RADIUS_VP)
             .position({ x: hbLeftOf(HB_MARGIN_VP),
               y: hbTopOf(this.fullscreen, HB_MARGIN_VP, HB_HINT_H_VP, HB_HINT_GAP_VP) })
+            .hitTestBehavior(HitTestMode.Transparent)
+          }
+
+          // 第七十六轮：仅【含有 EXIF 资料】的相片在预览区右上角叠加 EXIF 图标。
+          // 与左上角 HDR 徽标同一套自带对比度底板，深浅背景恒清晰；整层铺满但不占布局，
+          // HitTestMode.Transparent 让滚轮切图 / 拖拽 / 左键放大镜 / 右键相片菜单 /
+          // 双击全屏全部穿透。显隐严格取 viewHasExif（字节级 EXIF 段判据），
+          // 无 EXIF 相片 / 空态 / 文本预览一律不画。
+          if (pmExifBadgeVisibleOf(this.viewHasExif,
+            this.viewPixelMap !== undefined, this.textMode)) {
+            Column() {
+              Row() {
+                Text(PM_EXIF_LABEL)
+                  .fontSize(HB_FONT_VP)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(HB_FG_COLOR)
+              }
+              .padding({ left: HB_PAD_H_VP, right: HB_PAD_H_VP,
+                top: HB_PAD_V_VP, bottom: HB_PAD_V_VP })
+              .backgroundColor(HB_BG_COLOR)
+              .border({ width: HB_BORDER_VP, color: HB_BORDER_COLOR })
+              .borderRadius(HB_RADIUS_VP)
+            }
+            .width('100%')
+            .height('100%')
+            .justifyContent(FlexAlign.Start)
+            .alignItems(HorizontalAlign.End)
+            .padding({ top: PM_EXIF_MARGIN_VP, right: PM_EXIF_MARGIN_VP })
             .hitTestBehavior(HitTestMode.Transparent)
           }
 
@@ -9305,7 +9372,7 @@ struct Index {
           // 约定：向上滚（负值）＝ 上一张；若实机方向相反，把下面的 v < 0 改成 v > 0
           this.onWheel(v < 0 ? -1 : 1);
         })
-        // 左键不放大（第七轮）/ 右键 toggle 放大镜（第十五轮）/ 双击切换全屏
+        // 第七十六轮：预览区相片上左键 toggle 放大镜 / 右键弹 picture menu / 双击切换全屏
         .onMouse((event: MouseEvent) => {
           this.onMouseButton(event);
         })
@@ -9555,6 +9622,128 @@ struct Index {
         .height('100%')
         .position({ x: 0, y: 0 })
         .zIndex(21)
+      }
+
+      // 第七十六轮：预览区「相片右键菜单」浮层。只由预览区相片上右键 Press 上抛窗口坐标，
+      // 与左栏 R72–R75 五项菜单完全独立；恒三项、顺序固定、共用同一套几何真值源。
+      // zIndex 21 与左栏菜单同级（两者不会同时打开）；点遮罩 / 点任一菜单项即收。
+      if (pmMenuVisibleOf(this.pmMenuOn, this.pmMenuItems.length)) {
+        Stack({ alignContent: Alignment.TopStart }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .onClick(() => {
+              this.pmMenuOn = false;
+              this.pmMenuHover = '';
+            })
+          Column() {
+            Text(this.pmMenuName)
+              .fontSize(11)
+              .fontColor('#8b95a8')
+              .width('100%')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .height(PM_MENU_TITLE_H)
+              .padding({ left: 12, right: 12 })
+            ForEach(this.pmMenuItems, (it: PmMenuItem) => {
+              Row() {
+                Text(it.label)
+                  .fontSize(13)
+                  .fontColor('#e8ecf4')
+              }
+              .width('100%')
+              .height(PM_MENU_ITEM_H)
+              .padding({ left: 12, right: 12 })
+              .backgroundColor(this.pmMenuHover === it.act ? '#333b4a' : '#00000000')
+              .borderRadius(4)
+              .onHover((on: boolean) => {
+                this.pmMenuHover = on ? it.act : '';
+              })
+              .onClick(() => {
+                const act: string = it.act;
+                this.pmMenuOn = false;
+                this.pmMenuHover = '';
+                this.onPictureMenuAction(act);
+              })
+            }, (it: PmMenuItem) => it.act)
+          }
+          .width(PM_MENU_W)
+          .padding({ top: PM_MENU_PAD_V, bottom: PM_MENU_PAD_V })
+          .backgroundColor('#262b35')
+          .border({ width: 1, color: '#3a4150' })
+          .borderRadius(8)
+          .position({ x: this.pmMenuX, y: this.pmMenuY })
+        }
+        .width('100%')
+        .height('100%')
+        .position({ x: 0, y: 0 })
+        .zIndex(21)
+      }
+
+      // 第七十六轮：第一项「显示exif资料框」动作的独立浮层（zIndex 22 高于两套菜单）。
+      // 纯显示层：字段来自 PreviewEntry.exifFields，无字段时给出明确兜底文案，不开天窗。
+      if (this.exifPanelOn) {
+        Stack({ alignContent: Alignment.Center }) {
+          Column()
+            .width('100%')
+            .height('100%')
+            .backgroundColor('#99000000')
+            .onClick(() => {
+              this.exifPanelOn = false;
+            })
+          Column() {
+            Text(this.exifPanelTitle)
+              .fontSize(15)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#e8ecf4')
+              .width('100%')
+              .margin({ bottom: 12 })
+            if (pmExifEmptyOf(this.viewExifFields.length)) {
+              Text(PM_EXIF_EMPTY)
+                .fontSize(12)
+                .fontColor('#8b95a8')
+                .width('100%')
+            } else {
+              ForEach(this.viewExifFields, (f: PmExifField) => {
+                Row() {
+                  Text(f.label)
+                    .fontSize(12)
+                    .fontColor('#8b95a8')
+                    .width(84)
+                  Text(f.value)
+                    .fontSize(12)
+                    .fontColor('#dfe5ef')
+                    .layoutWeight(1)
+                    .maxLines(2)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                }
+                .width('100%')
+                .padding({ top: 5, bottom: 5 })
+              }, (f: PmExifField) => f.label)
+            }
+            Button('关闭')
+              .type(ButtonType.Normal)
+              .fontSize(12)
+              .fontColor('#e8ecf4')
+              .backgroundColor('#2a2f3a')
+              .borderRadius(6)
+              .height(30)
+              .width('100%')
+              .margin({ top: 14 })
+              .onClick(() => {
+                this.exifPanelOn = false;
+              })
+          }
+          .width(460)
+          .padding(20)
+          .backgroundColor('#1c212a')
+          .border({ width: 1, color: '#3a4150' })
+          .borderRadius(10)
+        }
+        .width('100%')
+        .height('100%')
+        .position({ x: 0, y: 0 })
+        .zIndex(22)
       }
     }
     .width('100%')
@@ -10609,5 +10798,52 @@ struct Index {
             hilog.warn(DOMAIN, TAG, 'fcReveal both failed: dir=%{public}s', dirUri);
           });
       });
+  }
+
+  /** 第七十六轮：预览区相片上右键 Press → 打开 picture contact menu 浮层。
+   *  只负责「显示」：命中判定 / 三项快照 / 把鼠标窗口坐标裁进可视区；
+   *  三项真实行为全部收口到 onPictureMenuAction。
+   *  与左栏 onFileContextMenu 完全独立：两套菜单的状态、坐标、项、动作互不改写。 */
+  private openPictureMenu(x: number, y: number): void {
+    this.markUserActive();
+    // 空态（没有图）/ 文本预览 / 只读指引卡一律不弹，绝不越界。
+    if (!pmRightHitOf(this.viewPixelMap !== undefined, this.textMode)) {
+      return;
+    }
+    const items: Array<PmMenuItem> = pmItemsOf();
+    const h: number = pmMenuHeightOf(items.length);
+    const pos: PmMenuPos = pmMenuPosOf(x, y, this.lastRootW, this.lastRootH,
+      PM_MENU_W, h);
+    const it: ImageItem | undefined = this.curItem();
+    this.pmMenuName = pmMenuTitleOf(it !== undefined ? it.name : '');
+    this.pmMenuItems = items;
+    this.pmMenuX = pos.x;
+    this.pmMenuY = pos.y;
+    this.pmMenuHover = '';
+    this.pmMenuOn = true;
+  }
+
+  /** 第七十六轮：picture contact menu 三项动作。
+   *  · 第一项「显示exif资料框」：只写标题 + 开关，字段取当前相片 viewExifFields；
+   *  · 第二项「单张预览」：强制单页（强制关右页）；
+   *  · 第三项「左右并排预览」：有下一张即强制并排，覆盖自动竖图判据；
+   *  越权动作由 pmHasActOf 拒绝；每个动作都有状态栏明确反馈，绝不静默吞掉。 */
+  private onPictureMenuAction(act: string): void {
+    this.markUserActive();
+    if (!pmHasActOf(act)) {
+      return;
+    }
+    const it: ImageItem | undefined = this.curItem();
+    const name: string = it !== undefined ? it.name : '';
+    const mode: number = pmModeAfterAct(this.previewMode, act);
+    this.previewMode = mode;
+    if (act === PM_ACT_EXIF) {
+      this.exifPanelTitle = pmExifPanelTitleOf(name);
+      this.exifPanelOn = true;
+    } else {
+      // 单张 / 并排都要求立刻重算右页；自动模式（未选时）沿用既有竖图对开，零回归。
+      this.refreshSpread();
+    }
+    this.status = pmStatusOf(act, name, mode, ESC_BUILD_TAG);
   }
 }

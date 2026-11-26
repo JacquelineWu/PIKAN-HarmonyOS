@@ -239,10 +239,20 @@ export function loupeHoverAfterModeChange(wasHover: boolean,
 export const LOUPE_DEFAULT_ENABLED: boolean = false;
 
 /** 右键 toggle 后的总开关：仅「右键点击」翻转一次；
- *  左键 / 抬起 / 移动 / 悬停 / 拖拽一律保持原状，不误触、不重复翻转。 */
+ *  左键 / 抬起 / 移动 / 悬停 / 拖拽一律保持原状，不误触、不重复翻转。
+ *  第七十六轮起 Index 不再用右键触发放大镜，本函数保留供第十五轮历史回归断言。 */
 export function loupeEnabledAfterRightPress(wasEnabled: boolean,
   rightPress: boolean): boolean {
   return rightPress ? !wasEnabled : wasEnabled;
+}
+
+/** 第七十六轮：放大镜改由【预览区相片上左键单击】切换 ——
+ *  首次左键开启、开启态再次左键还原为原始显示、可无限重复切换。
+ *  右键 / 抬起 / 移动 / 悬停 / 拖拽 / 左栏点选档案一律保持原状。
+ *  纯条件翻转，只依赖入参，零 SDK / 零 IO / 零全局可变状态。 */
+export function loupeEnabledAfterLeftClick(wasEnabled: boolean,
+  leftClick: boolean): boolean {
+  return leftClick ? !wasEnabled : wasEnabled;
 }
 
 /** 放大镜最终是否绘制：总开关 + 双页独立激活 + 悬停 + 该页有图，四者缺一不可。

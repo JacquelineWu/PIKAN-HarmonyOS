@@ -45,6 +45,10 @@ import { HpProbe, HpDecodeSize,
   HP_COLORSPACE_PRESERVE, HP_HDR_UNVERIFIED, HP_SIZE_CAPPED,
   hpProbeOf, hpRequestOf, hpOutcomeOf, hpDecodeSizeOf, hpFailCodeOf,
   hpColorSpacePreservedOf, hpShowHintOf, hpHintOf } from '../common/HdrPreview';
+// 第七十六轮：EXIF 段字节级判据 / 字段标签 / 值归一的纯函数真值源（零 SDK / 零 IO）。
+// 只有确认含 EXIF 段才发 SDK getImageProperty 跨进程调用，避免给每张图都加元数据往返。
+import { PmExifField, PM_EXIF_LABELS, PM_EXIF_UNKNOWN,
+  pmExifPresentOf, pmExifFieldOf, pmExifFieldWantedOf } from '../common/PictureMenu';
 
 // hilog 域（原 pages/Index.ets 顶部同值迁入；Index.ets 反向 import 本定义）。
 export const TAG = 'HeicViewer';
@@ -135,6 +139,10 @@ export interface PreviewEntry {
   hdrCode: number;
   /** 界面要显示的明确提示（正常态为空串）。 */
   hdrHint: string;
+  /** 第七十六轮：源图头部是否确有 EXIF 段（字节级判据，右上角图标的唯一真值）。 */
+  hasExif: boolean;
+  /** 第七十六轮：EXIF 资料框字段；无 EXIF 段 / 字段读不到时为空数组。 */
+  exifFields: Array<PmExifField>;
 }
 
 // ---- 第七十一轮：解码失败原因（uri 粒度，供界面给明确提示） ----
@@ -183,6 +191,41 @@ async function readExifTransform(src: image.ImageSource, uri: string): Promise<E
   }
   EXIF_CACHE.set(uri, t);
   return t;
+}
+
+/** 第七十六轮：EXIF 资料框字段。
+ *  · 只有字节级判定确有 EXIF 段才逐个读 SDK 属性，普通相片零新增跨进程调用；
+ *  · 每个字段独立 try/catch：某机型不支持某个 PropertyKey 不影响其它字段与解码主流程；
+ *  · 值归一的真值源在 common/PictureMenu.ts，本函数只负责「异步读 + 过滤无效行」。 */
+async function readExifFields(src: image.ImageSource, hasExif: boolean): Promise<Array<PmExifField>> {
+  const none: Array<PmExifField> = [];
+  if (!hasExif) {
+    return none;
+  }
+  const keys: Array<image.PropertyKey> = [
+    image.PropertyKey.DATE_TIME_ORIGINAL,
+    image.PropertyKey.EXPOSURE_TIME,
+    image.PropertyKey.F_NUMBER,
+    image.PropertyKey.ISO_SPEED_RATINGS,
+    image.PropertyKey.FOCAL_LENGTH,
+    image.PropertyKey.MAKE,
+    image.PropertyKey.MODEL,
+    image.PropertyKey.WHITE_BALANCE
+  ];
+  const out: Array<PmExifField> = [];
+  for (let i = 0; i < keys.length && i < PM_EXIF_LABELS.length; i++) {
+    let raw: string = '';
+    try {
+      raw = await src.getImageProperty(keys[i]);
+    } catch (e) {
+      raw = '';
+    }
+    const f: PmExifField = pmExifFieldOf(PM_EXIF_LABELS[i], raw);
+    if (f.value !== PM_EXIF_UNKNOWN && pmExifFieldWantedOf(f)) {
+      out.push(f);
+    }
+  }
+  return out;
 }
 
 // --------------------------------------------------------------------
@@ -586,12 +629,15 @@ async function decodeAstroPx(uri: string, edge: number): Promise<PreviewEntry | 
     };
     // rgba 由 aiRgbaOf / astroRgbaOf 用 new Uint8Array(sz.w*sz.h*4) 生成，.buffer 长度正好。
     const px: image.PixelMap = await image.createPixelMap(rgba.buffer, opts);
+    // 第七十六轮：FITS / XISF 是自解析的天文图，没有 EXIF 段 → 图标恒不显示、资料框恒空。
+    const noExifFields: Array<PmExifField> = [];
     const entry: PreviewEntry = {
       uri: uri, px: px, bytes: sz.w * sz.h * 4,
       w: sz.w, h: sz.h, edge: edge,
       colorSpace: 0, isHdr: false, exifDegrees: 0,
       srcW: sz.w, srcH: sz.h, isHdrDecoded: false,
-      hdrCode: HP_OK_SDR, hdrHint: ''
+      hdrCode: HP_OK_SDR, hdrHint: '',
+      hasExif: false, exifFields: noExifFields
     };
     return entry;
   } catch (e) {
@@ -609,6 +655,9 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
   let bytesReadable: boolean = false;
+  // 第七十六轮：EXIF 段存在与否只在拿到完整原始字节时判定；fd 兜底路径没有字节可验，
+  // 一律按「无 EXIF」处理（图标不显示），绝不因为缓存未命中而误标相片。
+  let exifSeg: boolean = false;
   // 第七十一轮：容器层探测只在拿到完整原始字节时做；fd 兜底路径没有字节可验，
   // 保持按扩展名分流，绝不把非 HEIC 文件误判成损坏。
   let probe: HpProbe = hpProbeOf(uri, new Uint8Array(0));
@@ -616,7 +665,9 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
     const raw: ArrayBuffer | undefined = await rawStore.ensure(uri);
     bytesReadable = raw !== undefined;
     if (raw !== undefined) {
+      // 第七十一轮容器预检逐字保留（new Uint8Array(raw) 形态不变）；EXIF 段另取同一批字节。
       probe = hpProbeOf(uri, new Uint8Array(raw));
+      exifSeg = pmExifPresentOf(new Uint8Array(raw));
       src = image.createImageSource(raw);
     } else {
       // 第二十七轮：fd 兜底路径也改 await fs.open（同 RawStore.read 的真异步口径）。
@@ -650,6 +701,8 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
     if (EXIF_AUTO_ROTATE) {
       exif = await readExifTransform(src, uri);
     }
+    // 第七十六轮：只有字节级确认含 EXIF 段才读资料框字段；无 EXIF 相片零新增 SDK 调用。
+    const exifFields: Array<PmExifField> = await readExifFields(src, exifSeg);
 
     const opts: image.DecodingOptions = { desiredSize: { width: dw, height: dh } };
     if (EXIF_AUTO_ROTATE && exif.degrees !== 0 && EXIF_ROTATE_AT_DECODE) {
@@ -714,7 +767,8 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
       w: shown.w, h: shown.h, edge: edge,
       colorSpace: cs, isHdr: info.isHdr === true, exifDegrees: exif.degrees,
       srcW: w, srcH: h, isHdrDecoded: isHdrDecoded,
-      hdrCode: outcome, hdrHint: hint
+      hdrCode: outcome, hdrHint: hint,
+      hasExif: exifSeg, exifFields: exifFields
     };
     return entry;
   } catch (e) {

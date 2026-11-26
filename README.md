@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R75`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R76`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -564,15 +564,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R72（档案列表右键菜单：原生文案五项 / 仅档案项触发 / 详情面板 / 打开所在目录 / 复制 / 放大镜零回归）、
 > R73（右键菜单真机不弹出修复：改走 .onMouse 通道 / 应用内浮层 / 零系统手势依赖）、
 > R74（「打开档案所在目录」改走 OS 自带文件管理器 / 目标恒为目录 / 文件与目录两类生效）、
-> R75（移除名称右侧向上箭头符号列 / REVEAL 目录改以 browseBase 为真值）
+> R75（移除名称右侧向上箭头符号列 / REVEAL 目录改以 browseBase 为真值）、
+> R76（间距 5mm / 放大镜改相片上左键 / 仅含 EXIF 相片右上角 EXIF 图标 / 相片右键三项菜单）
 > 见下方十七个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R75`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R75` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R76`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R76` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R75 新增断言顺延，以 `grep -n 真机步骤 R75 tests/dirname.test.mjs` 为准：9775–9789）
+  （行号随 R76 新增断言顺延，以 `grep -n 真机步骤 R76 tests/dirname.test.mjs` 为准：10031–10044）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -612,6 +613,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R73 | 右键菜单真机不弹出修复（.onMouse 驱动 / 应用内浮层 / 零系统手势） | 9463–9475 |
 | R74 | 所在目录改走 OS 文件管理器 / 目标恒为目录 / 文件与目录两类生效 | 9626–9638 |
 | R75 | 仅移除向上箭头符号列 / REVEAL 目录改以 browseBase 为真值 | 9775–9789 |
+| R76 | 间距 5mm / 左键放大镜 / EXIF 图标 / 相片右键三项菜单 / 单张·并排模式 | 10030–10044 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1873,6 +1875,106 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十六轮：间距 5mm / 放大镜改相片上左键 / 仅含 EXIF 相片右上角图标 / 相片右键三项菜单（2026-11-26，R76）
+
+> 用户要求（原文）：「请在现有界面中完成以下调整，并保持未提及的布局与交互不变：
+> 1. 将档案名栏与档案大小栏之间的间距设为5mm，将文件夹名栏与内容数目栏之间的间距也设为5mm，两处间距保持一致。
+> 2. 取消放大镜原有的 right click 触发，改为仅由 left click 切换：首次 left click 开启放大镜，在开启状态下再次 left click 还原为原始显示状态，并可在两种状态间重复切换。
+> 3. 仅对含有exif资料的相片，在其右上角显示exif图标；不含exif资料的相片不显示该图标。在相片上方 right click 时触发 picture contact menu。
+> 4. picture contact menu 的菜单前三项按顺序固定为：第一项「显示exif资料框」，第二项「单张预览」，第三项「左右并排预览」；选择各项时分别显示exif资料框、进入单张预览、进入左右并排预览。
+> 完成后确认间距、触发方式、图标显示条件、菜单触发位置及选项顺序均符合要求。」
+
+> 方向澄清（`AskUserQuestion` 四项，用户全部选推荐项）：
+> · **预览区相片上** —— 新 picture contact menu 在预览区相片上右键触发，EXIF 图标叠加在预览区右上角；左栏 R72–R75 五项右键菜单完全不动。
+> · **仅预览区相片上** —— 放大镜 left click 仅预览区相片上触发；点左栏档案 / 按钮 / 空白区不触发，避免选图误开。
+> · **5vp** —— 沿用 README「关于 1mm」与 R69 口径 `1mm ↔ 1vp`（ArkUI 只有 vp，没有 mm），故 `5mm = 5vp`。
+> · **就三项 + 模式覆盖** —— 菜单恰好三项、顺序固定；「单张预览」强制单页，「左右并排预览」有下一张即强制并排；不选时保持 R56 既有自动竖图对开行为。
+
+### 一、现状判读（按真实源码，不凭缓存推断）
+
+- **间距**：`ArchiveRow.build()` 在 `!collapsed` 分支里画两个 66vp 列 —— 文件夹行 `countText`（内容数目）、非目录行 `fmtBytes(this.bytes)`（档案大小），名称列 `layoutWeight(1)` 弹性吸收，日期列 `.margin({ left: 6 })` 靠右固定 88vp。两处原本都没有间距常量，靠名称列的剩余弹性自然顶开，无法保证两处相等。
+- **放大镜**：R15 起由 `onMouseButton()` 的右键 Release + `onRootMouse()` 的 Press 兜底，经 `loupeEnabledAfterRightPress()` 翻转 `loupeEnabled`。两处都在 `Index.ets`，空态提示也写着「右键放大镜」。
+- **EXIF**：`PreviewEntry` 只有 HDR / 色彩 / `exifDegrees`，没有「是否含 EXIF 段」的真值；`decodePx()` 已通过 `rawStore.ensure()` 拿到完整原始字节（R71 容器预检同款），可零新增 IO 做字节级 EXIF 段判定。SDK `image.PropertyKey` 有 `DATE_TIME_ORIGINAL / EXPOSURE_TIME / F_NUMBER / ISO_SPEED_RATINGS / FOCAL_LENGTH / MAKE / MODEL / WHITE_BALANCE`。
+- **并排**：`refreshSpread()` 只走 `spreadRightWantedOf(左图比例)`（R56），没有用户可切换的模式态。
+- **两套菜单**：左栏 `FileContextMenu.ts`（五项）由 `SidebarView.ets` 的 ListItem `.onMouse` 右键 Press 上抛 `displayX/displayY`，`Index.ets` 用 `zIndex(21)` 画应用内浮层（R73）。新菜单必须完全独立，不能复用其状态或动作码。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/RowGap.ts`（新） | 间距唯一真值源：`ROW_GAP_MM=5` / `MM_TO_VP=1` / `ROW_GAP_VP=5`，外加 `rowGapVpOf` 脏值兜底、`rowGapSameOf` 一致性判据、`rowGapValidOf` 上限护栏。零 SDK / 零 IO / 零异步 |
+| `components/ArchiveRow.ets` | import `ROW_GAP_VP`；两个 66vp 列各加一处 `.margin({ left: ROW_GAP_VP })`（文件夹名↔内容数目 / 档案名↔档案大小），共用同一常量天然相等；名称列 `layoutWeight(1)` 少吸收 5vp，66 / 88 列与日期列右边缘逐字不变；三栏顺序 / 字段 / 数据展示 / 点击 / 双击 / hover / 条纹零改动 |
+| `common/InteractionPlan.ts` | 新增纯函数 `loupeEnabledAfterLeftClick(wasEnabled, leftClick)`；R15 的 `loupeEnabledAfterRightPress` 原样保留供第十五轮历史回归断言，但 `Index.ets` 不再 import / 调用 |
+| `pages/Index.ets` | `ESC_BUILD_TAG` → `R76`；`onMouseButton()` 右键 Press 改弹相片菜单、右键 Release 只清按键态、左键 Release 经 `pmPhotoReadyOf` 门控后调 `applyLoupeToggle(true)`；`applyLoupeToggle()` 改走左键纯函数；`onRootMouse()` 整个 Press toggle 兜底删除；空态提示改「左键放大镜 · 右键相片菜单」；新增 8 个 `@State`（相片菜单 / EXIF 徽标 / 资料框 / `previewMode`）；`showPreviewOf()` 换图清零、`setViewMeta()` 落地 EXIF；右上角 EXIF 徽标、`zIndex(21)` 相片菜单浮层、`zIndex(22)` EXIF 资料框；`openPictureMenu()` / `onPictureMenuAction()` 两个新方法；`refreshSpread()` 接 `pmSpreadWantedOf()` 模式覆盖 |
+| `common/PictureMenu.ts`（新） | 相片菜单唯一真值源：三项动作码 / 文案 / 顺序判据 / 越权拒绝、EXIF 图标显隐 / 段字节判据 / 值归一 / 字段标签 / 资料框兜底、三项预览模式与 `pmSpreadWantedOf()`、菜单浮层几何与状态文案、`pmRightHitOf` / `pmPhotoReadyOf` 命中判定。零 SDK / 零 IO / 零异步 / 零 throw |
+| `model/Preview.ets` | `PreviewEntry` 新增 `hasExif: boolean` + `exifFields: Array<PmExifField>`；`decodePx()` 在已有原始字节上做 `pmExifPresentOf()` 字节级判据，只在确有 EXIF 段时经 `readExifFields()` 异步读 8 个 `image.PropertyKey`；天文图 `decodeAstroPx()` 恒 `hasExif:false` / 空字段；R71 容器预检 `hpProbeOf(uri, new Uint8Array(raw))` 逐字不动 |
+| `tests/dirname.test.mjs` | 构建标记 41 处整批升位 `R75 → R76`；订正 R15 ② 源码断言、9 处旧右键 toggle 回归护栏、3 处 R73 门控断言、空态文案断言；新增 R76 组 26 条断言与真机步骤 `R76-A~F`（`10030–10044`） |
+| `README.md` / 记忆 | 抬头 / 手册 / 步骤表升位 `R76`，新增本章，追加当日与长期记忆 |
+
+### 三、设计要点
+
+- **两处间距恒等**：两个分支共用 `ROW_GAP_VP` 一个常量，测试用 `rowGapSameOf()` 与源码计数（恰好 2 处 `.margin({ left: ROW_GAP_VP })`）双重锁定；不新增 padding / offset / Blank / Spacer，不改任何列宽与日期列 6vp。
+- **右键彻底不触发放大镜**：`onMouseButton()` 的右键 Release 分支只 `return`；根容器 `onRootMouse()` 不再有任何 `applyLoupeToggle`；左键只在 `pmPhotoReadyOf(有上屏图 && !textMode)` 为真时翻转，且仍在 `!moved`（拖拽不算点击）之后。纯函数 `loupeEnabledAfterLeftClick` 是「条件翻转」，`false→true→false→true` 可无限重复。
+- **EXIF 图标只认字节级真值**：`pmExifPresentOf()` 对 JPEG APP1 `'Exif\0\0'`、HEIC/HEIF `'Exif'` item type、PNG `'eXIf'` chunk 做头窗口扫描；`pmExifBadgeVisibleOf(hasExif, hasImage, textMode)` 三个参数全部 `=== true/false` 显式判等，无 EXIF / 空态 / 文本预览 / 天文图一律不画。fd 兜底路径没有字节可验时保守判「无 EXIF」，绝不误标。
+- **两套菜单零耦合**：左栏 `FileContextMenu` 五项、`startAbility` 两级 Want、REVEAL / 复制 / 详情逐字不动；新菜单用独立 `pmMenuOn / pmMenuX/Y / pmMenuItems / pmMenuHover`，动作码前缀 `pm*` 与左栏 `fc*` 完全隔离，`pmHasActOf()` 拒绝越权动作。触发走预览区 `.onMouse` 右键 Press + `stopPropagation`，与 R73 同一条已真机验证过的通道，零系统手势依赖。
+- **模式覆盖而非重写并排**：`pmSpreadWantedOf(PM_MODE_AUTO, hasNext, autoWanted)` 原样回传 `spreadRightWantedOf()` 的结果；`PM_MODE_SINGLE` 恒 false；`PM_MODE_SPREAD` 只要有下一张即 true（尺寸未知也能并排）。`refreshSpread()` 里 `spreadRightWantedOf(sz.w, sz.h, hasNext, SPREAD_PORTRAIT)` 调用形态逐字保留。
+- **EXIF 资料框不开天窗**：8 个 SDK 属性逐字段 try/catch，无效值（`Unknown…` / `none` / `null` / `0/0` / `--`）过滤，有效值去空白并按 48 字截断；一个字段都没有时显示 `PM_EXIF_EMPTY` 兜底文案。只有字节级确认含 EXIF 段才发跨进程 `getImageProperty`，普通相片零新增 SDK 往返。
+
+### 四、验证用例（用户要求的五项确认）
+
+| 确认项 | 结论 | 证据 |
+| --- | --- | --- |
+| **间距** | ✅ 档案名↔档案大小、文件夹名↔内容数目均为 `5mm = 5vp`，两处一致 | `ROW_GAP_VP=5`；`rowGapSameOf(5,5)=true`；ArchiveRow 去注释后两处 `.margin({ left: ROW_GAP_VP })`；三栏列宽 / 日期列 6vp / 交互零回归 |
+| **触发方式** | ✅ 取消右键，仅相片上左键切换，可反复开/还原 | `loupeEnabledAfterLeftClick` 序列 `false→true→false→true`；右键 Release 分支与根容器零 `applyLoupeToggle`；左键经 `pmPhotoReadyOf` 门控且在 `!moved` 之后；空态提示已改 |
+| **图标显示条件** | ✅ 仅含 EXIF 资料的相片右上角显示，其余不显示 | JPEG APP1 / PNG eXIf / HEIC Exif 命中，裸 JPEG / 空 / 短数据不命中；`pmExifBadgeVisibleOf` 四组边界；天文图 / 文本 / 空态恒 false；徽标 `HorizontalAlign.End` + 12vp + `HitTestMode.Transparent` |
+| **菜单触发位置** | ✅ 相片上方右键触发，左栏五项菜单互不影响 | `pmRightHitOf` 命中判定；`openPictureMenu` 由预览区右键 Press 上抛 `displayX/displayY`；`pmMenuPosOf` 右下越界内翻；`zIndex(21)` 独立浮层；`fcItemCountOf=5` 与两级 Want 零回归 |
+| **选项顺序** | ✅ 恰好三项且顺序固定，三项动作各自落地 | `pmItemsOf()` 恒 3 项、`pmFirstThreeOrderedOf` 为真、标签逐字为「显示exif资料框 / 单张预览 / 左右并排预览」；EXIF 资料框 / 单张 / 并排各自有状态栏反馈；`pmModeAfterAct` + `pmSpreadWantedOf` 覆盖自动 / 单页 / 并排 |
+| 回归检查 | ✅ R70–R75 全部零回归 | 左栏五项菜单、两级 `startAbility`、HDR 徽标、3 处 `dynamicRangeMode`、R71 HDR 保真、并排右页、ESC、版本 `1.0.7 / 7` |
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2303 passed, 0 failed`**（R75 基线 2277，新增 26 条） |
+| 独立零回归脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**；`git diff --check` 通过 |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 1 min 6 s 727 ms`**；`Finished :entry:default@CompileArkTS... after 35 s 982 ms`（**非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（与 R69–R75 一致）；日志 `/tmp/r76-build-final.log` |
+| 产物 | 签名 HAP **1,755,610 B** / 未签名 **1,724,181 B** / `ets/modules.abc` **1,015,176 B**（R75 分别为 1,697,101 / 1,657,681 / 971,284 B） |
+| 字节码 | `modules.abc`：**`R76=1 / R75=0 / R74=0 / R73=0 / R72=0 / R71=0 / 1.0.7=1`**；`ROW_GAP_VP=2`、`PictureMenu=7`、`loupeEnabledAfterLeftClick=2`、`pmExifBadgeVisibleOf=2`、`pmItemsOf=2`、`pmRightHitOf=2`、`pmSpreadWantedOf=2`、`hasExif=1`、`exifFields=1`、`getImageProperty=1`；三项中文文案各 1；`openPictureMenu=2` / `onPictureMenuAction=2` / `exifPanelOn=4` / `viewHasExif=4` / `previewMode=4`；`startAbility=1`、`com.huawei.hmos.filemanager=1`、`ohos.want.action.viewData=1`、`general.directory=1`、`fileUri=1` 证明 R74 两级 Want 原样保留；`hbVisibleOf=2` 证明 R70 HDR 徽标零回归 |
+| 文档一致性 | `/tmp/check_r76_steps.mjs`：测试 R76 步骤块 **15 行** / README **15 行**，逐字差异 **0** |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志 / 旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 `R76-A~F`）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:10030` R76 组）
+
+>   ⚠️ 本组是源码静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+>   ⚠️ 真机步骤 R76-A：装新包后 Ctrl+D 角标必须是 R76（R75-A 里的 R75 是历史锚点，以本条为准）；
+>      左栏档案名↔档案大小、文件夹名↔内容数目两处间距目测一致，均为 5mm 口径；
+>      三栏顺序 / 字段 / 对齐 / 条纹 / 点击 / 双击 / hover 缩略图全部零回归。
+>   ⚠️ 真机步骤 R76-B：预览区相片上【左键单击】首次开放大镜、再点还原、可反复切换；
+>      右键、左栏档案 / 按钮 / 空白区一律不再翻转放大镜；拖拽 / 滚轮 / 双击全屏照常。
+>   ⚠️ 真机步骤 R76-C：含 EXIF 的 JPG / HEIC 右上角出现「EXIF」图标，无 EXIF 相片 /
+>      FITS·XISF / 文本预览 / 空态一律不出现；图标不遮挡主体、滚轮与点击全部穿透。
+>   ⚠️ 真机步骤 R76-D：相片上方【右键】弹出 picture contact menu，恰好三项且顺序为
+>      显示exif资料框 / 单张预览 / 左右并排预览；左栏五项右键菜单在同一张图上互不干扰；
+>      菜单右下越界内翻、点遮罩 / 点项即收，定位与 R73 浮层一致。
+>   ⚠️ 真机步骤 R76-E：点第一项显示 EXIF 资料框（字段可读 / 无字段有兜底文案 / 可关闭）；
+>      点第二项强制单页、点第三项有下一张即左右并排；不选时保留既有竖图自动对开。
+>   ⚠️ 真机步骤 R76-F：HEIC HDR 徽标 / R71 HDR 保真 / 并排右页 / ESC / 版本 1.0.7·7 /
+>      左栏 REVEAL 两级 Want / 复制 / 详情面板 / 诊断角标全部零回归。
+
+### 七、边界
+
+- **编译校验 ≠ 真机验证**：静态契约 2303 全绿、真编译成功、字节码有 `R76` 标记，只能证明代码 / 产物接线；证明不了真机上右键是否按预期弹浮层、EXIF 图标视觉位置是否恰好右上角、SDK `getImageProperty` 在各类 HEIC/JPG 上是否真能读到字段、5vp 在实机 DPI 下的观感是否等于 5mm。
+- **`5mm = 5vp` 是项目口径而非物理毫米**：ArkUI 只有 vp 没有 mm，README「关于 1mm」与 R69 已锁定 `1mm ↔ 1vp`；不同屏幕密度下物理尺寸会变，但两处间距仍严格一致。
+- **EXIF 图标是「含 EXIF 段」判据**：`pmExifPresentOf` 是文件头字节级扫描，不是「SDK 是否读到某个字段」。含段但字段全读不到时，图标仍显示，资料框给出兜底文案；无段则图标恒不显示。HEIC 的 ASCII 特征扫描以头 256KB 为窗口，属保守近似，真机如遇特殊容器需回传样本。
+- **右击与两套菜单互斥**：左栏菜单浮层打开时会盖住预览区，需先点遮罩收起再在相片上右键；这是 R73 应用内浮层的既有机制，本轮未改。EXIF 资料框 `zIndex(22)` 高于两套菜单。
+- **第十五轮历史纯函数保留**：`loupeEnabledAfterRightPress` 仍导出、仍被第十五轮 ① 历史断言覆盖，但 `Index.ets` 与字节码中的调用链已完全改到 `loupeEnabledAfterLeftClick`；历史步骤里「右键放大镜」按「逐字取自测试」原则不改写，R76 起以 `R76-B` 为准。
+- **版本恒定 `1.0.7 / versionCode 7`**，未跑 `build.sh`、未把 HAP 放桌面、**本轮未 push**（用户未授权；R71–R75 五个本地提交仍未 push）。
 
 ---
 

@@ -16,6 +16,8 @@ import { upReturnBgOf, upReturnFgOf } from '../common/UpReturn';
 // 第七十五轮：名称右侧的向上箭头符号列整体移除，其专属配置 / 纯函数 / 引用一并清理。
 // 第六十四轮：目录行「内容量」四态文案的兜底常量（零 SDK / 零 IO 的真值源）。
 import { DC_LABEL_PENDING } from '../common/DirCount';
+// 第七十六轮：名称栏 → 大小 / 内容数目栏的间距真值源（5mm ↔ 5vp），两个分支共用同一常量。
+import { ROW_GAP_VP } from '../common/RowGap';
 import { HoverGuard } from '../common/HoverGuard';
 import { decodePx, PreviewEntry, TAG, DOMAIN } from '../model/Preview';
 
@@ -35,7 +37,8 @@ export const ROW_TEXT: number = 4;
  *  第六十九轮（R69）：项目沿用「1mm ↔ 1vp」的视觉口径（见 README「关于 1mm」），
  *  故「上下留白各减 0.8mm」= padding top/bottom 各减 0.8vp：1 → 0.2，
  *  整行 28vp → 26.4vp（−1.6vp = −1.6mm）；文字载体 .height(26) 完全不动。
- *  第七十五轮：名称右侧的向上箭头符号列整体移除，.height(26) 载体由该列原值迁入名称列（数值仍 26）。 */
+ *  第七十五轮：名称右侧的向上箭头符号列整体移除，.height(26) 载体由该列原值迁入名称列（数值仍 26）。
+ *  第七十六轮：名称栏与大小 / 内容数目栏之间统一 5mm（项目 1mm↔1vp 口径 = 5vp）。 */
 const ROW_STRIPE_EVEN: string = '#1e242e';
 const ROW_STRIPE_ODD: string = '#161a21';
 const ROW_SELECTED_BG: string = '#1f2730';
@@ -405,6 +408,11 @@ export struct ArchiveRow {
       // 第六十四轮：目录行在既有「字节」列位改画内容量统计结果 —— 同字号 10 /
       // 同颜色 / 同宽 66 / 同右对齐，不新增列、不改行高、不改三栏起始位置。
       // 非目录行（图片 / 文本 / 灰行 / 上层）的 fmtBytes 链路逐字保留，交互零回归。
+      // 第七十六轮：名称栏与「档案大小」栏、「文件夹名」栏与「内容数目」栏之间
+      // 各加 5mm（= ROW_GAP_VP = 5vp）间距，两处共用同一常量保证严格一致；
+      // 只在 !collapsed 的这两个 66vp 列上加 .margin({ left: ROW_GAP_VP })：
+      // 名称列 layoutWeight(1) 弹性少吸收 5vp，66vp 列与日期列的右边缘位置逐字不变，
+      // 日期列既有 .margin({ left: 6 })、字段、数据展示、点击 / 双击 / hover / 条纹全部不变。
       if (!this.collapsed) {
         if (this.kind === ROW_FOLDER) {
           Text(this.countText.length > 0 ? this.countText : DC_LABEL_PENDING)
@@ -415,6 +423,7 @@ export struct ArchiveRow {
             .width(66)
             .textAlign(TextAlign.End)
             .maxLines(1)
+            .margin({ left: ROW_GAP_VP })   // R76：文件夹名栏 ↔ 内容数目栏 5mm
         } else {
           Text(fmtBytes(this.bytes))
             .fontSize(10)
@@ -422,6 +431,7 @@ export struct ArchiveRow {
             .width(66)
             .textAlign(TextAlign.End)
             .maxLines(1)
+            .margin({ left: ROW_GAP_VP })   // R76：档案名栏 ↔ 档案大小栏 5mm
         }
         Text(this.mtime > 0 ? fmtDate(this.mtime) : '--')
           .fontSize(10)
