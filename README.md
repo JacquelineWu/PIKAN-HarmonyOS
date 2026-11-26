@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R74`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R75`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -563,15 +563,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R71（HEIC HDR 保真解码与预览：显式 HDR 档 / 产物 isHdr 校验 / 原始尺寸·色彩·亮度保真 / 三类异常明确提示）、
 > R72（档案列表右键菜单：原生文案五项 / 仅档案项触发 / 详情面板 / 打开所在目录 / 复制 / 放大镜零回归）、
 > R73（右键菜单真机不弹出修复：改走 .onMouse 通道 / 应用内浮层 / 零系统手势依赖）、
-> R74（「打开档案所在目录」改走 OS 自带文件管理器 / 目标恒为目录 / 文件与目录两类生效）
-> 见下方十六个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R74（「打开档案所在目录」改走 OS 自带文件管理器 / 目标恒为目录 / 文件与目录两类生效）、
+> R75（移除名称右侧向上箭头符号列 / REVEAL 目录改以 browseBase 为真值）
+> 见下方十七个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R74`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R74` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R75`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R75` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R74 新增断言顺延，以 `grep -n 真机步骤 R74 tests/dirname.test.mjs` 为准：9626–9638）
+  （行号随 R75 新增断言顺延，以 `grep -n 真机步骤 R75 tests/dirname.test.mjs` 为准：9775–9789）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -610,6 +611,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R72 | 档案列表右键菜单（原生文案五项 / 仅档案项 / 详情 / 所在目录 / 复制 / 放大镜零回归） | 9312–9322 |
 | R73 | 右键菜单真机不弹出修复（.onMouse 驱动 / 应用内浮层 / 零系统手势） | 9463–9475 |
 | R74 | 所在目录改走 OS 文件管理器 / 目标恒为目录 / 文件与目录两类生效 | 9626–9638 |
+| R75 | 仅移除向上箭头符号列 / REVEAL 目录改以 browseBase 为真值 | 9775–9789 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1871,6 +1873,88 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十五轮：移除档案列表向上箭头符号列 + 「打开档案所在目录」改以 `browseBase` 为真值（2026-11-26，R75）
+
+> 用户要求（原文）：「请同时处理以下两项，并保持改动范围最小化。1. 修改档案列表：仅移除带向上箭头图标的那个 column，确保改动仅对该列生效；其余列的顺序、字段、数据展示和现有交互完全不变，不波及其他列及列表整体行为。同步清理仅与该列相关的配置、引用及残留逻辑。2. 修复右键 context menu 中『档案所在目录』的打开结果：当前会输出错误目录且未显示应有的档案列表；修复后应指向当前选中档案所在目录，并正确展示该目录下的档案列表，不影响其他菜单项与既有交互。」
+> 方向澄清（选项反馈）：**「保留 OS 文件管理器，只修目录」** —— 不回退 R74、不重新引入 APP 内 `openFolder / onRowTap`。
+
+### 一、现状判读（按真实源码，不凭缓存推断）
+
+- **任务 1**：`ArchiveRow.build()` 里名称右侧的 `Text(folderGlyphOf(this.kind, ROW_UP))` 就是带 `↑` 的那一列：只有 `ROW_UP` 行经 `common/FolderGlyph.ts` 的纯函数拿到 `↑`，其余行为空串 / 列宽归零。该列还**独占** `.height(26)` 行高锚点与 `.textAlign(TextAlign.Center)`；`private iconColor()` 也只被它的 `.fontColor()` 使用。整列删除会塌行高，故必须把 `.height(26)` **原值**迁到 `Text(this.name)`。
+- **任务 2 根因**：R74 的 `fcRevealDirUriOf` 对文件行优先 `fcParentUriOf(r.uri)`（剥文件名）。但 `Index.openFolder()` 用 `const child = raw.indexOf('/') >= 0 ? raw : joinBase + '/' + raw;` 拼出的是**列举用** URI，而 `browseBase` 才是「本次真实列举成功 / 缓存命中 / 上层清单态回填」的当前目录（`this.browseBase = base;` / `= hit.path;` / `= target;`，`setItems()` 清空）。NAS 挂载前缀、picker 逐 URI 授权链、APP 内清单态下二者**并不等价** —— 剥出来的父段是列举用路径，系统文件管理器打开后自然不是用户当前看到的那份档案列表。
+- **不改的部分**：`Index.ets` 的 REVEAL 分支接线、`openDirInSystemFileManager()` 两级 Want、菜单五项文案、其余四项动作、右键触发链、详情面板、放大镜门控逐字保留。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `components/ArchiveRow.ets` | **仅删**带 `↑` 的符号列 `Text`；把 `.height(26)` 原值迁到 `Text(this.name)`；删该列专属 import 与专用配色方法；补注释说明。名称 / 字节 66 / 日期 88+6 三列的顺序、字段、数据展示与点击 / 双击 / hover / onMouse / bindPopup / 条纹逐字不变 |
+| `common/FolderGlyph.ts` | **整文件删除**：R61 引入的该列专属 4 常量 + 3 纯函数 + 配置，已无任何引用 |
+| `common/FileContextMenu.ts` | `fcRevealDirUriOf` 文件行改为**优先 `fcNormDirOf(browseBase)`**，为空才退回 `fcParentUriOf(itemUri)`；目录行仍返回自身；未命中行仍 `''`。函数注释与文件头追加 R75 根因。零 SDK / 零 IO / 零异步约束不变 |
+| `pages/Index.ets` | `ESC_BUILD_TAG` → `R75`；REVEAL 分支与文件头**注释**同步，**无任何功能代码行改动** |
+| `tests/dirname.test.mjs` | 构建标记 39 处整批升位 `R74 → R75`；改写绑定旧符号列的 R59 / R61 / R69 历史断言与 3 条 R74 目标算法断言；新增 R75 组 18 条断言与真机步骤 `R75-A~D`（`9775–9789`） |
+| `README.md` / 记忆 | 抬头 / 手册 / 步骤表升位 `R75`，新增本章，追加当日与长期记忆 |
+
+### 三、设计要点
+
+- **只删一列，行高不塌**：`.height(26)` 从被删列原值迁入名称列，build() 内恰好 1 处；名称列仍 `layoutWeight(1)` 弹性吸收原来的 18vp，字节 66 / 日期 88 靠右固定宽度不变，不新增任何 padding / margin / offset / Blank / Spacer。
+- **清理范围严格限定**：只删该列专属配置模块、import 与专用配色方法；`labelColor()` / `upReturnFgOf()` / `DirCount` / hover / 条纹等其它真值源与逻辑一个不动。
+- **`browseBase` 是唯一权威目录真值**：`r.uri` 只作为「`browseBase` 为空」时的兜底输入，目标恒为目录、绝不返回文件本身，也绝不返回拼接出来的列举用父段。
+- **不做 APP 内左栏展示**：用户明确选择「保留 OS 文件管理器，只修目录」，故 R74 的 `startAbility` 两级 Want 通道**原样保留**，只换目标目录 URI。
+
+### 四、验证用例
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2277 passed, 0 failed`**（R74 基线 2262）；`git diff --check` 通过 |
+| 独立零回归脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**（R71 HDR 真值源零回归） |
+| 正常用例 · 任务 1 | 符号列 / `↑` / `▣` / 专属配置 / import / 残留配色方法全清；名称是行首第一个子组件，其后直接是 `if (!this.collapsed)` 两栏；`.height(26)` 落在名称列且 build() 内恰好 1 处 |
+| 正常用例 · 任务 2 | 文件行（图片 / 文本 / 其它）目标 = `browseBase`，覆盖 `file://docs` / NAS 授权段 / 纯路径三类；目录行目标 = 自身；目标恒不以文件名结尾、恒不等于 `r.uri` 的父段 |
+| 边界用例 | `browseBase` 为空 → 剥文件名兜底；两者皆空 / 目录 URI 为空 → 明确结果；`..` 伪行 / 空白 / 未知 kind → `''` 短路 |
+| 回归检查 | 三列顺序 / 字段 / 宽度 / 对齐 / 行高 / 交互、菜单五项文案、其余四项动作、两级 Want、右键触发链、放大镜门控、版本 `1.0.7 / 7`、R71 HDR 保真全部零回归 |
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 17 s 194 ms`**；`Finished :entry:default@CompileArkTS... after 10 s 658 ms`（**非 UP-TO-DATE**，`UP-TO-DATE :entry:default@CompileArkTS` 计数 0）；**0 ERROR / 17 WARN**（与 R69–R74 一致）；日志 `/tmp/r75-build.log` |
+| 产物核验 | 签名 HAP **1,697,101 B**（R74 1,694,430 B）/ 未签名 **1,657,681 B** / `ets/modules.abc` **971,284 B**；产物 mtime **12:11:13–14** 晚于三份源码 **12:05:24 / 12:05:49 / 12:06:10**，即 HAP 由最终源码编译 |
+| 字节码 | `modules.abc`：**`R75=1 / R74=0 / R73=0 / R72=0 / R71=0 / 1.0.7=1`**；**`folderGlyphOf=0` / `FolderGlyph=0`** 证明符号列及其专属配置已从产物彻底消失；`fcRevealDirUriOf=2` / `browseBase=1`；`startAbility=1`、`com.huawei.hmos.filemanager=1`、`ohos.want.action.viewData=1`、`general.directory=1`、`fileUri=1` 证明 R74 两级 Want 通道原样保留 |
+| 文档一致性 | `/tmp/check_r75_steps.mjs`：测试 R75 步骤块 **15 行** / README **15 行**，逐字差异 **0** |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志 / 旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 `R75-A~D`）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:9775` R75 组）
+
+> ⚠️ 本组是源码静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+> ⚠️ 真机步骤 R75-A：装新包后 Ctrl+D 角标必须是 R75（R74-A 里的 R74 是历史锚点，以本条为准）；
+>     左栏任一档案行名称右侧不再出现向上箭头 / 方格，也不留 18vp 空白；
+>     名称 / 字节 / 日期三栏顺序、字段、对齐、行高 26vp、条纹、间距与 R74 完全一致。
+> ⚠️ 真机步骤 R75-B：右键任一【文件】→「打开档案所在目录」→ OS 自带文件管理器
+>     打开的是当前左栏正在展示的那个目录（hilog 里 dir= 与 browseBase 一致），
+>     该目录下的档案列表完整可见，不再是拼接出来的错误目录；状态栏反馈照常。
+> ⚠️ 真机步骤 R75-C：右键任一【子文件夹】→ OS 文件管理器打开该文件夹自身；
+>     NAS / 缓存秒开 / APP 内上层清单态各测一次文件行，目录都不能错。
+> ⚠️ 真机步骤 R75-D：菜单五项文案、打开 / 详情 / 复制路径 / 复制档案名称四项动作、
+>     放大镜 toggle、详情面板、菜单定位与收起、「..」行与空白区零菜单、
+>     点击 / 双击 / hover 缩略图 / 排序 / 目录切换 / 收起展开左栏全部零回归；
+>     HEIC/JPG/PNG / FITS·XISF / 文本预览 / 并排右页 / HDR 徽标 / R71 HDR 保真 /
+>     ESC / 版本 1.0.7/7 全部零回归。R59-C、R61-B 步骤里「向上箭头仍保留」是历史形态，
+>     R75 起以本组 R75-A 为准。
+
+### 七、边界
+
+- **「正确展示该目录下的档案列表」由 OS 文件管理器负责**：本轮只让 `dir=` 指向当前左栏展示清单的权威目录，不回退到 APP 内 `openFolder`。若本机文件管理器不接受该 URI 形态，R74-C 的 `hilog` 回传步骤继续有效（`fcReveal primary / fallback / both failed`）。
+- **编译校验 ≠ 真机验证**：静态契约 2277 全绿、真编译成功、字节码有 `R75` 标记，只能证明代码 / 产物接线，证明不了真机上系统文件管理器是否接受该目录 URI，也证明不了左栏视觉上确实没有残留空白。
+- **历史锚点订正**：R59-C / R61-B 真机步骤里「↑ 箭头仍保留」是当时形态，按「逐字取自测试」原则不改写历史块；R75 起以本组 `R75-A` 为准。
+- **改动范围**：`ArchiveRow.ets` 只动那一列及其行高载体；`FolderGlyph.ts` 整文件删除；`FileContextMenu.ts` 只改一个纯函数与注释；`Index.ets` 只改构建标记与注释；`SidebarView.ets` / `model/` / `module.json5` / `AppScope/app.json5` 全部零改动。
+- **版本恒定 `1.0.7 / versionCode 7`**，未跑 `build.sh`、未把 HAP 放桌面、**本轮未 push**（用户未授权；R71 `903e544`、R72 `e0223d5`、R73 `71a4b66`、R74 `2dfdb94` 仍在本地）。
+- 零新增定时器 / 全局可变状态 / worker；R71 HDR 保真、R70 徽标、R69 行高、R68 resize 画质、R67 放大镜、R64 内容量四态、三栏三按钮、文本预览 scrollbar、ESC 全部零回归。
 
 ---
 

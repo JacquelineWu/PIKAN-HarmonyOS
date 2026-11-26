@@ -36,6 +36,17 @@
  *  菜单文案 / 其余四项动作 / 详情面板 / 复制 / 浮层 / 放大镜抑制逐字不变。
  *  本文件仍严格零 SDK / 零 IO / 零异步：只产出目标 URI 与 Want 契约常量（纯字符串 /
  *  纯数值），真正的 startAbility 落在 Index。
+ *
+ *  第七十五轮（R75）真机修复：R74 文件行目标取「剥 r.uri 文件名后的父目录」，但本项目
+ *  r.uri 是 openFolder 用 joinBase + '/' + raw 拼出来的**列举用** URI，NAS 挂载前缀 /
+ *  缓存秒开 / APP 内上层清单态下与用户当前看到的目录并不等价，于是系统文件管理器被
+ *  指向错误目录、自然看不到应有的档案列表。R75 保留 R74 的 OS 文件管理器通道与两级
+ *  Want 兜底，只把文件行目标改为**权威 browseBase**：
+ *    · browseBase 是 openFolder 真实列举成功 / 缓存命中 / 上层清单态回填的当前目录，
+ *      即左栏正在展示的那份档案列表所在目录，也是系统文件管理器该打开的目录；
+ *    · browseBase 为空才退回 R74 的剥文件名兜底；两者皆空返回 ''；
+ *    · 目录行仍返回该行 URI 自身；未命中行仍返回 ''。
+ *  REVEAL 分支接线 / 菜单文案 / 其余四项动作 / 浮层 / 放大镜抑制逐字不变。
  */
 
 // --------------------------------------------------------------------
@@ -403,16 +414,21 @@ export const FC_DIR_UTD: string = 'general.directory';
 export const FC_URI_READ_FLAG: number = 0x00000001;
 
 /**
- * 目标目录 URI —— 本轮修复的核心：恒返回【目录】，绝不返回文件本身。
+ * 目标目录 URI —— R74 起恒返回【目录】；R75 起以 browseBase 为当前目录真值。
  *
  *   · 目录行（FC_KIND_FOLDER）→ 该行 URI 自身（打开该目录本身）；
- *   · 文件行（图片 / 文本 / 其它）→ 剥掉最后一段文件名后的父目录（所在目录）；
- *   · 剥不出父级（含 '..' 伪行 / 空白 / 未知 kind）→ 退回 browseBase；
- *   · 两者皆空 → 空串，Index 据此给出明确提示，绝不静默无反应。
+ *   · 文件行（图片 / 文本 / 其它）→ 优先 browseBase（当前左栏展示清单的权威目录）；
+ *     browseBase 为空才剥掉 itemUri 最后一段文件名作兜底；两者皆空返回 ''；
+ *   · 未命中行（含 '..' 伪行 / 空白 / 未知 kind）→ ''，调用方短路。
+ *
+ *  为什么 R75 不能继续优先剥 itemUri：Index.openFolder 用 joinBase + '/' + raw 拼子项 URI，
+ *  而 browseBase 是真实列举成功 / 缓存命中 / 上层清单态回填的当前目录；NAS 挂载前缀、
+ *  picker 授权链、APP 内清单态下二者并不等价。剥出来的父段是「列举用路径」而非用户
+ *  当前看到的目录，系统文件管理器打开后自然看不到应有的档案列表。
  *
  *  刻意**不用** parentDirOf(realPathOf(uri))：本项目 r.uri 是 picker 逐 URI 授权的
  *  `file://docs/...` / NAS `file://192.168.x/...` 形态，转成真实路径会丢掉授权段，
- *  系统文件管理器拿到裸路径反而打不开。这里在「URI 字符串」层直接剥文件名，
+ *  系统文件管理器拿到裸路径反而打不开。这里在「URI 字符串」层处理，
  *  保留原 scheme / authority / 百分号编码，交给系统应用时授权链完整。
  */
 export function fcRevealDirUriOf(kind: number, itemUri: string,
@@ -429,12 +445,17 @@ export function fcRevealDirUriOf(kind: number, itemUri: string,
     }
     return fcNormDirOf(browseBase);
   }
-  // 文件行：剥掉最后一段文件名，剩下的就是所在目录。
+  // 文件行：当前展示清单的权威目录优先 —— 它是系统文件管理器该打开的那一个。
+  const current: string = fcNormDirOf(browseBase);
+  if (current.length > 0) {
+    return current;
+  }
+  // browseBase 为空（图片列表态 / 恢复前）才退回 R74 的剥文件名兜底。
   const parent: string = fcParentUriOf(u);
   if (parent.length > 0) {
     return parent;
   }
-  return fcNormDirOf(browseBase);
+  return '';
 }
 
 /**

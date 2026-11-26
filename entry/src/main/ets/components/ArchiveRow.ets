@@ -13,8 +13,7 @@ import hilog from '@ohos.hilog';
 import { textWidthVp } from '../common/DirName';
 // 第五十九轮：往上层后「返回前所在子目录」反色显示，常态逐字返回原配色。
 import { upReturnBgOf, upReturnFgOf } from '../common/UpReturn';
-// 第六十一轮：名称右侧符号列按行种类决定内容与宽度的纯函数真值源（零 SDK / 零 IO）。
-import { FG_COL_W, folderGlyphOf, folderGlyphWidthOf } from '../common/FolderGlyph';
+// 第七十五轮：名称右侧的向上箭头符号列整体移除，其专属配置 / 纯函数 / 引用一并清理。
 // 第六十四轮：目录行「内容量」四态文案的兜底常量（零 SDK / 零 IO 的真值源）。
 import { DC_LABEL_PENDING } from '../common/DirCount';
 import { HoverGuard } from '../common/HoverGuard';
@@ -35,7 +34,8 @@ export const ROW_TEXT: number = 4;
  *  1vp 在 2in1 高密度屏上就是极细的一线缝；实机觉得宽/窄只改 LIST_ROW_GAP_VP 一个常量即可。
  *  第六十九轮（R69）：项目沿用「1mm ↔ 1vp」的视觉口径（见 README「关于 1mm」），
  *  故「上下留白各减 0.8mm」= padding top/bottom 各减 0.8vp：1 → 0.2，
- *  整行 28vp → 26.4vp（−1.6vp = −1.6mm）；文字载体 .height(26) 完全不动。 */
+ *  整行 28vp → 26.4vp（−1.6vp = −1.6mm）；文字载体 .height(26) 完全不动。
+ *  第七十五轮：名称右侧的向上箭头符号列整体移除，.height(26) 载体由该列原值迁入名称列（数值仍 26）。 */
 const ROW_STRIPE_EVEN: string = '#1e242e';
 const ROW_STRIPE_ODD: string = '#161a21';
 const ROW_SELECTED_BG: string = '#1f2730';
@@ -262,25 +262,8 @@ export struct ArchiveRow {
     this.hoverPx = undefined;
   }
 
-  /** Win64 bac9ff9：图片粉、目录粉蓝、不支持预览的文件灰；上级行用中性色 */
-  /** 行首类型标记的颜色（不是缩略图，只是 18vp 的小符号）。 */
-  private iconColor(): string {
-    if (this.inverted) {
-      return upReturnFgOf(true, '#8fb8e8');
-    }
-    if (this.kind === ROW_OTHER) {
-      return '#4b5260';
-    }
-    if (this.kind === ROW_IMAGE) {
-      return this.selected ? '#e8ecf4' : '#e2a8cf';
-    }
-    // 第三十七轮：文本 / 源码行用暖黄，与图片粉、目录蓝、灰行区分。
-    if (this.kind === ROW_TEXT) {
-      return this.selected ? '#e8ecf4' : '#d8c78a';
-    }
-    return '#8fb8e8';
-  }
-
+  /** 第七十五轮：名称右侧符号列已整体移除，只服务它的专用配色方法一并清理；
+   *  名称 / 字节 / 日期三列配色继续由 labelColor() 与 upReturnFgOf() 逐字保留。 */
   private labelColor(): string {
     if (this.inverted) {
       return upReturnFgOf(true, '#8fb8e8');
@@ -400,11 +383,12 @@ export struct ArchiveRow {
   build() {
     Row() {
       // 第五十九轮：名称文字统一紧贴列表最左边缘，List / Row / Text 三层 left padding 清零。
-      // 第六十一轮：名称右侧符号列改为按行种类决定内容与宽度 —— 目录类行不再显示
-      // 正方形方格，列宽归零（占位一并移除）；「往上层」↑ 与其余行逐字不变。
-      // 归零的 18vp 由上方名称文字的 layoutWeight(1) 弹性吸收，字节 66 / 日期 88
-      // 两列靠右固定宽度，三栏起始位置与下方 .height(26) 行高完全不变，
-      // 不新增任何空白或偏移；悬停缩略图仍只在 mouse over 整行时由 bindPopup 浮出。
+      // 第七十五轮：仅移除名称右侧那个带向上箭头的符号列（原符号 Text），
+      // 连带清理它专属的 import / 专用配色方法 / common 下的符号列配置模块。
+      // 原本由该列承担的 .height(26) 行高锚点**原值迁移到名称列**，行高 26vp 逐字不变；
+      // 名称列仍 layoutWeight(1) 弹性吸收，字节 66 / 日期 88 两列靠右固定宽度，
+      // 三栏顺序、字段、数据展示与起始位置完全不变，不新增任何空白 / padding / offset；
+      // 点击 / 双击 / hover / 条纹 / bindPopup 等既有交互逐字保留。
       Text(this.name)
         .fontSize(12)
         .fontColor(this.labelColor())
@@ -415,13 +399,7 @@ export struct ArchiveRow {
         // 极少数超过 LIST_MAX_W 的超长名才由 Ellipsis 截断。
         .constraintSize({ minWidth: textWidthVp(this.name, 12) })
         .layoutWeight(1)
-
-      Text(folderGlyphOf(this.kind, ROW_UP))
-        .fontSize(this.kind === ROW_IMAGE ? 14 : 18)
-        .fontColor(this.iconColor())
-        .width(folderGlyphWidthOf(this.kind, ROW_FOLDER, ROW_OTHER, FG_COL_W))
-        .height(26)   // 11-10 起压缩行高：42 → 26，配合下方 padding 把每行从 54vp 收到 30vp
-        .textAlign(TextAlign.Center)
+        .height(26)   // R75：行高锚点自被删的符号列原值迁入；11-10 起压缩行高 42 → 26
 
       // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
       // 第六十四轮：目录行在既有「字节」列位改画内容量统计结果 —— 同字号 10 /

@@ -1,5 +1,5 @@
 /**
- * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R74 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
+ * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R75 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
  *
  * 布局（ACDSee 风格）：
  *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
@@ -211,6 +211,8 @@ import { hpShowHintOf } from '../common/HdrPreview';
 // 第七十三轮：新增菜单浮层尺寸 / 定位 / 标题 / 显隐判定；触发层不再依赖系统右键手势。
 // 第七十四轮：「打开档案所在目录」改由 startAbility 拉起 OS 文件管理器打开【目录】，
 // 目标由 fcRevealDirUriOf 按行种类判定（文件→所在目录 / 目录→该目录自身）。
+// 第七十五轮：文件行目标改以 browseBase（当前左栏展示清单的权威目录）为准，
+// 不再优先剥 r.uri 文件名 —— 那是列举用拼接 URI，NAS / 缓存态会指向错误目录。
 import Want from '@ohos.app.ability.Want';
 import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COPY_NAME,
   fcHitOf, fcHasActOf, fcDetailFieldsOf, fcDetailTitleOf,
@@ -230,7 +232,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R74';
+const ESC_BUILD_TAG: string = 'R75';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -10486,9 +10488,12 @@ struct Index {
     }
     if (act === FC_ACT_REVEAL) {
       // 第七十四轮：交给 OS 自带文件管理器打开【目录】，不再走应用内 openFolder / onRowTap。
-      //   · 文件行 → 剥掉文件名后的所在目录；目录行 → 该目录自身；
-      //   · 目标恒为「目录」，绝不把文件本身作为打开目标；判不出退回 browseBase。
-      // 菜单文案 / 其余四项动作 / 浮层 / 放大镜抑制逐字不变。
+      // 第七十五轮：文件行目标改以 browseBase（当前左栏展示清单的权威目录）为准：
+      //   · 它是 openFolder 真实列举 / 缓存命中 / 上层清单态回填的目录 URI；
+      //   · 不再优先剥 r.uri 文件名 —— 那是列举用拼接 URI，NAS / 缓存态会指向错误目录；
+      //   · browseBase 为空才由纯函数退回剥文件名兜底；目录行仍是该目录自身；
+      //   · 目标恒为「目录」，绝不把文件本身作为打开目标。
+      // 菜单文案 / 其余四项动作 / 浮层 / 放大镜抑制 / 两级 Want 兜底逐字不变。
       const dirUri: string = fcRevealDirUriOf(kind, r.uri, this.browseBase);
       if (dirUri.length === 0) {
         this.status = fcRevealStatusOf(r.name, false, fcRevealIsDirOf(kind), ESC_BUILD_TAG);
@@ -10554,7 +10559,7 @@ struct Index {
    *  context 复用 quitApp() 已真机验证过的双通道：AppStorage('abilityContext') +
    *  getUIContext().getHostContext()，零新增全局状态、零新增 SDK import（Want 除外）。
    *  ⚠️ 系统应用是否存在、是否接受该 URI 形态属真机事实，编译 / 静态契约证明不了；
-   *     两级都失败会在状态栏明确提示，真机按 R74 步骤回传 hilog 即可继续定位。 */
+   *     两级都失败会在状态栏明确提示，真机按 R75 步骤回传 hilog 即可继续定位。 */
   private openDirInSystemFileManager(dirUri: string, name: string, isDir: boolean): void {
     let ability: common.UIAbilityContext | undefined =
       AppStorage.get<common.UIAbilityContext>('abilityContext');
