@@ -58,7 +58,7 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
   upContextBaseOf, upContextRawOf, pathChainOf, inAppUpListHint,
-  realPathOf, hierPathOf, textWidthVp, listWidthForNames,
+  realPathOf, hierPathOf,
   isStrictParentOf, sameEntryNames,
   isUpListPseudoName, mergeUpListNames, rootFormParentOf,
   isSameOrUnderLevelOf, restoreBrowseLevelOf, rawBrowseFormOf,
@@ -101,9 +101,12 @@ import { Size2, viewEdgeOf, preloadEdgeOf,
   isWideGamutOf, fullscreenStepsOf, spreadRightWantedOf,
   chromeSampleOf, canvasResizeAcceptOf } from '../common/ViewPlan';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
+  metaMergeOf, metasPaddedOf, metaChunkPaddedOf,
   packWindowRect, parseWindowRect, windowRectUsable,
   shouldSaveWindowRect, collapsedOf, windowModeFlagOf,
   shouldRestoreMaximized, shouldScheduleWindowRestore } from '../common/SessionState';
+// 第七十七轮：adaptive column width 的唯一真值源（内容长度 + 容器尺寸，零固定宽度）。
+import { AcLayout, acLayoutOf, acWidthSafeOf } from '../common/AdaptiveColumn';
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../common/DecodeCache';
 import { rawPrefetchWanted } from '../common/RawCache';
@@ -153,7 +156,8 @@ import { RESUME_REFRESH_GO, resumeRefreshAction, resumeSelectedIndex,
 //   · components/ArchiveRow.ets：ArchiveRow 行组件 + ThumbLoader 悬停缩略图 + ROW_* 行种类
 //   · model/Preview.ets：PreviewEntry / RawStore / decodePx 解码链 + hilog TAG/DOMAIN
 // 本文件只保留页面接线与业务逻辑，依赖方向单向（pages → components/model → common）。
-import { ArchiveRow, ROW_IMAGE, ROW_UP, ROW_FOLDER, ROW_OTHER, ROW_TEXT } from '../components/ArchiveRow';
+import { ArchiveRow, ROW_IMAGE, ROW_UP, ROW_FOLDER, ROW_OTHER, ROW_TEXT,
+  fmtBytes } from '../components/ArchiveRow';
 import { PreviewEntry, decodePx, rawStore, RAW_CACHE_MAX_COUNT, TAG, DOMAIN,
   yieldMacroTask } from '../model/Preview';
 // 第七十一轮：解码失败的明确原因（按 uri 粒度），单独一行 import 保持既有 import 逐字不变。
@@ -241,7 +245,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R76';
+const ESC_BUILD_TAG: string = 'R77';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -398,14 +402,13 @@ const LOUPE_RESAMPLE_MIN_GAIN: number = 96;
 // APP，补发标志不会被任何事件消费，反而把用户主动的第二次 ESC 误吞 →「第二次 ESC 无响应」。
 // 第十九轮定稿：escActionByState 严格只按 fullscreen 两态分派，不依赖任何时间窗 / 瞬时标志，
 // shouldArmSystemEcho 恒不置位，pendingSystemEcho 恒 false。
-/** 左栏宽度：展开 / 收起。
- *  LIST_W 是**下限**——刚好能让一行三个按钮（排序 / 往上层 / 选择文件夹）等宽并排且不重叠；
- *  LIST_MAX_W 是上限，避免个别超长档案名把右侧预览区压没。
- *  实际展开宽度由 listWidthForNames() 按当前列表最长名字在 [LIST_W, LIST_MAX_W] 内自适应。
- *  收起态仍固定 LIST_COLLAPSED_W（只留档案名一列），保持原有交互不变。 */
-const LIST_W: number = 280;
-const LIST_MAX_W: number = 900;
-const SPLIT_W: number = 14;
+/** 第七十七轮：左栏展开 / 收起宽度、三列宽度**全部改为 adaptive**。
+ *  · 已移除 LIST_W=280 / LIST_MAX_W=900 / LIST_COLLAPSED_W=224 /
+ *    listWidthForNames 固定开销 226 等一切预设 / 固定宽度限制；
+ *  · 展开宽 / 收起宽 / 大小列 / 日期列都由 common/AdaptiveColumn.ts 的
+ *    acLayoutOf(容器宽, 档案名内容, 大小列内容) 按「内容长度 + 容器尺寸」实时推出；
+ *  · 窗口 resize（根 Stack 的 onAreaChange）会重算一次，列宽随容器动态伸缩。 */
+const SPLIT_W: number = 14;   // 分隔条宽度（不是档案列表列宽）
 
 const MIN_SCALE: number = 0.05;
 const MAX_SCALE: number = 16.0;
@@ -1032,6 +1035,11 @@ const AUTO_SHOW_LAST_ON_START: boolean = true;
 /** 启动恢复推迟多久：必须 > WARM_DELAY_MS（300），让首帧渲染、窗口初始化和
  *  「上次那张」的单张预热都先完成，之后才轮到读快照 / 建列表。 */
 const RESUME_DELAY_MS: number = 900;
+/** 第七十七轮：冷启动探测误判授权失效后的「延迟自愈重探」延时。
+ *  DocumentsProvider / 目录持久授权常在首帧后几百毫秒才就绪，启动那一次
+ *  fs.openSync 失败不代表整批 uri 都打不开；错开这段时间再探一次即可，
+ *  不抢恢复关键路径，也不新增任何批量同步 IO。 */
+const RESTORE_HEAL_DELAY_MS: number = 1200;
 /** 恢复延迟的硬下限（resumeDelaySafe 校验用）：低于这个值一律拒绝调度，
  *  防止以后有人把 RESUME_DELAY_MS 调太小，把恢复又塞回启动关键路径。 */
 const RESUME_MIN_SAFE_MS: number = 600;
@@ -1196,8 +1204,11 @@ struct Index {
   @State titlePath: string = '';
   /** 左栏收起态（Ctrl+B / « 按钮）。收起后只留档案名一列，抬头与三个按钮仍保留。 */
   @State listCollapsed: boolean = false;
-  /** 左栏展开宽度：按当前列表最长档案名自适应（见 listWidthForNames）。 */
-  @State listW: number = LIST_W;
+  /** 第七十七轮：adaptive 布局的四个动态量，全部由 acLayoutOf 推出，无预设固定宽度。 */
+  @State listW: number = acLayoutOf(0, ['选择文件夹'], ['12.34 MB']).sidebarW;
+  @State collapsedW: number = acLayoutOf(0, ['选择文件夹'], ['12.34 MB']).collapsedW;
+  @State colSizeW: number = acLayoutOf(0, ['选择文件夹'], ['12.34 MB']).sizeW;
+  @State colDateW: number = acLayoutOf(0, ['选择文件夹'], ['12.34 MB']).dateW;
   /** 左栏排序方向：true = 升序（自然序） */
   @State sortAsc: boolean = true;
   /** 「当前路径是否仍有父级」——只作状态栏文案、诊断串与 browseUp 的行为判据。
@@ -1290,7 +1301,8 @@ struct Index {
   @State pmMenuName: string = '';
   @State pmMenuItems: Array<PmMenuItem> = [];
   @State pmMenuHover: string = '';
-  /** 当前相片是否确有 EXIF 段（字节级判据，来自 PreviewEntry.hasExif）。 */
+  /** 第七十七轮：当前相片是否确有【有效 EXIF 数据】
+   *  （= pmExifEffectiveOf(exifFields)，来自 PreviewEntry.hasExif；与资料框同源）。 */
   @State viewHasExif: boolean = false;
   @State viewExifFields: Array<PmExifField> = [];
   /** 「显示exif资料框」动作的独立浮层。 */
@@ -1415,6 +1427,8 @@ struct Index {
    *  bootRefreshHandled 保证重启只刷一次；Timer / Retry 覆盖恢复链 3s 收口窗口。 */
   private bootRefreshHandled: boolean = false;
   private bootRefreshTimer: number = -1;
+  /** 第七十七轮：只读名单态延迟自愈重探的定时器（页面销毁时一并清掉）。 */
+  private restoreHealTimer: number = -1;
   private bootRefreshRetry: number = 0;
   // ---- 第二十二轮：按键到达可观测（零按键到达是本轮要解决的唯一断点）----
   /** 任意键（不只 ESC）进入 onKey() 的累计次数。常显在右下角角标：
@@ -1916,6 +1930,10 @@ struct Index {
     if (this.bootRefreshTimer !== -1) {
       clearTimeout(this.bootRefreshTimer); // 第五十七轮：页面销毁后不许再排冷启动补刷
       this.bootRefreshTimer = -1;
+    }
+    if (this.restoreHealTimer !== -1) {
+      clearTimeout(this.restoreHealTimer); // 第七十七轮：页面销毁后不许再自愈重探
+      this.restoreHealTimer = -1;
     }
     this.clearEnterWatchdog(); // 页面已销毁，超时也不该再弹选择文件夹
     this.giveUpDone = true;    // 页面已销毁：warm 回调也不许再对死路径发起同步 IO
@@ -2461,8 +2479,32 @@ struct Index {
       this.showPreviewOf(this.cur);
       this.refreshSpread();
       this.schedulePreload();
+      // 第七十七轮：自愈成功后补齐逐条 size / mtime（此前 heal 漏了这一步，
+      // 导致恢复会话里左栏体积／日期一直靠快照旧值，新加的档案显示 '--'）。
+      this.fillSizes();
     }
-    this.status = '网络目录已恢复连接，图片可以预览了';
+    this.status = '目录授权已恢复，图片与档案资料可以正常预览了';
+  }
+
+  /** 第七十七轮：冷启动探测误判授权失效时，排一次延迟自愈重探。
+   *  R44/R45 的 warmRestoreDirQuiet 只对网络目录生效（isNetworkDirUri），
+   *  本地目录一旦被 probeRestoreUris 误判就整个会话锁死 READONLY —— 名单在、
+   *  图全白、缩略图不出、size/日期不补，正是「重新进入 / 重启后资料与预览图丢失」。
+   *  这里不依赖目录列举，直接错开启动期重探文件 uri（healRestoreMode 内部只
+   *  1 次 sync open，量级极小），通了就切 FULL 并补齐解码 / 预载 / 尺寸。 */
+  private scheduleRestoreHeal(): void {
+    if (this.restoreHealTimer !== -1) {
+      clearTimeout(this.restoreHealTimer);
+    }
+    this.restoreHealTimer = setTimeout(() => {
+      this.restoreHealTimer = -1;
+      if (this.restoreCancelled || !this.pageAlive || this.giveUpDone) {
+        return;
+      }
+      if (!bulkIoAllowed(this.restoreMode)) {
+        this.healRestoreMode();
+      }
+    }, RESTORE_HEAL_DELAY_MS);
   }
 
   /** activate 收口点：只跑一次，清掉超时定时器，然后照常进入恢复链。
@@ -2783,7 +2825,7 @@ struct Index {
     for (let r = 0; r < rows.length; r++) {
       rowNames.push(rows[r].name);
     }
-    this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
+    this.refreshAdaptiveLayout(rowNames);
     this.dataSource.reload(this.rows);
     // 第六十四轮：APP 内清单态同样接入目录内容量统计链（零 IO，只建 PENDING 条目）。
     this.syncDirCountTargets();
@@ -3090,6 +3132,8 @@ struct Index {
       if (!bulkIoAllowed(this.restoreMode)) {
         this.warmRestoreDirQuiet(this.browseBase).catch(() => {
         });
+        // 第七十七轮：本地目录也排一次延迟自愈（warm 只对网络目录生效）。
+        this.scheduleRestoreHeal();
       }
       // ⚠️ setItems → applyItems 末尾会 markPos() + snapDirty=true，500ms 后 flushPos
       //    会把「只有 1 张」的列表写进快照，覆盖掉上次会话的整批 uri；位置记忆也会被
@@ -3405,18 +3449,35 @@ struct Index {
   private async flushSnap(store: preferences.Preferences): Promise<void> {
     const cap: number = Math.min(this.items.length, SNAP_MAX);
     const chunks: number = Math.ceil(cap / SNAP_CHUNK);
+    // 第七十七轮：先把上一份快照的「uri → 有效元数据」读回来。只读名单态下
+    // fillSizes() 被 IO 闸门挡住，items[i].size 仍是 -1 / mtime 仍是 0；
+    // 以前会原样写回 -1,0 **覆盖掉上次的有效值**，重启后 size / 日期永远显示 '--'，
+    // 且 snapDirty 自我强化，之后每一轮重启都读不回来（用户反馈「重开后资料丢失」）。
+    // 现在按 uri 合并（换源 / 重排也不会张冠李戴）：新值有效用新值，未知则保留旧值。
+    const oldUris: Array<string> = await this.readSnapUris(store);
+    const oldMetas: Array<ArchiveMeta> = metasPaddedOf(oldUris.length,
+      await this.readSnapMeta(store, oldUris.length));
+    const oldByUri: Map<string, ArchiveMeta> = new Map();
+    for (let k = 0; k < oldUris.length; k++) {
+      oldByUri.set(oldUris[k], oldMetas[k]);
+    }
     for (let c: number = 0; c < chunks; c++) {
+      const start: number = c * SNAP_CHUNK;
       const end: number = Math.min((c + 1) * SNAP_CHUNK, cap);
       const part: Array<string> = [];
       // 2026-11-12：与 uri 行一一对应的「体积,修改时间」，重开后日期列不丢。
       // 单独一个 meta 块，不动既有 snap_N 的格式（老存档照样读得出来）。
       const metaPart: Array<ArchiveMeta> = [];
-      for (let i: number = c * SNAP_CHUNK; i < end; i++) {
-        part.push(this.items[i].uri);
-        metaPart.push({ size: this.items[i].size, mtime: this.items[i].mtime ?? 0 });
+      for (let i: number = start; i < end; i++) {
+        const it: ImageItem = this.items[i];
+        part.push(it.uri);
+        const prev: ArchiveMeta | undefined = oldByUri.get(it.uri);
+        metaPart.push(metaMergeOf(prev !== undefined ? prev.size : -1,
+          prev !== undefined ? prev.mtime : 0, it.size, it.mtime ?? 0));
       }
       await store.put(SNAP_KEY_PREFIX + c, part.join('\n'));
-      await store.put(META_KEY_PREFIX + c, encodeMeta(metaPart));
+      // 每块 meta 行数与 uri 行数严格相等（缺块补未知，绝不让后续块前移错位）。
+      await store.put(META_KEY_PREFIX + c, encodeMeta(metaChunkPaddedOf(end - start, metaPart)));
     }
     // 这次比上次块数少 → 清掉多出来的旧块，否则下次恢复会读到上一批的尾巴
     for (let c: number = chunks; c < this.snapChunks; c++) {
@@ -3471,16 +3532,25 @@ struct Index {
    *     不会触发 ro1 的「几百次同步跨进程调用」问题。 */
   private async readSnapMeta(store: preferences.Preferences,
     uriCount: number): Promise<Array<ArchiveMeta>> {
-    const chunks: number = Math.ceil(Math.min(uriCount, SNAP_MAX) / SNAP_CHUNK);
+    const cap: number = Math.min(uriCount, SNAP_MAX);
+    const chunks: number = Math.ceil(cap / SNAP_CHUNK);
     const out: Array<ArchiveMeta> = [];
     for (let c: number = 0; c < chunks; c++) {
+      // 第七十七轮：按块严格补齐到「本块 uri 行数」。旧存档缺 meta key / 某块
+      // 写盘失败时，以前直接跳过该块，后续块前移 ⇒ uri 与 size/日期张冠李戴，
+      // 尾部条目资料全丢。现在缺块按整块补未知，位置关系逐字不变。
+      const want: number = Math.min(SNAP_CHUNK, cap - c * SNAP_CHUNK);
+      if (want <= 0) {
+        break;
+      }
       const raw = await store.get(META_KEY_PREFIX + c, '');
       const part: Array<ArchiveMeta> = decodeMeta(typeof raw === 'string' ? raw : '');
-      for (let i: number = 0; i < part.length; i++) {
-        out.push(part[i]);
+      const padded: Array<ArchiveMeta> = metaChunkPaddedOf(want, part);
+      for (let i: number = 0; i < padded.length; i++) {
+        out.push(padded[i]);
       }
     }
-    return out;
+    return metasPaddedOf(cap, out);
   }
 
   /** 单张兜底也能拿到日期：只读第 0 块（最轻），按 uri 找对应元数据。 */
@@ -3549,6 +3619,8 @@ struct Index {
       if (!bulkIoAllowed(this.restoreMode)) {
         this.warmRestoreDirQuiet(this.browseBase).catch(() => {
         });
+        // 第七十七轮：本地目录也排一次延迟自愈（warm 只对网络目录生效）。
+        this.scheduleRestoreHeal();
       }
       this.snapDirty = false;         // 列表本来就是从快照来的，没必要再写回去
       this.status = this.status + '（来自上次会话）';
@@ -3769,6 +3841,26 @@ struct Index {
   }
 
   /** 用 fileIo 取体积；图库 URI 不一定可读，失败返回 -1 */
+  /** 第七十七轮：adaptive column width 的唯一收口点。
+   *  三列宽 / 左栏展开宽 / 收起宽全部由「内容长度（最长档案名 / 大小文案 / 日期格式）
+   *  + 容器尺寸（lastRootW）」实时推出，源码里不再有任何预设 / 固定宽度限制。
+   *  换源 / 恢复 / 往上层 / 窗口 resize 都走这里，所有行共用同一套动态值 ⇒ 三栏仍对齐。 */
+  private refreshAdaptiveLayout(rowNames: Array<string>): void {
+    const sizeTexts: Array<string> = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r: ImageItem = this.rows[i];
+      const kind: number = r.kind ?? ROW_IMAGE;
+      const isFolder: boolean = kind === ROW_FOLDER || kind === ROW_UP;
+      const label: string = i < this.dirCountLabels.length ? this.dirCountLabels[i] : '';
+      sizeTexts.push(isFolder ? (label.length > 0 ? label : '…') : fmtBytes(r.size));
+    }
+    const a: AcLayout = acLayoutOf(this.lastRootW, rowNames, sizeTexts);
+    this.listW = acWidthSafeOf(a.sidebarW, a.collapsedW);
+    this.collapsedW = acWidthSafeOf(a.collapsedW, a.sidebarW);
+    this.colSizeW = acWidthSafeOf(a.sizeW, a.dateW);
+    this.colDateW = acWidthSafeOf(a.dateW, a.sizeW);
+  }
+
   private trySize(uri: string): number {
     try {
       const st = fs.statSync(uri);
@@ -3813,6 +3905,9 @@ struct Index {
       this.rescanTimer = -1;
     }
     this.source = src;
+    // 第七十七轮：把 meta 规整到与 uris 等长，setItems 里 meta[i] 永不越界 →
+    // 重启后每一条档案的 size / 日期都能从快照完整恢复，不会只恢复前几条。
+    const aligned: Array<ArchiveMeta> = meta !== undefined ? metasPaddedOf(uris.length, meta) : [];
     const list: ImageItem[] = [];
     for (let i = 0; i < uris.length; i++) {
       const u: string = uris[i];
@@ -3824,7 +3919,7 @@ struct Index {
       // 否则 mtime 为 0 → 左栏日期列只有 '--'（用户反馈「重开后日期丢失」）。
       // 只读名单态下 fillSizes() 被 IO 闸门挡住，日期只能靠这里持久化恢复。
       const m: ArchiveMeta | undefined =
-        (meta !== undefined && i < meta.length) ? meta[i] : undefined;
+        meta !== undefined ? aligned[i] : undefined;
       const item: ImageItem = {
         uri: u, name: this.nameOf(u, i),
         size: m !== undefined ? m.size : -1,
@@ -3884,7 +3979,7 @@ struct Index {
     for (let i = 0; i < this.rows.length; i++) {
       rowNames.push(this.rows[i].name);
     }
-    this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
+    this.refreshAdaptiveLayout(rowNames);
     this.dataSource.reload(this.rows);
     // 第六十四轮：清单落地后把目录行接进统计链。keepView=自动重扫且条目已变，
     // 说明本层内容真的动过 → 整层缓存失效；普通换源按 uri 保留命中缓存，
@@ -3972,15 +4067,15 @@ struct Index {
       this.refreshSpread();
       this.schedulePreload();
     } else {
-      // 清掉可能残留的上一批视图，避免只读态还显示一张不属于这批的旧图。
-      this.releaseViewOwned();
-      this.viewPixelMap = undefined;
-      this.viewFailed = false;
-      this.clearBlur();
+      // 第七十七轮：只读名单态不再清空主视图（用户反馈「重启后预览图丢失」）。
+      // 只放行「当前这一张」的异步解码，让重进 / 重启后立刻能看到图；
+      // 批量预载 / statSync 补体积 / 对开探测继续全部挡在闸门外，
+      // 历史 appfreeze 防线逐字不变（单张 decodePx 是真异步 open + catch，失败即止）。
       this.spreadB = -1;
       this.clearRightPage();
       this.cacheCount = 0;
       this.cacheBytes = this.preloadBytes;
+      this.showPreviewOf(this.cur);
     }
     this.snapDirty = true; // 列表换了 → 下次写盘时把这一批 uri 存成快照
     this.markPos();        // 顺带把「起始位置」也记下来（含快照在内一起落盘）
@@ -5206,12 +5301,14 @@ struct Index {
    *     releaseUncachedEntry() 判断后再释放，绝不能直接 px.release()（会花屏）。 */
   private decodeTo(uri: string, edge: number,
     allowReuse: boolean = true): Promise<PreviewEntry | undefined> {
-    // ⚠️ 只读名单态的总闸门：所有主视图 / 预载 / 右页 / 预热解码都从这里过。
-    //    恢复出来的是一批授权已失效的死 uri，任何一次 decodePx 都要跨进程 open
-    //    （第二十七轮起为 await fs.open，已不阻塞主线程，但仍会白等一轮网络超时）；
-    //    在这里集中短路，比在每个调用点各挡一次更可靠，也杜绝漏网。
+    // ⚠️ 只读名单态总闸门：失效 uri 的预载 / 右页 / 预热一律在此短路（防 appfreeze）。
+    // 第七十七轮：只额外放行【当前主视图这一张】的单次异步解码，让重进 / 重启后立刻出图。
+    const curUri: string = (this.cur >= 0 && this.cur < this.items.length)
+      ? this.items[this.cur].uri : '';
     if (!bulkIoAllowed(this.restoreMode)) {
-      return Promise.resolve<PreviewEntry | undefined>(undefined);
+      if (curUri.length === 0 || uri !== curUri) {
+        return Promise.resolve<PreviewEntry | undefined>(undefined);
+      }
     }
     if (!allowReuse) {
       return decodePx(uri, edge);
@@ -5517,6 +5614,11 @@ struct Index {
   private showPreviewOf(idx: number): void {
     this.curToken++;
     const token: number = this.curToken;
+    // 第七十七轮：只读名单态只放行当前这一张；批量链路仍由 decodeTo 闸门挡住。
+    const ioOk: boolean = bulkIoAllowed(this.restoreMode);
+    if (!ioOk) {
+      hilog.info(DOMAIN, TAG, 'restore readonly: single current view decode allowed');
+    }
     this.releaseViewOwned();
     this.viewFailed = false;
     this.viewPixelMap = undefined;
@@ -5536,12 +5638,11 @@ struct Index {
     this.viewExifFields = [];
     this.exifPanelOn = false;
     this.pmMenuOn = false;
-    // 只读名单态：不解码，也不让 viewFailed 变 true —— 否则 previewImage 会画
-    // Image(uri) 交给系统对死 uri 反复重试。画面留中灰，由预览区指引卡接管。
-    if (!bulkIoAllowed(this.restoreMode)) {
-      this.clearBlur();
-      return;
-    }
+    // 第七十七轮：只读名单态不再一刀切 return（以前这里直接掐断主视图解码，
+    // 重启后画面只剩中灰／档案名）。只放行「当前这一张」的异步解码：
+    // decodePx → rawStore.ensure → 真异步 fs.open + catch，失败即止，最多一次
+    // 跨进程往返；批量预载 / statSync / 对开探测仍由 bulkIoAllowed 闸门严控。
+    // 这样即便冷启动探测误判授权，当前相片也能立刻正常显示。
     if (idx < 0 || idx >= this.items.length) {
       this.clearBlur();
       return;
@@ -5559,8 +5660,12 @@ struct Index {
       //    且结果写回缓存供下次复用 —— 同一张图最多解一次。
       const reuseNeed: number = this.reuseEdge(Math.max(hit.w, hit.h));
       const fullNeed: number = this.showNeed(hit);
+      // 第七十七轮：只读名单态下缓存命中即直接上屏，不再排「升级补解」；
+      // 这样恢复期只保留当前一张的解码，不给失效 uri 额外一次跨进程往返。
       if (!shouldReuseDecoded(hit.edge, reuseNeed) && fullNeed > hit.edge) {
-        this.loadView(uri, token, UPGRADE_DELAY_MS);
+        if (ioOk) {
+          this.loadView(uri, token, UPGRADE_DELAY_MS);
+        }
       }
     } else {
       // ③ 预算裁剪后极少数「后台链还没铺到」的图：低清占位 + 可显示档位解码。
@@ -5594,7 +5699,8 @@ struct Index {
     // 第七十一轮：解码链给出的 HDR 保真结果与明确提示直接落到 UI。
     this.hdrCode = e.hdrCode;
     this.hdrHint = e.hdrHint;
-    // 第七十六轮：EXIF 图标显隐与资料框字段唯一取自 PreviewEntry 的字节级判据。
+    // 第七十七轮：EXIF 图标显隐与资料框字段唯一取自 PreviewEntry 的「有效字段」真值
+    // （hasExif = pmExifEffectiveOf(exifFields)），两者同源：显示图标必能查到资料。
     this.viewHasExif = e.hasExif;
     this.viewExifFields = e.exifFields;
   }
@@ -7690,7 +7796,7 @@ struct Index {
     for (let i = 0; i < rows.length; i++) {
       rowNames.push(rows[i].name);
     }
-    this.listW = listWidthForNames(rowNames, LIST_W, LIST_MAX_W);
+    this.refreshAdaptiveLayout(rowNames);
     // 第五十九轮：APP 内上层清单同样是「往上层」落地 —— 把返回前所在子目录名
     // （curName）交给左栏反色。**必须在 dataSource.reload 之前**设好，让本次
     // LazyForEach 建出来的可见行就带上新标记；清单里该行名字与 curName 严格相等、
@@ -8933,7 +9039,14 @@ struct Index {
             dirCountVersion: this.dirCountVersion,
             scroller: this.scroller,
             dataSource: this.dataSource,
-            restoreReadonly: (): boolean => this.restoreMode === RESTORE_READONLY,
+            // 第七十七轮：悬停缩略图不再被恢复模式一刀切禁用（用户反馈「重启后缩略图丢失」）。
+            // ThumbLoader 走 decodePx → 真异步 fs.open + 并发 1 + 失败即止，一次死 uri
+            // 最多白等一次跨进程往返，绝不会累积成几百次同步 IO（历史 appfreeze 根因）；
+            // 批量预载 / statSync / 对开探测仍由 bulkIoAllowed 闸门严控，防线不变。
+            restoreReadonly: (): boolean => false,
+            collapsedW: this.collapsedW,
+            colSizeW: this.colSizeW,
+            colDateW: this.colDateW,
             onRowTap: (i: number): void => {
               this.onRowTap(i);
             },
@@ -9163,8 +9276,8 @@ struct Index {
           // 第七十六轮：仅【含有 EXIF 资料】的相片在预览区右上角叠加 EXIF 图标。
           // 与左上角 HDR 徽标同一套自带对比度底板，深浅背景恒清晰；整层铺满但不占布局，
           // HitTestMode.Transparent 让滚轮切图 / 拖拽 / 左键放大镜 / 右键相片菜单 /
-          // 双击全屏全部穿透。显隐严格取 viewHasExif（字节级 EXIF 段判据），
-          // 无 EXIF 相片 / 空态 / 文本预览一律不画。
+          // 双击全屏全部穿透。显隐严格取 viewHasExif（第七十七轮：SDK 实际读到的
+          // 有效 EXIF 字段，与资料框同源），无有效 EXIF 数据 / 空态 / 文本预览一律不画。
           if (pmExifBadgeVisibleOf(this.viewHasExif,
             this.viewPixelMap !== undefined, this.textMode)) {
             Column() {
@@ -9762,6 +9875,12 @@ struct Index {
       this.lastRootH = rh;
       if (changed) {
         this.markWindowRect(); // 拖窗口时也记住当前尺寸（防抖），强杀进程不丢
+        // 第七十七轮：容器尺寸真变化 → 三列宽 / 左栏宽按新容器重新自适应。
+        const acNames: Array<string> = [];
+        for (let i = 0; i < this.rows.length; i++) {
+          acNames.push(this.rows[i].name);
+        }
+        this.refreshAdaptiveLayout(acNames);
       }
       // 第六十轮：根容器尺寸真变化（含 scrollbar 出现 / 消失引起的布局变化）时，
       // 重新挂起一次「高亮项完整可见」定位请求；只翻状态位，不加 padding / offset。

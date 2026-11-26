@@ -45,10 +45,12 @@ import { HpProbe, HpDecodeSize,
   HP_COLORSPACE_PRESERVE, HP_HDR_UNVERIFIED, HP_SIZE_CAPPED,
   hpProbeOf, hpRequestOf, hpOutcomeOf, hpDecodeSizeOf, hpFailCodeOf,
   hpColorSpacePreservedOf, hpShowHintOf, hpHintOf } from '../common/HdrPreview';
-// 第七十六轮：EXIF 段字节级判据 / 字段标签 / 值归一的纯函数真值源（零 SDK / 零 IO）。
-// 只有确认含 EXIF 段才发 SDK getImageProperty 跨进程调用，避免给每张图都加元数据往返。
+// 第七十六轮：EXIF 段字节级粗筛 / 字段标签 / 值归一的纯函数真值源（零 SDK / 零 IO）。
+// 第七十七轮：字节级结果只决定「要不要读 SDK」，图标显隐一律以实际读到的有效字段为准；
+// fd 兜底路径（拿不到完整 bytes）也读一次，避免有 EXIF 的相片被漏标。
 import { PmExifField, PM_EXIF_LABELS, PM_EXIF_UNKNOWN,
-  pmExifPresentOf, pmExifFieldOf, pmExifFieldWantedOf } from '../common/PictureMenu';
+  pmExifPresentOf, pmExifShouldReadOf, pmExifEffectiveOf,
+  pmExifFieldOf, pmExifFieldWantedOf } from '../common/PictureMenu';
 
 // hilog 域（原 pages/Index.ets 顶部同值迁入；Index.ets 反向 import 本定义）。
 export const TAG = 'HeicViewer';
@@ -139,9 +141,11 @@ export interface PreviewEntry {
   hdrCode: number;
   /** 界面要显示的明确提示（正常态为空串）。 */
   hdrHint: string;
-  /** 第七十六轮：源图头部是否确有 EXIF 段（字节级判据，右上角图标的唯一真值）。 */
+  /** 第七十七轮：本张是否确有【有效 EXIF 数据】= pmExifEffectiveOf(exifFields)。
+   *  右上角图标与资料框字段同源：显示图标 ⇔ 至少有一个可读字段 ⇔ 资料框一定有内容。
+   *  不再用「字节级含段」粗判（会标错），也不再让 fd 兜底路径恒 false（会漏标）。 */
   hasExif: boolean;
-  /** 第七十六轮：EXIF 资料框字段；无 EXIF 段 / 字段读不到时为空数组。 */
+  /** 第七十七轮：EXIF 资料框字段；无有效字段时为空数组（图标同时不显示）。 */
   exifFields: Array<PmExifField>;
 }
 
@@ -193,14 +197,28 @@ async function readExifTransform(src: image.ImageSource, uri: string): Promise<E
   return t;
 }
 
-/** 第七十六轮：EXIF 资料框字段。
- *  · 只有字节级判定确有 EXIF 段才逐个读 SDK 属性，普通相片零新增跨进程调用；
+/** 第七十七轮：EXIF 字段按 uri 缓存（与 EXIF_CACHE 同口径）。
+ *  预载低清档 / 主视图高清档 / 悬停缩略图会多次 decodePx 同一张图，
+ *  缓存后每张只发一轮 SDK 读取，避免 8 × N 次跨进程往返。 */
+const EXIF_FIELDS_CACHE: Map<string, Array<PmExifField>> = new Map();
+const EXIF_FIELDS_CACHE_MAX: number = 512;
+
+/** 第七十七轮：EXIF 资料框字段 —— 图标显隐与资料框的**共同真值源**。
+ *  · shouldRead 由 pmExifShouldReadOf(段粗筛, 是否拿到完整 bytes) 给出：
+ *    段命中 → 读；fd 兜底路径没有 bytes 可判 → **也读一次**（R76 在这里恒 false，
+ *    导致有 EXIF 的相片既不显示图标、资料框也空）；明确无段的普通相片 → 跳过。
+ *  · 只有真正读到字段才缓存；「无段」不缓存空结果，避免一次粗筛把后续读权限锁死。
  *  · 每个字段独立 try/catch：某机型不支持某个 PropertyKey 不影响其它字段与解码主流程；
- *  · 值归一的真值源在 common/PictureMenu.ts，本函数只负责「异步读 + 过滤无效行」。 */
-async function readExifFields(src: image.ImageSource, hasExif: boolean): Promise<Array<PmExifField>> {
-  const none: Array<PmExifField> = [];
-  if (!hasExif) {
-    return none;
+ *  · 值归一 / 有效性判定的真值源在 common/PictureMenu.ts，本函数只负责「异步读 + 过滤无效行」。 */
+async function readExifFields(src: image.ImageSource, uri: string,
+  shouldRead: boolean): Promise<Array<PmExifField>> {
+  const cached: Array<PmExifField> | undefined = EXIF_FIELDS_CACHE.get(uri);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const out: Array<PmExifField> = [];
+  if (!shouldRead) {
+    return out;
   }
   const keys: Array<image.PropertyKey> = [
     image.PropertyKey.DATE_TIME_ORIGINAL,
@@ -212,7 +230,6 @@ async function readExifFields(src: image.ImageSource, hasExif: boolean): Promise
     image.PropertyKey.MODEL,
     image.PropertyKey.WHITE_BALANCE
   ];
-  const out: Array<PmExifField> = [];
   for (let i = 0; i < keys.length && i < PM_EXIF_LABELS.length; i++) {
     let raw: string = '';
     try {
@@ -225,6 +242,10 @@ async function readExifFields(src: image.ImageSource, hasExif: boolean): Promise
       out.push(f);
     }
   }
+  if (EXIF_FIELDS_CACHE.size >= EXIF_FIELDS_CACHE_MAX) {
+    EXIF_FIELDS_CACHE.clear();
+  }
+  EXIF_FIELDS_CACHE.set(uri, out);
   return out;
 }
 
@@ -655,8 +676,9 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
   let file: fs.File | undefined = undefined;
   let src: image.ImageSource | undefined = undefined;
   let bytesReadable: boolean = false;
-  // 第七十六轮：EXIF 段存在与否只在拿到完整原始字节时判定；fd 兜底路径没有字节可验，
-  // 一律按「无 EXIF」处理（图标不显示），绝不因为缓存未命中而误标相片。
+  // 第七十七轮：字节级只作「是否值得读 SDK 字段」的粗筛，不再是图标显隐真值；
+  // fd 兜底路径没有字节可验时 exifSeg=false，但 pmExifShouldReadOf 会因为
+  // bytesReadable=false 而放行一次 SDK 读取 —— 有 EXIF 的相片不会再被漏标。
   let exifSeg: boolean = false;
   // 第七十一轮：容器层探测只在拿到完整原始字节时做；fd 兜底路径没有字节可验，
   // 保持按扩展名分流，绝不把非 HEIC 文件误判成损坏。
@@ -701,8 +723,10 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
     if (EXIF_AUTO_ROTATE) {
       exif = await readExifTransform(src, uri);
     }
-    // 第七十六轮：只有字节级确认含 EXIF 段才读资料框字段；无 EXIF 相片零新增 SDK 调用。
-    const exifFields: Array<PmExifField> = await readExifFields(src, exifSeg);
+    // 第七十七轮：字节级结果只决定「要不要读 SDK」；fd 兜底路径没有完整 bytes
+    // 也读一次（R76 在这里恒判无 EXIF）。最终 hasExif 由实际读到的有效字段决定。
+    const exifFields: Array<PmExifField> = await readExifFields(src, uri,
+      pmExifShouldReadOf(exifSeg, bytesReadable));
 
     const opts: image.DecodingOptions = { desiredSize: { width: dw, height: dh } };
     if (EXIF_AUTO_ROTATE && exif.degrees !== 0 && EXIF_ROTATE_AT_DECODE) {
@@ -768,7 +792,8 @@ export async function decodePx(uri: string, edge: number): Promise<PreviewEntry 
       colorSpace: cs, isHdr: info.isHdr === true, exifDegrees: exif.degrees,
       srcW: w, srcH: h, isHdrDecoded: isHdrDecoded,
       hdrCode: outcome, hdrHint: hint,
-      hasExif: exifSeg, exifFields: exifFields
+      // 第七十七轮：显隐真值 = 有效字段，与资料框同源（不再用字节段粗判）。
+      hasExif: pmExifEffectiveOf(exifFields), exifFields: exifFields
     };
     return entry;
   } catch (e) {

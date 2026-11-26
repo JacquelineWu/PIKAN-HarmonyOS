@@ -97,6 +97,60 @@ export function metaForUri(uris: Array<string>, metas: Array<ArchiveMeta>, uri: 
   return { size: -1, mtime: 0 };
 }
 
+// --------------------------------------------------------------------
+// 第七十七轮：重启后「size / 日期资料丢失」的根治件
+//
+// 真实根因（按源码逐字判读）：
+//  · 只读名单态下 fillSizes() 被 IO 闸门挡住，items[i].size 一直是 -1 / mtime 是 0；
+//  · flushSnap() 原样把 `-1,0` 写回 snapMeta_N，**覆盖掉上次会话的有效值**；
+//  · 下次重启 readSnapMeta 读回的全是未知值 → 左栏 size / 日期永远显示 '--'，
+//    而且 snapDirty 自我强化，之后每一轮重启都读不回来。
+//  · 另外 readSnapMeta 遇到缺块 / 旧存档没有 meta key 时直接跳过该块，
+//    后续块前移 ⇒ uri 与 meta 错位，尾部条目张冠李戴或全丢。
+// --------------------------------------------------------------------
+
+/** 写快照前合并新旧元数据：新值有效就用新值；新值「未知」则保留上次的有效值。
+ *  按 uri 配对（见 Index.flushSnap），换源 / 重排也不会张冠李戴。零 IO / 零 SDK。 */
+export function metaMergeOf(oldSize: number, oldMtime: number,
+  newSize: number, newMtime: number): ArchiveMeta {
+  const size: number = finiteOf(newSize) && newSize > 0 ? Math.trunc(newSize)
+    : (finiteOf(oldSize) && oldSize > 0 ? Math.trunc(oldSize) : -1);
+  const mtime: number = finiteOf(newMtime) && newMtime > 0 ? Math.trunc(newMtime)
+    : (finiteOf(oldMtime) && oldMtime > 0 ? Math.trunc(oldMtime) : 0);
+  return { size: size, mtime: mtime };
+}
+
+/** 把稀疏 / 缺块的 meta 数组按 uri 条数补齐到等长，杜绝后续块前移错位。
+ *  多出来的部分截断；不足部分补「未知」。零 IO / 零 SDK。 */
+export function metasPaddedOf(count: number, metas: Array<ArchiveMeta>): Array<ArchiveMeta> {
+  const n: number = finiteOf(count) && count > 0 ? Math.trunc(count) : 0;
+  const out: Array<ArchiveMeta> = [];
+  for (let i = 0; i < n; i++) {
+    const m: ArchiveMeta | undefined = i < metas.length ? metas[i] : undefined;
+    if (m !== undefined && finiteOf(m.size) && finiteOf(m.mtime)) {
+      out.push({ size: m.size, mtime: m.mtime });
+    } else {
+      out.push({ size: -1, mtime: 0 });
+    }
+  }
+  return out;
+}
+
+/** 单块 meta 的行数必须与该块 uri 行数严格相等；缺块按整块补未知，绝不前移。 */
+export function metaChunkPaddedOf(want: number, part: Array<ArchiveMeta>): Array<ArchiveMeta> {
+  const n: number = finiteOf(want) && want > 0 ? Math.trunc(want) : 0;
+  const out: Array<ArchiveMeta> = [];
+  for (let i = 0; i < n; i++) {
+    const m: ArchiveMeta | undefined = i < part.length ? part[i] : undefined;
+    if (m !== undefined && finiteOf(m.size) && finiteOf(m.mtime)) {
+      out.push({ size: m.size, mtime: m.mtime });
+    } else {
+      out.push({ size: -1, mtime: 0 });
+    }
+  }
+  return out;
+}
+
 /** rect → 一个小 key 的值 `left,top,width,height`。 */
 export function packWindowRect(r: WindowRect): string {
   return Math.trunc(r.left) + ',' + Math.trunc(r.top) + ',' +

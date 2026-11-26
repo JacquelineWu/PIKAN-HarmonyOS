@@ -122,11 +122,42 @@ export function pmModeLabelOf(mode: number): string {
 /** EXIF 图标文字（右上角，与 R70 左上角 HDR 徽标同一套自带对比度底板）。 */
 export const PM_EXIF_LABEL: string = 'EXIF';
 
-/** 图标显隐严格判据：仅「当前相片确含 EXIF 资料」+「已有上屏图源」+「非文本预览」。
- *  三个参数全部 === 显式判等，杜绝脏值把无 EXIF 相片误标。 */
+/** 图标显隐严格判据：仅「当前相片确有【有效 EXIF 数据】」+「已有上屏图源」+「非文本预览」。
+ *  三个参数全部 === 显式判等，杜绝脏值把无 EXIF 相片误标。
+ *
+ *  第七十七轮：hasExif 的真值**改为 pmExifEffectiveOf(exifFields)** ——
+ *  即「SDK 至少读到一个有效字段」，与 EXIF 资料框字段完全同源。
+ *  R76 用「字节级含段」粗判，会出现「有段但字段全读不到 ⇒ 标了图标却看不了资料」，
+ *  或「HEIC/PNG 头部随便四个 ASCII 字节 ⇒ 无 EXIF 却误标」；本轮两者一并根除：
+ *  显示图标 ⇔ 有有效字段 ⇔ 资料框一定有内容。 */
 export function pmExifBadgeVisibleOf(hasExif: boolean, hasImage: boolean,
   textMode: boolean): boolean {
   return hasExif === true && hasImage === true && textMode === false;
+}
+
+/** 第七十七轮：EXIF 是否「有效」的唯一判据 —— 至少一个真正可读的字段。
+ *  空数组 / undefined / 全 '--' 一律 false。图标显隐、资料框、缓存全部共用它，
+ *  三者同源，从结构上杜绝「标错且无法查看」。零 SDK / 零 IO。 */
+export function pmExifEffectiveOf(fields: Array<PmExifField>): boolean {
+  if (fields === undefined || fields === null) {
+    return false;
+  }
+  for (let i: number = 0; i < fields.length; i++) {
+    if (pmExifFieldWantedOf(fields[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 第七十七轮：是否要发 SDK getImageProperty 读 EXIF 字段。
+ *  · 字节级段判据命中 → 读；
+ *  · fd 兜底路径没有完整 bytes 可判 → **也要读一次**（R76 在这里恒 false，
+ *    导致「相片明明有 EXIF 却不显示图标、资料框也空」）；
+ *  · 明确有完整 bytes 且没扫到 EXIF 段 → 跳过，避免给每张普通相片加 8 次跨进程往返。
+ *  纯条件判断，零 IO。 */
+export function pmExifShouldReadOf(segPresent: boolean, bytesReadable: boolean): boolean {
+  return segPresent === true || bytesReadable === false;
 }
 
 /** 第七十六轮：「预览区当前确实是相片」的唯一判据 —— 已有上屏图源且非文本预览态。
@@ -197,11 +228,16 @@ export function pmExifValueOf(raw: string, maxLen: number): string {
   return s.substring(0, cap - 1) + '…';
 }
 
-/** EXIF 段是否存在的【字节级】判据（零 SDK / 零跨进程 IO，直接用 hpProbeOf 已有的 raw bytes）：
+/** EXIF 段是否存在的【字节级粗筛】（零 SDK / 零跨进程 IO，直接用 hpProbeOf 已有的 raw bytes）：
  *   · JPEG（FF D8 起）：扫 APPn 段，找 APP1 的 'Exif\0\0' 六字节签名；
  *   · HEIC / HEIF（ftyp 容器）：'Exif' item type（iinf/infe）；
  *   · PNG：eXIf chunk。
- *  只在文件头 256KB 内扫，绝不整块大图线性扫，也不解码任何像素。 */
+ *  只在文件头 64KB 内扫，绝不整块大图线性扫，也不解码任何像素。
+ *
+ *  ⚠️ 第七十七轮起**它不再是图标显隐的真值**，只用来决定「要不要发 SDK 读取」
+ *    （见 pmExifShouldReadOf / pmExifEffectiveOf）。四字节 ASCII 特征是保守近似，
+ *    可能误命中压缩数据，也可能漏掉特殊容器 —— 但都不影响正确性：
+ *    最终是否显示 EXIF 图标，一律以 SDK 实际读到的有效字段为准。 */
 export function pmExifPresentOf(b: Uint8Array): boolean {
   if (b.length < 4) {
     return false;
@@ -234,7 +270,9 @@ export function pmExifPresentOf(b: Uint8Array): boolean {
     return false;
   }
   // ② HEIC/HEIF 'Exif' item type、PNG 'eXIf' chunk：文件头窗口内找 ASCII 特征。
-  const cap: number = b.length < 262144 ? b.length : 262144;
+  //    第七十七轮：窗口由 256KB 收到 64KB（元数据 box 一定在头部），减少误命中；
+  //    这里只是「是否值得读 SDK」的粗筛，误判不再影响图标显隐。
+  const cap: number = b.length < 65536 ? b.length : 65536;
   for (let k = 0; k + 4 <= cap; k++) {
     if (b[k] === 0x65 && b[k + 1] === 0x58 && b[k + 2] === 0x49 && b[k + 3] === 0x66) {
       return true; // 'eXIf'

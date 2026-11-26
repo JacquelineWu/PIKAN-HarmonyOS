@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R76`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R77`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -31,13 +31,13 @@
 | 挑图入口 | 仅 `选择文件夹`（`DocumentSelectMode.FOLDER`）；**`打开图库`（v1.0.6）、`选择图片` 与 `回到上次`（11-10）三个按钮均已取消**，界面上不再出现（见「按钮区精简」章节） |
 | 目录浏览 | 左栏 `选择文件夹`（`DocumentSelectMode.FOLDER`）；`..` / `往上层` / `退格` 按**目录层级**进入直接父目录（**不按浏览历史回退**，连续点击逐级到卷 / 硬盘逻辑最上层后停止）；左栏抬头正确显示**中文 / 多级 / `%XX` 编码 / 文档 URI / 带尾斜杠**的目录名（见 11-10 修复章节）；目录变了约 1.5s 自检、900ms 去抖重扫且**当前张不闪** |
 | 路径选择 / 用户主目录 | **11-19 起（R38）**：`往上层` 到 `/storage/Users/<id>` 这一用户卷根时不再被 TOP 早退锁成死层，用户主动点击即**原地真实重新列举该层全部顶层资料夹**并可正常进入；其它路径（`/` / 盘符 / NAS 设备根 / 深层）的选择与「往上层」行为逐字不变，R28 越级护栏保留（见第三十八轮章节） |
-| 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` **恒亮恒可点，永不 grey out / 永不禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**列宽按最长档案名自适应**（短名收窄、长名放宽，不截断也不留白）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
+| 左栏 | 抬头下 `排序 ↑ / ↓`、`往上层`、`选择文件夹` **同一行等宽排列**（`往上层` **恒亮恒可点，永不 grey out / 永不禁用**）；文件浏览器三栏（档案名 / 字节 / 日期），**R77 起列宽 adaptive：按内容长度 + 容器尺寸动态伸缩，零预设 / 固定宽度**（短名收窄、长名放宽，超长名由 Ellipsis 截断，三栏仍对齐）、行高紧凑；**自然序**排序（`IMG_2` 在 `IMG_10` 前）；隐藏 `.` 开头文件；**乱码文件名**（GB18030 / GBK / Big5 / Shift-JIS / UTF-8 双重误编码）自动还原，只影响显示、不改名 |
 | 悬停缩略图 | **左栏默认不显示任何缩略图**；鼠标停在**整行任意位置**才在右侧浮出 220 DIP 小图；自己的 384px 档 / 24 张 LRU / 同时只解一个；目录行与灰行不弹；点击、滚动、离屏立即收起 |
 | 滚轮翻页 | 鼠标滚轮 **上一张 / 下一张**；**Ctrl + 滚轮** = 缩放（互不冲突） |
-| 鼠标键 | **右键 toggle 放大镜开关**（预设关闭，见第十五轮）、**双击切换全屏**；左键单击不放大（第七轮起）、右键拖拽平移；双击档案名同样切换全屏。**放大镜放大画质见第十七轮**：>1:1 一律 High(Cubic) 插值 + 五个图源全开 PixelMap 边缘 AA + 真实设备密度 + 按原图上限夹界的重解码（无真实增益则跳过），消锯齿 / 像素化 / 边缘粗糙，1:1 显示不受影响（第十六轮的三档 / MipMap 方案已被推翻，见第十七轮章节） |
+| 鼠标键 | **预览区相片上左键 toggle 放大镜**（R76 起；预设关闭，见第十五 / 七十六轮）、**双击切换全屏**；左键单击不放大（第七轮起）、右键拖拽平移；双击档案名同样切换全屏。**放大镜放大画质见第十七轮**：>1:1 一律 High(Cubic) 插值 + 五个图源全开 PixelMap 边缘 AA + 真实设备密度 + 按原图上限夹界的重解码（无真实增益则跳过），消锯齿 / 像素化 / 边缘粗糙，1:1 显示不受影响（第十六轮的三档 / MipMap 方案已被推翻，见第十七轮章节） |
 | 缩放 | 滚轮(Ctrl) / 双指捏合 / 左键放大 ×1.5；右下角角标 **100% = 原图像素 1:1**（ACDSee / Photoshop 口径，适应窗口通常 13%~30%）。**11-10 起取消 `＋` `－` 按钮**；**第二十六轮起键盘 `↑` `↓` 不再缩放，改为翻页**（见第二十六轮章节） |
 | 平移 / 旋转 / 镜像 | 拖拽画布 / `R` 右旋、`Shift+R` 左旋 / `Shift+H` 水平、`Shift+V` 垂直（可叠加）。**11-10 起取消 `左旋` `右旋` `镜像H` `镜像V` 按钮** |
-| 复位 / 1:1 | 键盘 `0` 复位适应；`F` 切 1:1（**第十五轮起右键不再复位，改为 toggle 放大镜**）。**11-10 起取消 `适应` `1:1` 按钮** |
+| 复位 / 1:1 | 键盘 `0` 复位适应；`F` 切 1:1（**第十五轮起右键不再复位；R76 起改为相片上左键 toggle 放大镜**）。**11-10 起取消 `适应` `1:1` 按钮** |
 | 竖图对开 | 当前与下一张**同为竖图**时左右并排；**点到 / 翻到哪张哪张就在左边**，翻页步长恒一格；横图 / 落单张仍单页；信息浮层列出两个文件名 |
 | 幻灯片 | `幻灯片` 按钮 / 空格键，默认 3 秒切换 |
 | 键盘翻页 / 往上层 | `←` / `↑` = 上一张，`→` / `↓` = 下一张（**四个方向键同向切换，第二十六轮**）；`退格` 按目录层级往上层（与按钮同一入口） |
@@ -565,15 +565,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R73（右键菜单真机不弹出修复：改走 .onMouse 通道 / 应用内浮层 / 零系统手势依赖）、
 > R74（「打开档案所在目录」改走 OS 自带文件管理器 / 目标恒为目录 / 文件与目录两类生效）、
 > R75（移除名称右侧向上箭头符号列 / REVEAL 目录改以 browseBase 为真值）、
-> R76（间距 5mm / 放大镜改相片上左键 / 仅含 EXIF 相片右上角 EXIF 图标 / 相片右键三项菜单）
-> 见下方十七个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R76（间距 5mm / 放大镜改相片上左键 / 仅含 EXIF 相片右上角 EXIF 图标 / 相片右键三项菜单）、
+> R77（重启后 size·日期·预览图·缩略图完整恢复 / EXIF 有效字段同源真值 / 档案列表 adaptive column width）
+> 见下方十八个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R76`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R76` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R77`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R77` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R76 新增断言顺延，以 `grep -n 真机步骤 R76 tests/dirname.test.mjs` 为准：10031–10044）
+  （行号随 R77 新增断言顺延，以 `grep -n 真机步骤 R77 tests/dirname.test.mjs` 为准：10231–10246）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -614,6 +615,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R74 | 所在目录改走 OS 文件管理器 / 目标恒为目录 / 文件与目录两类生效 | 9626–9638 |
 | R75 | 仅移除向上箭头符号列 / REVEAL 目录改以 browseBase 为真值 | 9775–9789 |
 | R76 | 间距 5mm / 左键放大镜 / EXIF 图标 / 相片右键三项菜单 / 单张·并排模式 | 10030–10044 |
+| R77 | 重启资料·预览图·缩略图恢复 / EXIF 有效字段同源 / adaptive column width | 10231–10246 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1875,6 +1877,98 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十七轮：重启资料 / 预览图 / 缩略图完整恢复 + EXIF 有效字段同源 + adaptive column width（2026-11-26，R77）
+
+> 用户要求（原文）：「请修复并调整当前APP的图案/档案列表功能，具体需求如下：
+> 1. 重新进入或重启APP后，图案列表需正常显示 size 及日期资料，并完整加载预览图，修复当前资料与缩略图丢失的问题。
+> 2. 修正预览图的 EXIF 判定与展示：仅在包含有效EXIF数据时显示EXIF标识，无EXIF时不显示该标识；同时确保存在EXIF时能正确呈现对应的EXIF资料，避免出现标错且无法查看的情况。
+> 3. 档案列表改为 adaptive column width，依据内容长度或容器尺寸动态伸缩，移除所有预设/固定宽度限制。
+> 请定位相关状态恢复、元数据判断及布局逻辑并完成修正，确保上述场景表现一致且无回归。」
+
+### 一、现状判读（按真实源码，不凭缓存推断）
+
+- **资料丢失**：`flushSnap()` 把只读名单态下 `fillSizes()` 被 IO 闸门挡住而没补上的 `size=-1 / mtime=0` **原样写回** `snapMeta_N`，覆盖掉上次会话的有效值；下一次重启读回的全是未知值，左栏 size / 日期永远显示 `--`，且 `snapDirty` 自我强化，之后每一轮都读不回来。`readSnapMeta()` 遇旧存档缺 meta 块 / 单块写盘失败时直接跳过该块，后续块前移 ⇒ uri 与 meta 错位，尾部条目张冠李戴或全丢。
+- **预览图 / 悬停缩略图丢失**：冷启动 `probeRestoreUris()` 一次 `fs.openSync` 失败即误判授权失效 → `RESTORE_READONLY`；`applyItems()` 清空 `viewPixelMap`，预载 / 补尺寸 / 对开探测全被 `bulkIoAllowed` 挡住，`thumbDisabled: this.restoreReadonly()` 又直接掐断悬停缩略图解码。`warmRestoreDirQuiet()` 只对 `isNetworkDirUri()` 网络目录自愈，**本地目录一旦误判就整个会话锁死** —— 名单在、图全白、缩略图不出、size / 日期不补。`decodeTo()` 才是真正的总闸门（只读态直接 `resolve(undefined)`），只改 `showPreviewOf()` 不够。
+- **EXIF 标错 / 看不到**：R76 图标显隐用 `pmExifPresentOf()` 的「字节级含段」粗判（HEIC / PNG 头 256KB 内任意 `'Exif'` 四字节即命中会误标），资料框字段却来自 SDK `getImageProperty`；**两者不同源**，于是「标了图标但字段全空看不了」或「有 EXIF 却没图标」。fd 兜底路径拿不到完整 bytes 时恒判无段，必然漏标。
+- **固定列宽**：`ArchiveRow` 的 `.width(66)`（大小 / 内容数目）、`.width(88)`（日期）、名称列 `.constraintSize({ minWidth: textWidthVp(name, 12) })`；`SidebarView` 的 `LIST_COLLAPSED_W=224` / `.width(listW)`；`Index` 的 `LIST_W=280` / `LIST_MAX_W=900` 与 `listWidthForNames` 写死的固定开销 226 —— 全是预设 / 固定宽度限制。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/AdaptiveColumn.ts`（新） | adaptive 列宽唯一真值源：`acLayoutOf(rootW, names, sizeTexts)` 按内容长度（`textWidthVp` 估最长文本）+ 容器尺寸（根窗口宽 × 比例）推出左栏展开 / 收起宽与三列宽；`acTextWidestOf` / `acOverheadOf` / `acWidthSafeOf` / `acAdaptiveOf` 为脏值护栏与判据；常量只有比例与既有间距 / 字号，零固定 vp 列宽 |
+| `common/SessionState.ts` | 新增 `metaMergeOf()`（新值有效才覆盖、未知则保留上次有效值）、`metasPaddedOf()` / `metaChunkPaddedOf()`（按 uri / 块行数补齐等长，缺块补未知绝不前移）。零 IO / 零 SDK |
+| `common/PictureMenu.ts` | 新增 `pmExifEffectiveOf(fields)`（至少一个真正可读字段）与 `pmExifShouldReadOf(segPresent, bytesReadable)`；`pmExifPresentOf` 头窗口 256KB → 64KB，且**降级为「要不要读 SDK」的粗筛，不再是显隐真值** |
+| `model/Preview.ets` | `PreviewEntry.hasExif` 改取 `pmExifEffectiveOf(exifFields)`，与 `exifFields` 同源；`readExifFields()` 按 uri 缓存字段（`EXIF_FIELDS_CACHE`）、fd 兜底路径也读一次；天文自解析图与「明确无段的普通相片」零新增跨进程往返 |
+| `pages/Index.ets` | `ESC_BUILD_TAG` → `R77`；`flushSnap()` 按 uri 合并新旧 meta、`readSnapMeta()` / `setItems()` 等长补齐；`decodeTo()` 只读态只放行**当前主视图这一张**、批量链路仍全短路；`ThumbLoader` 的 `restoreReadonly` 不再一刀切禁用；新增 `scheduleRestoreHeal()` / `RESTORE_HEAL_DELAY_MS=1200` / `restoreHealTimer`（本地目录延迟自愈 + 成功后 `fillSizes()` + 销毁清 timer）；四个 `@State` 动态宽 + `refreshAdaptiveLayout()` 单点收口 + `onAreaChange` 重算；清理 `textWidthVp` / `listWidthForNames` 死 import |
+| `components/SidebarView.ets` | 删除 `LIST_COLLAPSED_W=224`；`listW / collapsedW / colSizeW / colDateW` 四个 `@Prop` 默认 0，由 Index 下传；`.width(this.listCollapsed ? this.collapsedW : this.listW)`；三列动态宽逐行传给 `ArchiveRow` |
+| `components/ArchiveRow.ets` | 移除名称列 `constraintSize({ minWidth: ... })` 与 `.width(66)` / `.width(88)`，改 `.width(this.colSizeW)`（两处）/ `.width(this.colDateW)`；R76 两处 `.margin({ left: ROW_GAP_VP })` 与三栏顺序 / 字段 / 对齐 / 交互逐字保留 |
+| `tests/dirname.test.mjs` | 构建标记整批升位 `R76 → R77`、订正 14 条旧语义断言（固定宽度 / 只读态清空主视图 / `thumbDisabled` / 旧 EXIF 含段真值 / `fmtBytes` 死代码）；新增 R77 组 **20 条**断言与真机步骤 `R77-A~E`（`10231–10246`） |
+| `README.md` / 记忆 | 抬头 / 手册 / 步骤表升位 `R77`，新增本章，追加当日与长期记忆 |
+
+### 三、设计要点
+
+- **快照不再自我抹掉有效值**：`flushSnap()` 先读回上一份快照，按 uri 建 `oldByUri`，逐条 `metaMergeOf(旧, 新)` 再写盘；换源 / 重排也不会张冠李戴。`readSnapMeta()` 缺块按整块补未知、`setItems()` 用 `metasPaddedOf(uris.length, meta)` 规整到等长，尾部条目不再丢。
+- **只放行「当前一张」，历史 appfreeze 防线不变**：`decodeTo()` 在只读态计算 `curUri`，`uri !== curUri` 一律 `resolve(undefined)`；预载 / statSync / 对开探测 / 缓存命中后的升级补解仍由 `bulkIoAllowed(this.restoreMode)` 严控。单张 `decodePx` 是真异步 `fs.open` + catch，最多一次跨进程往返。
+- **本地目录也自愈**：R44/R45 的 `warmRestoreDirQuiet()` 只覆盖网络目录；本轮在探测误判后错开启动期 1200ms 重探一次文件 uri（`healRestoreMode()` 内部仅 1 次 sync open），通了即切 FULL、补解码 / 预载 / 尺寸；定时器在页面销毁时清掉。
+- **EXIF 三者同源**：`显示图标 ⇔ pmExifEffectiveOf(exifFields) 为真 ⇔ 资料框一定有内容`。字节级粗筛只决定「要不要发 SDK 读字段」；`pmExifShouldReadOf(false, false)` 让 fd 兜底路径也读一次（R76 恒 false 会漏标），`pmExifShouldReadOf(false, true)` 让明确无段的普通相片零新增往返。字段按 uri 缓存，预载 / 主视图 / 悬停缩略图多次 `decodePx` 同一张只读一轮。
+- **adaptive 是「推导」不是「夹逼」**：`acLayoutOf()` 结果只由 `rootW` 与两列显示文本决定；`rootW=0`（首帧 `onAreaChange` 未到）纯按内容长度撑开，窗口尺寸到手后按 `AC_SIDEBAR_RATIO=0.62` / `AC_COLLAPSED_RATIO=0.30` 重算，resize 再重算。名称列仍 `layoutWeight(1)` + Ellipsis 吸收剩余，大小 / 日期列按本列最长内容保持可读。`acWidthSafeOf()` 保证 NaN / 非正数不进 `.width()`。
+- **`common/` 首次出现相对 import，显式带 `.ts` 后缀**：`AdaptiveColumn.ts` 需要 `DirName.textWidthVp` 与 `RowGap.ROW_GAP_VP`；Node ESM 测试加载器不解析无后缀相对路径，故写成 `'./DirName.ts'` / `'./RowGap.ts'`。已核验 ArkTS 真编译 0 ERROR，且 `modules.abc` 里导入记录名归一化为 `@bundle:.../common/DirName`（无后缀），设备运行时解析与其余模块一致。
+- **R76 的 5mm 是「间距」不是「列宽」**：两处 `ROW_GAP_VP` 与日期列 6vp、行右 padding 6vp 属既有间距 / 内边距，本轮逐字保留；移除的只有预设 / 固定列宽数字。
+
+### 四、验证用例（用户要求的三项 + 回归）
+
+| 确认项 | 结论 | 证据 |
+| --- | --- | --- |
+| **① 重启资料 / 预览图 / 缩略图** | ✅ 正常退出重开与杀进程冷启动，左栏每条 size / 日期为真实值，当前相片立刻出图，hover 缩略图正常 | `metaMergeOf` / `metasPaddedOf` / `metaChunkPaddedOf` 三组纯函数边界；`decodeTo` 单张放行 + 批量闸门；`restoreReadonly: () => false`；`scheduleRestoreHeal` / `RESTORE_HEAL_DELAY_MS` / `fillSizes()` / `clearTimeout` 源码契约；`R77-A~B` 真机步骤 |
+| **② EXIF 判定与展示** | ✅ 仅含有效 EXIF 数据显示图标，且必能查到对应资料；无误标 / 漏标 / 「标了看不到」 | `pmExifEffectiveOf([]) / undefined / 全 '--' 恒 false`、有有效字段恒 true；`pmExifShouldReadOf` 三组（含 fd 兜底）；`hasExif: pmExifEffectiveOf(exifFields)` 与 `exifFields` 同源；`EXIF_FIELDS_CACHE`；`R77-C` 真机步骤 |
+| **③ adaptive column width** | ✅ 列宽按内容长度 + 容器尺寸动态伸缩，所有预设 / 固定宽度已移除 | `acLayoutOf` / `acTextWidestOf` / `acWidthSafeOf` / `acAdaptiveOf` 数值回归；四个 `@State` 动态宽 + `refreshAdaptiveLayout` + resize 重算；`SidebarView` 无 `LIST_COLLAPSED_W`、`ArchiveRow` 无 `.width(66)/(88)` / `constraintSize({ minWidth`；`R77-D` 真机步骤 |
+| 回归检查 | ✅ R70–R76 全部零回归 | 版本 `1.0.7 / 7`、构建标记 `R77`、HDR 徽标 / 3 处 `dynamicRangeMode` / R71 HDR 保真、picture menu 三项顺序与动作、左栏五项右键菜单 / 两级 Want、放大镜相片上左键、两处 5mm 间距、滚轮 / 双击全屏 / ESC |
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2323 passed, 0 failed`**（R76 基线 2303，新增 20 条 R77 断言） |
+| 独立零回归脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**；`git diff --check` 通过 |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 24 s 444 ms`**；`Finished :entry:default@CompileArkTS... after 13 s 677 ms`（**非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（与 R69–R76 一致）；日志 `/tmp/r77-build-final.log` |
+| 产物 | 签名 HAP **1,792,929 B** / 未签名 **1,757,668 B** / `ets/modules.abc` **1,035,196 B**（R76 分别为 1,755,610 / 1,724,181 / 1,015,176 B），mtime 均为本轮编译时刻 |
+| 字节码 | `modules.abc`：**`R77=1 / R76=0 / R75=0 / R74=0 / R73=0 / R72=0 / R71=0 / 1.0.7=1`**；新链路 `AdaptiveColumn=3`、`acLayoutOf=2`、`acWidthSafeOf=2`、`acTextWidestOf=2`、`metaMergeOf=2`、`metasPaddedOf=2`、`metaChunkPaddedOf=2`、`pmExifEffectiveOf=2`、`pmExifShouldReadOf=2`、`EXIF_FIELDS_CACHE=2`、`restoreHealTimer=1`、`scheduleRestoreHeal=2`、`RESTORE_HEAL_DELAY_MS=1`、`refreshAdaptiveLayout=2`、`colSizeW=8`、`colDateW=8`、`collapsedW=6`；零回归 `ROW_GAP_VP=2`、`pmExifBadgeVisibleOf=2`、`viewHasExif=4`、`viewExifFields=4`、`hbVisibleOf=2`、`loupeEnabledAfterLeftClick=2`、`pmItemsOf=2`、`getImageProperty=1`、`hpProbeOf=2`、`startAbility=1`、`com.huawei.hmos.filemanager=1`、`ohos.want.action.viewData=1`、`general.directory=1`、`fileUri=1` |
+| 文档一致性 | `/tmp/check_r77_steps.mjs`：测试 R77 步骤块与 README 逐字差异 **0** |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志 / 旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 `R77-A~E`）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:10231` R77 组）
+
+>   ⚠️ 本组是源码静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+>   ⚠️ 真机步骤 R77-A：装新包后 Ctrl+D 角标必须是 R77 / 版本 1.0.7·7；
+>      选一个含 JPG+HEIC 的本地目录，正常退出再重开（及杀进程冷启动）两次：
+>      左栏每一条 size 与日期都应是真实值而非 --，当前相片立刻出图，
+>      hover 任一档案项仍弹缩略图，不再一片中灰 / 空白。
+>   ⚠️ 真机步骤 R77-B：重启后逐条核对 size / 日期与上次一致；中途新增档案也能补出真实值；
+>      切换目录 / 往上层 / 重排后按 uri 对得上号，不出现尾部条目张冠李戴。
+>   ⚠️ 真机步骤 R77-C：含有效 EXIF 的 JPG / HEIC 右上角出现 EXIF 图标，点 picture menu
+>      第一项一定能看到对应字段；无 EXIF 的相片 / 头部含 "Exif" 字样的非 EXIF 文件 /
+>      fd 兜底路径的相片都不误标、不漏标；FITS·XISF / 文本预览 / 空态仍不显示。
+>   ⚠️ 真机步骤 R77-D：拉伸窗口宽度，左栏展开宽 / 收起宽 / 大小列 / 日期列随内容长度与
+>      容器尺寸动态伸缩；超长档案名只用 Ellipsis 截断，三栏仍整齐对齐、顺序字段不变；
+>      档案名↔大小、文件夹名↔内容数目两处 5mm 间距仍严格一致。
+>   ⚠️ 真机步骤 R77-E：R76 放大镜（相片上左键反复切换）、picture contact menu 三项顺序与动作、
+>      左栏五项右键菜单 / 打开目录 / 详情 / 复制、滚轮换图 / 双击全屏 / ESC、
+>      HEIC HDR 徽标与 R71 HDR 保真、并排右页、诊断角标全部零回归。
+
+### 七、边界
+
+- **编译校验 ≠ 真机验证**：静态契约 2323 全绿、真编译成功、字节码有 `R77` 标记，只能证明代码 / 产物接线；证明不了真机上 DocumentsProvider 授权就绪时机是否真在 1200ms 内、SDK `getImageProperty` 在各类 HEIC / JPG 上是否读到有效字段、adaptive 列宽在实机 DPI 下的观感，以及本地目录自愈后是否 100% 切回 FULL。请按 `R77-A~E` 回传结果。
+- **R76 的 EXIF 判据已被本轮取代**：R76 章节「EXIF 图标是含段判据 / fd 兜底保守判无 EXIF」是当时的形态；R77 起显隐一律以 SDK 实际读到的有效字段为准，粗筛只决定是否发起读取。历史断言与历史章节按「逐字保留」原则不改写，以本章为准。
+- **`common/` 相对 import 带 `.ts` 后缀是刻意的**：为让 `node tests/dirname.test.mjs` 能直接加载新真值源；ArkTS 编译与 `modules.abc` 导入记录名已核验归一化，若后续把真值源迁出 `common/`，需同步确认 Node 与 ArkTS 两侧解析。
+- **只读名单态防线未被放宽**：只额外放行「当前主视图这一张」的单次异步解码与悬停缩略图的异步单并发解码；批量预载 / statSync / 对开探测仍由 `bulkIoAllowed` 严控，R44–R46 / R66 的 appfreeze 防线逐字不变。
+- **版本恒定 `1.0.7 / versionCode 7`**，未跑 `build.sh`、未把 HAP 放桌面、**本轮未 push**（用户未授权；R71–R76 六个本地提交仍未 push）；GitHub PAT revoke / 轮换提醒仍有效。
 
 ---
 

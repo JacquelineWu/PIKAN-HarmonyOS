@@ -21,8 +21,8 @@ import { upReturnInvertOf } from '../common/UpReturn';
 // 只在真实档案 / 文件夹行上绑定，空白区与「..」伪行零菜单。
 import { fcHitOf, fcStopPropagationOf } from '../common/FileContextMenu';
 
-/** 收起态固定宽（只留档案名一列），保持原有交互不变；原 Index.ets 同值迁入。 */
-const LIST_COLLAPSED_W: number = 224;
+/** 第七十七轮：收起态宽度不再是固定 224vp，改由 Index 侧 acLayoutOf 按容器尺寸
+ *  动态下传（@Prop collapsedW）；展开宽 / 三列宽同样全部 adaptive，零预设固定宽度。 */
 /** List 行间距（第十三轮：两行缝压到 1vp）；原 Index.ets 同值迁入。 */
 const LIST_ROW_GAP_VP: number = 1;
 
@@ -40,7 +40,11 @@ export struct SidebarView {
    *  与 cur / selected 完全独立，不参与常规选中与目录切换。 */
   @Prop upReturnName: string = '';
   @Prop listCollapsed: boolean = false;
-  @Prop listW: number = 280;   // 默认值与 Index 的 LIST_W 同值，仅作初始化兜底
+  /** 第七十七轮：三个动态宽度全部由 Index 的 acLayoutOf 下传，无预设固定值。 */
+  @Prop listW: number = 0;
+  @Prop collapsedW: number = 0;
+  @Prop colSizeW: number = 0;
+  @Prop colDateW: number = 0;
   /** 第六十四轮：与 Index 的 rows 同下标的目录内容量文案（非目录行为空串）。
    *  @Prop 数组每次整份换新引用；读它的方法同时读 dirCountVersion 建立 V1 依赖。 */
   @Prop dirCountLabels: Array<string> = [];
@@ -95,6 +99,9 @@ export struct SidebarView {
         item.kind ?? ROW_IMAGE, ROW_FOLDER, ROW_OTHER),
       countText: this.dirCountLabelOf(idx),
       collapsed: this.listCollapsed,
+      // 第七十七轮：三列宽按内容 / 容器动态伸缩，逐行共用同一套值。
+      colSizeW: this.colSizeW,
+      colDateW: this.colDateW,
       thumbDisabled: this.restoreReadonly(),
       onTap: (i: number) => {
         this.onRowTap(i);
@@ -225,7 +232,7 @@ export struct SidebarView {
       // 11-10 起按用户要求取消左下角 4 行 × 2 列共 8 个视图控制按钮。
       // 缩放 / 旋转 / 镜像 / 复位能力仍由键盘与鼠标提供（见 README 快捷键表）。
     }
-    .width(this.listCollapsed ? LIST_COLLAPSED_W : this.listW)
+    .width(this.listCollapsed ? this.collapsedW : this.listW)
     .height('100%')
     .backgroundColor('#161a21')
   }

@@ -10,7 +10,8 @@
 
 import image from '@ohos.multimedia.image';
 import hilog from '@ohos.hilog';
-import { textWidthVp } from '../common/DirName';
+// 第七十七轮：名称列不再用 textWidthVp 写死 minWidth，三列宽改由
+// common/AdaptiveColumn.ts 按内容长度 + 容器尺寸动态下传，零预设固定宽度。
 // 第五十九轮：往上层后「返回前所在子目录」反色显示，常态逐字返回原配色。
 import { upReturnBgOf, upReturnFgOf } from '../common/UpReturn';
 // 第七十五轮：名称右侧的向上箭头符号列整体移除，其专属配置 / 纯函数 / 引用一并清理。
@@ -234,6 +235,11 @@ export struct ArchiveRow {
    *  不参与 cur / select() / onRowTap / 目录切换，只由 SidebarView 按名字 + 行种类算出。 */
   @Prop inverted: boolean = false;
   @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
+  /** 第七十七轮：大小 / 内容数目列与日期列的 adaptive 动态宽（Index → SidebarView → 本行）。
+   *  不再有 .width(66) / .width(88) 之类的预设固定宽度；0 表示首帧容器尺寸还没到手，
+   *  由 ArkUI 按内容自适应，onAreaChange 后立刻换成动态计算值。 */
+  @Prop colSizeW: number = 0;
+  @Prop colDateW: number = 0;
   /** 第六十四轮：目录行内容量展示文案（由 SidebarView 按行下标下传）。
    *  非目录行恒不读它；缓存缺失 / 过期的「…」也由它带下来，本组件只负责画。 */
   @Prop countText: string = '';
@@ -389,29 +395,28 @@ export struct ArchiveRow {
       // 第七十五轮：仅移除名称右侧那个带向上箭头的符号列（原符号 Text），
       // 连带清理它专属的 import / 专用配色方法 / common 下的符号列配置模块。
       // 原本由该列承担的 .height(26) 行高锚点**原值迁移到名称列**，行高 26vp 逐字不变；
-      // 名称列仍 layoutWeight(1) 弹性吸收，字节 66 / 日期 88 两列靠右固定宽度，
-      // 三栏顺序、字段、数据展示与起始位置完全不变，不新增任何空白 / padding / offset；
+      // 第七十七轮起三列宽全部 adaptive：名称列仍 layoutWeight(1) 弹性吸收，
+      // 另外两列由父组件下传动态宽（按本列内容长度 + 根容器尺寸实时算出），
+      // 不再有任何预设 / 固定宽度；三栏顺序、字段、数据展示与起始位置完全不变；
       // 点击 / 双击 / hover / 条纹 / bindPopup 等既有交互逐字保留。
       Text(this.name)
         .fontSize(12)
         .fontColor(this.labelColor())
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-        // 左栏已按最长档案名自适应（listWidthForNames），这里再兜一层：
-        // layoutWeight 分配宽度时至少给到名字内容宽，长名字不会被压出省略号；
-        // 极少数超过 LIST_MAX_W 的超长名才由 Ellipsis 截断。
-        .constraintSize({ minWidth: textWidthVp(this.name, 12) })
+        // 第七十七轮：移除名称列按内容估宽写死的 minWidth 预设宽度兜底。
+        // 名称列纯由 layoutWeight(1) 弹性吸收剩余空间，长名由 Ellipsis 截断；
+        // 左栏整体宽 / 收起宽 / 另外两列宽都由 acLayoutOf 按内容 + 容器动态推出。
         .layoutWeight(1)
         .height(26)   // R75：行高锚点自被删的符号列原值迁入；11-10 起压缩行高 42 → 26
 
       // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
       // 第六十四轮：目录行在既有「字节」列位改画内容量统计结果 —— 同字号 10 /
-      // 同颜色 / 同宽 66 / 同右对齐，不新增列、不改行高、不改三栏起始位置。
+      // 同颜色 / 同为 adaptive 动态宽 / 同右对齐，不新增列、不改行高、不改三栏起始位置。
       // 非目录行（图片 / 文本 / 灰行 / 上层）的 fmtBytes 链路逐字保留，交互零回归。
       // 第七十六轮：名称栏与「档案大小」栏、「文件夹名」栏与「内容数目」栏之间
-      // 各加 5mm（= ROW_GAP_VP = 5vp）间距，两处共用同一常量保证严格一致；
-      // 只在 !collapsed 的这两个 66vp 列上加 .margin({ left: ROW_GAP_VP })：
-      // 名称列 layoutWeight(1) 弹性少吸收 5vp，66vp 列与日期列的右边缘位置逐字不变，
+      // 各加 5mm（= ROW_GAP_VP = 5vp）间距，两处共用同一常量保证严格一致（间距不是列宽，
+      // 第七十七轮移除固定列宽时逐字保留）；
       // 日期列既有 .margin({ left: 6 })、字段、数据展示、点击 / 双击 / hover / 条纹全部不变。
       if (!this.collapsed) {
         if (this.kind === ROW_FOLDER) {
@@ -420,7 +425,7 @@ export struct ArchiveRow {
             // 复用既有目录行名称配色（含反色 / 选中态），不新增 upReturnFgOf 调用点，
             // 目录行内容量与目录名同色，反色行仍清晰可读；非目录行仍走原字节列配色。
             .fontColor(this.labelColor())
-            .width(66)
+            .width(this.colSizeW)   // R77：adaptive 动态列宽（按本列最长内容 + 容器尺寸）
             .textAlign(TextAlign.End)
             .maxLines(1)
             .margin({ left: ROW_GAP_VP })   // R76：文件夹名栏 ↔ 内容数目栏 5mm
@@ -428,7 +433,7 @@ export struct ArchiveRow {
           Text(fmtBytes(this.bytes))
             .fontSize(10)
             .fontColor(upReturnFgOf(this.inverted, '#7f88a8'))
-            .width(66)
+            .width(this.colSizeW)   // R77：adaptive 动态列宽（按本列最长内容 + 容器尺寸）
             .textAlign(TextAlign.End)
             .maxLines(1)
             .margin({ left: ROW_GAP_VP })   // R76：档案名栏 ↔ 档案大小栏 5mm
@@ -436,7 +441,7 @@ export struct ArchiveRow {
         Text(this.mtime > 0 ? fmtDate(this.mtime) : '--')
           .fontSize(10)
           .fontColor(upReturnFgOf(this.inverted, '#6b7385'))
-          .width(88)
+          .width(this.colDateW)   // R77：adaptive 动态列宽（按日期格式内容长度）
           .textAlign(TextAlign.End)
           .maxLines(1)
           .margin({ left: 6 })
