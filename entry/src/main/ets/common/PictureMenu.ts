@@ -27,6 +27,9 @@ export const PM_ACT_SINGLE: string = 'pmSingle';
 export const PM_ACT_SPREAD: string = 'pmSpread';
 /** 第九十四轮：幻灯片播放入口从「自动隐藏顶栏」迁到相片右键菜单（第四项）。 */
 export const PM_ACT_SLIDE: string = 'pmSlide';
+/** 第一百零六轮：第五项「全屏模式」、第六项「超分辨模式」。 */
+export const PM_ACT_FULL: string = 'pmFull';
+export const PM_ACT_SR: string = 'pmSr';
 
 export const PM_LABEL_EXIF: string = '显示exif资料框';
 export const PM_LABEL_SINGLE: string = '单张预览';
@@ -34,32 +37,59 @@ export const PM_LABEL_SPREAD: string = '左右并排预览';
 /** 幻灯片两项文案：按当前是否正在播放切换，语义与旧顶栏按钮完全一致（播放 / 暂停）。 */
 export const PM_LABEL_SLIDE_PLAY: string = '播放幻灯片';
 export const PM_LABEL_SLIDE_PAUSE: string = '暂停幻灯片';
+export const PM_LABEL_FULL: string = '全屏模式';
+export const PM_LABEL_SR: string = '超分辨模式';
 
-/** 一个菜单项：动作码 + 显示文案。 */
+/** 菜单项前置标记形态：纯动作项无标记；开关项打勾；单选项打圆点。 */
+export const PM_MARK_NONE: number = 0;
+export const PM_MARK_CHECK: number = 1;
+export const PM_MARK_RADIO: number = 2;
+
+/** 一个菜单项：动作码 + 文案 + 状态。
+ *  `checked` / `mark` 给出选中反馈（单选项圆点、开关项打勾），`enabled` 给出禁用态：
+ *  灰显且点不动 —— 三者在 UI 上走同一套渲染，不另开分支。 */
 export interface PmMenuItem {
   act: string;
   label: string;
+  /** 是否处于「已选中 / 已开启」态。 */
+  checked: boolean;
+  /** 是否可用；false = 灰显且点击无响应。 */
+  enabled: boolean;
+  /** 前置标记形态（PM_MARK_*）。 */
+  mark: number;
 }
 
-/** 菜单项真值源：**前三项顺序固定**（R76 契约不变），第四项是第九十四轮新增的幻灯片开关。
+/** 菜单项真值源：**前三项顺序固定**（R76 契约不变），第四项幻灯片（R94），
+ *  第五项全屏模式、第六项超分辨模式（R106）。
  *
- *  `playing` 只影响第四项文案（播放 / 暂停），前三项与顺序一字不动 —— 这样
- *  `pmFirstThreeOrderedOf` 的既有契约继续成立，UI 与测试都不必改判据。
+ *  参数说明（全部有默认值，旧调用零改动）：
+ *   · playing    —— 第四项文案在「播放 / 暂停幻灯片」间切换；
+ *   · mode       —— 第二 / 三项的单选点：单张 or 并排（AUTO 时两者都不选中）；
+ *   · fullscreen —— 第五项的勾：当前是否全屏；
+ *   · srMode     —— 第六项的勾：超分辨模式是否开启；
+ *   · srEnabled  —— 第六项是否可用（例如没有上屏图时为 false）。
  *  每次返回新数组（零共享可变状态）。 */
-export function pmItemsOf(playing: boolean = false): Array<PmMenuItem> {
-  const base: Array<PmMenuItem> = [
-    { act: PM_ACT_EXIF, label: PM_LABEL_EXIF },
-    { act: PM_ACT_SINGLE, label: PM_LABEL_SINGLE },
-    { act: PM_ACT_SPREAD, label: PM_LABEL_SPREAD }
+export function pmItemsOf(playing: boolean = false, mode: number = PM_MODE_AUTO,
+  fullscreen: boolean = false, srMode: boolean = true,
+  srEnabled: boolean = true): Array<PmMenuItem> {
+  return [
+    { act: PM_ACT_EXIF, label: PM_LABEL_EXIF,
+      checked: false, enabled: true, mark: PM_MARK_NONE },
+    { act: PM_ACT_SINGLE, label: PM_LABEL_SINGLE,
+      checked: mode === PM_MODE_SINGLE, enabled: true, mark: PM_MARK_RADIO },
+    { act: PM_ACT_SPREAD, label: PM_LABEL_SPREAD,
+      checked: mode === PM_MODE_SPREAD, enabled: true, mark: PM_MARK_RADIO },
+    { act: PM_ACT_SLIDE,
+      label: playing ? PM_LABEL_SLIDE_PAUSE : PM_LABEL_SLIDE_PLAY,
+      checked: playing, enabled: true, mark: PM_MARK_CHECK },
+    { act: PM_ACT_FULL, label: PM_LABEL_FULL,
+      checked: fullscreen, enabled: true, mark: PM_MARK_CHECK },
+    { act: PM_ACT_SR, label: PM_LABEL_SR,
+      checked: srMode, enabled: srEnabled, mark: PM_MARK_CHECK }
   ];
-  base.push({
-    act: PM_ACT_SLIDE,
-    label: playing ? PM_LABEL_SLIDE_PAUSE : PM_LABEL_SLIDE_PLAY
-  });
-  return base;
 }
 
-/** 菜单项数（恒 4：R76 三项 + R94 幻灯片）。 */
+/** 菜单项数（恒 6：R76 三项 + R94 幻灯片 + R106 全屏 / 超分辨）。 */
 export function pmItemCountOf(): number {
   return pmItemsOf().length;
 }

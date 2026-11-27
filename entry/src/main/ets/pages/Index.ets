@@ -255,13 +255,17 @@ import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COP
   FcMenuItem, FcMenuPos } from '../common/FileContextMenu';
 // 第七十六轮：预览区「相片右键菜单 / EXIF 图标 / EXIF 资料框 / 预览模式」唯一真值源。
 // 与左栏 FileContextMenu 两套菜单互不影响：本套只在预览区相片上右键触发，恒三项。
-import { PM_ACT_EXIF, PM_ACT_SLIDE, PM_EXIF_LABEL, PM_EXIF_MARGIN_VP, PM_EXIF_EMPTY,
+import { PM_ACT_EXIF, PM_ACT_SLIDE, PM_ACT_FULL, PM_ACT_SR,
+  PM_MARK_CHECK, PM_MARK_RADIO,
+  PM_EXIF_LABEL, PM_EXIF_MARGIN_VP, PM_EXIF_EMPTY,
   PM_MENU_W, PM_MENU_ITEM_H, PM_MENU_TITLE_H, PM_MENU_PAD_V,
   PM_MODE_AUTO, PM_MODE_SPREAD, PmMenuItem, PmMenuPos, PmExifField,
   pmItemsOf, pmHasActOf, pmModeAfterAct, pmSpreadWantedOf,
   pmExifBadgeVisibleOf, pmPhotoReadyOf, pmExifPanelTitleOf, pmExifEmptyOf,
   pmRightHitOf, pmMenuHeightOf, pmMenuPosOf, pmMenuVisibleOf,
   pmMenuTitleOf, pmStatusOf } from '../common/PictureMenu';
+// 第一百零六轮：底部状态栏「快捷键总表」唯一真值源（纯常量 + 拼串）。
+import { shortcutHintsTextOf } from '../common/Shortcuts';
 
 /** 第二十轮：根组件焦点 id。真全屏 / 退出全屏会重建布局，窗口管理器也可能收走焦点；
  *  .defaultFocus(true) 只在首次构建生效，焦点一丢，之后所有按键（含 ESC）都到不了 onKey。
@@ -271,7 +275,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R105';
+const ESC_BUILD_TAG: string = 'R106';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1386,6 +1390,14 @@ struct Index {
   @State pmMenuName: string = '';
   @State pmMenuItems: Array<PmMenuItem> = [];
   @State pmMenuHover: string = '';
+  /** 第一百零六轮：菜单目标下标 —— 右键按在**哪一页**就锁哪一页（并排时右页即 spreadB）；
+   *  -1 = 未指定（落在图片间隙 / 空白，沿用「当前图」的既有口径）。 */
+  @State pmTargetIdx: number = -1;
+  /** 第一百零六轮：「超分辨模式」总开关。默认开（= R99 起的按需自动超分）；
+   *  关掉即刻释放超分产物回原图，且后续不再触发。 */
+  @State srMode: boolean = true;
+  /** 第一百零六轮：EXIF 资料框当前展示的字段 —— 可能是右页那张，不一定是主视图那张。 */
+  @State exifPanelFields: Array<PmExifField> = [];
   /** 第七十七轮：当前相片是否确有【有效 EXIF 数据】
    *  （= pmExifEffectiveOf(exifFields)，来自 PreviewEntry.hasExif；与资料框同源）。 */
   @State viewHasExif: boolean = false;
@@ -6597,6 +6609,10 @@ struct Index {
     if (this.textMode || this.playing || this.slideBlending) {
       return;
     }
+    // 第一百零六轮：「超分辨模式」总开关关闭 → 一律不触发（已上屏的产物由切换动作释放）。
+    if (!this.srMode) {
+      return;
+    }
     let info: image.ImageInfo | undefined = undefined;
     try {
       info = px.getImageInfoSync();
@@ -9863,7 +9879,8 @@ struct Index {
     .width(this.pageWLeft(half))
     .height(this.pageH(half))
     .onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_LEFT))
-    .onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_LEFT, half))
+    // 第一百零六轮：右键先在这里判「按在哪一页」，锁定菜单目标；其余事件原样交给放大镜通道。
+    .onMouse((event: MouseEvent) => this.onPaneMouse(event, LOUPE_PANE_LEFT, half))
   }
 
   /** 对开右页：优先用命中缓存的 PixelMap；未就绪时留中灰占位，不阻塞左页。
@@ -9919,7 +9936,8 @@ struct Index {
     .width(this.pageWRight(half))
     .height(this.pageH(half))
     .onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_RIGHT))
-    .onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_RIGHT, half))
+    // 第一百零六轮：右页右键 → 菜单锁到右页那张（左页仍锁 cur），互不串数据。
+    .onMouse((event: MouseEvent) => this.onPaneMouse(event, LOUPE_PANE_RIGHT, half))
   }
 
   // ------------------------------------------------------------------
@@ -10498,6 +10516,7 @@ struct Index {
 
       // ============================== 状态栏（全屏时隐藏）==============================
       if (!this.fullscreen) {
+        Column() {
         Row() {
           // 第二十轮：把 ESC 链路诊断直接拼在状态栏，真机按两下 ESC 即可截图回传断点。
           Text(this.status + (this.diagOverlayOn && this.escDiag.length > 0 ? '  ·  ' + this.escDiag : ''))
@@ -10520,6 +10539,25 @@ struct Index {
         .width('100%')
         .height(26)
         .padding({ left: 16, right: 16 })
+        .backgroundColor('#12161c')
+
+        // 第一百零六轮：快捷键总表 —— 独立第二行，**不覆盖**第一行的状态文案。
+        // 多图并排 / 普通预览都在（都走这段状态栏）；全屏时整条状态栏按既有逻辑隐藏。
+        // 真值源在 common/Shortcuts.ts，界面只负责渲染，不各拼一份。
+        Row() {
+          Text(shortcutHintsTextOf())
+            .fontSize(10)
+            .fontColor('#6b7484')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+        .height(18)
+        .padding({ left: 16, right: 16 })
+        .alignItems(VerticalAlign.Center)
+        .backgroundColor('#12161c')
+        }
+        .width('100%')
         .backgroundColor('#12161c')
       }
       }
@@ -10700,9 +10738,17 @@ struct Index {
               .padding({ left: 12, right: 12 })
             ForEach(this.pmMenuItems, (it: PmMenuItem) => {
               Row() {
+                // 第一百零六轮：前置标记列 —— 单选项 ●、开关项 ✓、纯动作项留空。
+                // 列宽固定 14：有没有标记，六项标签的左边缘都对齐、不跳。
+                Text(it.mark === PM_MARK_RADIO ? '●' : (it.mark === PM_MARK_CHECK ? '✓' : ''))
+                  .fontSize(10)
+                  .fontColor(it.enabled ? '#8fb8e8' : '#4a5260')
+                  .width(14)
+                  .textAlign(TextAlign.Center)
                 Text(it.label)
                   .fontSize(13)
-                  .fontColor('#e8ecf4')
+                  .fontColor(it.enabled ? '#e8ecf4' : '#59616f')
+                  .layoutWeight(1)
               }
               .width('100%')
               .height(PM_MENU_ITEM_H)
@@ -10710,9 +10756,13 @@ struct Index {
               .backgroundColor(this.pmMenuHover === it.act ? '#333b4a' : '#00000000')
               .borderRadius(4)
               .onHover((on: boolean) => {
-                this.pmMenuHover = on ? it.act : '';
+                // 禁用项不给悬停高亮（点了也没反应，高亮会骗人）
+                this.pmMenuHover = (on && it.enabled) ? it.act : '';
               })
               .onClick(() => {
+                if (!it.enabled) {
+                  return;
+                }
                 const act: string = it.act;
                 this.pmMenuOn = false;
                 this.pmMenuHover = '';
@@ -10751,13 +10801,13 @@ struct Index {
               .fontColor('#e8ecf4')
               .width('100%')
               .margin({ bottom: 12 })
-            if (pmExifEmptyOf(this.viewExifFields.length)) {
+            if (pmExifEmptyOf(this.exifPanelFields.length)) {
               Text(PM_EXIF_EMPTY)
                 .fontSize(12)
                 .fontColor('#8b95a8')
                 .width('100%')
             } else {
-              ForEach(this.viewExifFields, (f: PmExifField) => {
+              ForEach(this.exifPanelFields, (f: PmExifField) => {
                 Row() {
                   Text(f.label)
                     .fontSize(12)
@@ -11884,60 +11934,131 @@ struct Index {
       });
   }
 
-  /** 第七十六轮：预览区相片上右键 Press → 打开 picture contact menu 浮层。
-   *  只负责「显示」：命中判定 / 菜单快照 / 把鼠标窗口坐标裁进可视区；
-   *  全部真实行为收口到 onPictureMenuAction。
-   *  与左栏 onFileContextMenu 完全独立：两套菜单的状态、坐标、项、动作互不改写。
-   *  第九十四轮：`pmItemsOf(this.playing)` —— 第四项文案随播放态切换（播放 / 暂停幻灯片）。 */
-  private openPictureMenu(x: number, y: number): void {
+  /** 第一百零六轮：某一页的右键 —— 按在**哪张图上**就把菜单锁到那张。
+   *  只有落在相片本身才会走到这里（间隙 / 空白不会命中 pane），因此
+   *  「在右图上右键却拿到左图资料」从结构上不可能发生。 */
+  private onPaneMouse(event: MouseEvent, pane: number, half: boolean): void {
+    if (event.action === MouseAction.Press && event.button === MouseButton.Right) {
+      const idx: number = pane === LOUPE_PANE_RIGHT ? this.spreadB : this.cur;
+      const dx: number = Number(event.displayX ?? event.x);
+      const dy: number = Number(event.displayY ?? event.y);
+      this.openPictureMenuAt(dx, dy, idx);
+      event.stopPropagation();
+      return;
+    }
+    this.onLoupeMouse(event, pane, half);
+  }
+
+  /** 预览区相片上右键 Press → 打开 picture contact menu 浮层。
+   *  `targetIdx` 为右键命中的那一页的下标；越界 / -1 一律回落到当前图
+   *  （指针在图片间隙 / 空白时父级通道调用的就是这条回落，与 R76 的既有行为逐字一致）。
+   *  只负责「显示」：命中判定 / 目标锁定 / 菜单快照 / 坐标裁剪；行为全部收口到 onPictureMenuAction。 */
+  private openPictureMenuAt(x: number, y: number, targetIdx: number): void {
     this.markUserActive();
     // 空态（没有图）/ 文本预览 / 只读指引卡一律不弹，绝不越界。
     if (!pmRightHitOf(this.viewPixelMap !== undefined, this.textMode)) {
       return;
     }
-    const items: Array<PmMenuItem> = pmItemsOf(this.playing);
+    let idx: number = targetIdx;
+    if (idx < 0 || idx >= this.items.length) {
+      idx = this.cur;
+    }
+    if (idx < 0 || idx >= this.items.length) {
+      return;                                  // 连当前图都没有：不弹（绝不拿空数据凑菜单）
+    }
+    // 菜单状态与真实状态同源：单张 / 并排的单选点、全屏与超分辨的勾，都取此刻的真值。
+    const items: Array<PmMenuItem> = pmItemsOf(this.playing, this.previewMode,
+      this.fullscreen, this.srMode, this.viewPixelMap !== undefined);
     const h: number = pmMenuHeightOf(items.length);
     const pos: PmMenuPos = pmMenuPosOf(x, y, this.lastRootW, this.lastRootH,
       PM_MENU_W, h);
-    const it: ImageItem | undefined = this.curItem();
-    this.pmMenuName = pmMenuTitleOf(it !== undefined ? it.name : '');
+    this.pmMenuName = pmMenuTitleOf(this.items[idx].name);
     this.pmMenuItems = items;
     this.pmMenuX = pos.x;
     this.pmMenuY = pos.y;
     this.pmMenuHover = '';
+    this.pmTargetIdx = idx;
     this.pmMenuOn = true;
   }
 
-  /** 第七十六轮：picture contact menu 动作（R76 三项 + R94 幻灯片开关）。
-   *  · 第一项「显示exif资料框」：只写标题 + 开关，字段取当前相片 viewExifFields；
-   *  · 第二项「单张预览」：强制单页（强制关右页）；
-   *  · 第三项「左右并排预览」：有下一张即强制并排，覆盖自动竖图判据；
-   *  · 第四项「播放幻灯片 / 暂停幻灯片」（第九十四轮）：只调 toggleSlide()。
-   *  越权动作由 pmHasActOf 拒绝；每个动作都有状态栏明确反馈，绝不静默吞掉。 */
+  /** 父级兜底通道（图片间隙 / 空白处右键）：保持既有口径 —— 以当前图为目标。
+   *  这也是「尚未确定目标图片时不误用别的页数据」的落点：它只认 cur，不去猜右页。 */
+  private openPictureMenu(x: number, y: number): void {
+    this.openPictureMenuAt(x, y, this.cur);
+  }
+
+  /** 目标图的 EXIF 字段：当前图用主视图那份（最新、最全），其它页取同 uri 的缓存条目。 */
+  private exifFieldsAt(idx: number): Array<PmExifField> {
+    if (idx === this.cur) {
+      return this.viewExifFields;
+    }
+    if (idx < 0 || idx >= this.items.length) {
+      return [];
+    }
+    const e: PreviewEntry | undefined = this.previewEntry(this.items[idx].uri);
+    return e !== undefined ? e.exifFields : [];
+  }
+
+  /** 第一百零六轮：picture contact menu 动作（R76 三项 + R94 幻灯片 + R106 全屏 / 超分辨）。
+   *  目标图由 pmTargetIdx 锁定；每个动作都有状态栏明确反馈，绝不静默吞掉。
+   *  越权动作由 pmHasActOf 拒绝。 */
   private onPictureMenuAction(act: string): void {
     this.markUserActive();
     if (!pmHasActOf(act)) {
       return;
     }
-    // 第九十四轮：幻灯片入口（从顶栏迁来）。**只调 toggleSlide()**，不写 previewMode、
-    // 不重解右页、不改 rot/flip/fullscreen —— 与原顶栏 `doAction('play')` 的行为逐字一致：
-    // 未播放 → 启动（每 SLIDE_INTERVAL 秒 go(1)，环形）；播放中 → 暂停并清计时器。
-    // 状态栏文案也由 toggleSlide / stopSlide 自己写，保证「启动 / 暂停 / 无图提示」三态与旧版同字。
+    let idx: number = this.pmTargetIdx;
+    if (idx < 0 || idx >= this.items.length) {
+      idx = this.cur;
+    }
+    const it: ImageItem | undefined = (idx >= 0 && idx < this.items.length)
+      ? this.items[idx] : undefined;
+    const name: string = it !== undefined ? it.name : '';
+    // 幻灯片入口：只调 toggleSlide()，不写 previewMode、不重解右页（与 R94 逐字一致）。
     if (act === PM_ACT_SLIDE) {
       this.toggleSlide();
       return;
     }
-    const it: ImageItem | undefined = this.curItem();
-    const name: string = it !== undefined ? it.name : '';
+    // 第一百零六轮：全屏模式 —— 与 F / 双击 / F11 同一个收口 setFull（状态文案由它自己写）。
+    if (act === PM_ACT_FULL) {
+      this.setFull(!this.fullscreen);
+      return;
+    }
+    // 第一百零六轮：超分辨模式 —— 总开关；关掉即刻释放产物回原图。
+    if (act === PM_ACT_SR) {
+      this.toggleSuperResMode(idx);
+      return;
+    }
     const mode: number = pmModeAfterAct(this.previewMode, act);
     this.previewMode = mode;
     if (act === PM_ACT_EXIF) {
+      // 字段取「目标那张」：并排时右键右页 → 展示右页的 EXIF，而不是主视图那张。
       this.exifPanelTitle = pmExifPanelTitleOf(name);
+      this.exifPanelFields = this.exifFieldsAt(idx);
       this.exifPanelOn = true;
     } else {
       // 单张 / 并排都要求立刻重算右页；自动模式（未选时）沿用既有竖图对开，零回归。
       this.refreshSpread();
     }
     this.status = pmStatusOf(act, name, mode, ESC_BUILD_TAG);
+  }
+
+  /** 第一百零六轮：超分辨模式开关。
+   *  开 → 立刻对目标图补跑一次（只有主视图参与超分，右页不参与，故仅当目标是当前图才触发）；
+   *  关 → 立刻释放产物回原图，并让后续 maybeSuperResolve 直接跳过。
+   *  与「全屏模式」互不干扰：两者都是独立开关，勾选状态各自取真值。 */
+  private toggleSuperResMode(idx: number): void {
+    this.srMode = !this.srMode;
+    if (!this.srMode) {
+      this.clearViewSrPx();
+      this.status = '超分辨模式：已关闭 · 已回到原图 · ' + ESC_BUILD_TAG;
+      return;
+    }
+    this.status = '超分辨模式：已开启（AI 超分将按需生效）· ' + ESC_BUILD_TAG;
+    if (idx === this.cur && this.viewPixelMap !== undefined) {
+      const uri: string = this.items[this.cur].uri;
+      this.viewSrKeyDone = '';                 // 允许同一张再算一次（刚被关掉过）
+      this.maybeSuperResolve(uri, this.viewPixelMap, this.curToken);
+    }
   }
 }
