@@ -90,7 +90,8 @@ import { preloadWindowSize, preloadOrder, preloadSaturated, PreloadBatch,
 import { RESUME_SKIP, RESUME_SINGLE, RESUME_SNAPSHOT, FLUSH_SKIP, FLUSH_ASYNC,
   resumeAction, resumeSingleUri, resumeDelaySafe, exitFlushAction, resumeSnapCap,
   RESTORE_FULL, RESTORE_READONLY, restoreModeOf, bulkIoAllowed, restoreProbeUris,
-  readonlyHint, readonlyTapHint, readonlyUpHint, restoreUpEnabled, restoreUpHint } from '../common/ResumePlan';
+  readonlyHint, readonlyTapHint, readonlyUpHint, restoreUpEnabled, restoreUpHint,
+  RELIST_SKIP, RELIST_TRY, readonlyRelistAction, relistProbeOkOf, relistOkHint } from '../common/ResumePlan';
 // 第三十六轮：目录上下文与「有没有图片位置」解耦，空 / 无图片目录也能退出重开恢复。
 import { DIR_RESUME_CONTEXT, DIRCTX_EMPTY,
   dirContextFlagOf, dirContextSaveWanted, dirOnlyResumeWanted } from '../common/ResumePlan';
@@ -245,7 +246,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R78';
+const ESC_BUILD_TAG: string = 'R79';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1040,6 +1041,15 @@ const RESUME_DELAY_MS: number = 900;
  *  fs.openSync 失败不代表整批 uri 都打不开；错开这段时间再探一次即可，
  *  不抢恢复关键路径，也不新增任何批量同步 IO。 */
 const RESTORE_HEAL_DELAY_MS: number = 1200;
+/** 第七十九轮：只读名单态「目录重列举兜底」的延时。
+ *  比 RESTORE_HEAL_DELAY_MS 早 300ms —— 自愈只重探 okUri 一个候选（救不了
+ *  「那张被移走」的误判），重列举才是真正能救回预览的那条路，先试它。
+ *  仍然远在首帧之后，不抢恢复关键路径。 */
+const READONLY_RELIST_DELAY_MS: number = 900;
+/** 重列举最多试几个目录 URI 形态（picker FOLDER 模式返回的形态不统一）。 */
+const RELIST_CAND_MAX: number = 2;
+/** 「按目录授权重列举恢复」的诊断标记（不是版本号）。实机状态栏出现 rl1 即带此修复。 */
+const RELIST_TAG: string = 'rl1';
 /** 恢复延迟的硬下限（resumeDelaySafe 校验用）：低于这个值一律拒绝调度，
  *  防止以后有人把 RESUME_DELAY_MS 调太小，把恢复又塞回启动关键路径。 */
 const RESUME_MIN_SAFE_MS: number = 600;
@@ -1432,6 +1442,8 @@ struct Index {
   private bootRefreshTimer: number = -1;
   /** 第七十七轮：只读名单态延迟自愈重探的定时器（页面销毁时一并清掉）。 */
   private restoreHealTimer: number = -1;
+  /** 第七十九轮：只读名单态「目录重列举兜底」的定时器（页面销毁时一并清掉）。 */
+  private readonlyRelistTimer: number = -1;
   private bootRefreshRetry: number = 0;
   // ---- 第二十二轮：按键到达可观测（零按键到达是本轮要解决的唯一断点）----
   /** 任意键（不只 ESC）进入 onKey() 的累计次数。常显在右下角角标：
@@ -1937,6 +1949,10 @@ struct Index {
     if (this.restoreHealTimer !== -1) {
       clearTimeout(this.restoreHealTimer); // 第七十七轮：页面销毁后不许再自愈重探
       this.restoreHealTimer = -1;
+    }
+    if (this.readonlyRelistTimer !== -1) {
+      clearTimeout(this.readonlyRelistTimer); // 第七十九轮：页面销毁后不许再重列举
+      this.readonlyRelistTimer = -1;
     }
     this.clearEnterWatchdog(); // 页面已销毁，超时也不该再弹选择文件夹
     this.giveUpDone = true;    // 页面已销毁：warm 回调也不许再对死路径发起同步 IO
@@ -2508,6 +2524,109 @@ struct Index {
         this.healRestoreMode();
       }
     }, RESTORE_HEAL_DELAY_MS);
+  }
+
+  /** 第七十九轮：只读名单态 → 排一次「目录重列举兜底」。
+   *
+   *  为什么必须有：启动探测 `probeRestoreUris(fast=true)` 只探 1 个候选，而候选
+   *  第一位就是 `okUri`（退出前正在看的那张）。它被移走 / 改名 / 换 URI 形态，
+   *  整批名单就被判成「授权失效」；`healRestoreMode` 又只重探同一个 uri，于是永久
+   *  停在只读态。真实情况往往是「目录持久授权仍在、只是快照旧 uri 不可读」。
+   *
+   *  这里用持久授权目录重新真实列一遍：能列出且能读到图片 → 交给既有
+   *  `openFolder` 重建（它会按 `restoreIndex` 回到上次那张）；否则保持只读名单。
+   *  网络目录不在这里兜（交给 warmRestoreDirQuiet 的重试 + 自愈）。 */
+  private scheduleReadonlyRelist(): void {
+    if (this.readonlyRelistTimer !== -1) {
+      clearTimeout(this.readonlyRelistTimer);
+    }
+    this.readonlyRelistTimer = setTimeout(() => {
+      this.readonlyRelistTimer = -1;
+      if (this.restoreCancelled || !this.pageAlive || this.giveUpDone) {
+        return;
+      }
+      const base: string = this.browseBase.length > 0 ? this.browseBase : this.savedDirUri;
+      const act: number = readonlyRelistAction(!bulkIoAllowed(this.restoreMode),
+        base.length > 0, isNetworkDirUri(base), this.userActed, this.giveUpDone,
+        this.items.length);
+      if (act === RELIST_SKIP) {
+        return;
+      }
+      this.tryReadonlyRelist(base).catch(() => {
+        hilog.warn(DOMAIN, TAG, 'relist: rejected (ignored)');
+      });
+    }, READONLY_RELIST_DELAY_MS);
+  }
+
+  /** 第七十九轮：轻量确认 + 真实重建。
+   *  ⚠️ 绝不直接 `openFolder`：它会对每个子项 `fs.statSync`（同步跨进程），
+   *     在授权不可用的目录上可能挂住主线程（历史 appfreeze 同源）。
+   *     先用 1 次 async `listFile` + 1 次 `openSync` 确认「列得出且读得动」，
+   *     通过了才把目录交给 `openFolder`（此时逐项 stat 已是安全路径）。 */
+  private async tryReadonlyRelist(base: string): Promise<void> {
+    const cands: Array<string> = dirCandidates(base).slice(0, RELIST_CAND_MAX);
+    for (let i: number = 0; i < cands.length; i++) {
+      if (this.restoreCancelled || !this.pageAlive || this.userActed) {
+        return;
+      }
+      const cand: string = cands[i];
+      let names: Array<string> = [];
+      try {
+        names = await fs.listFile(cand, { recursion: false, listNum: 0 });
+      } catch (e) {
+        continue;
+      }
+      if (this.restoreCancelled || !this.pageAlive || this.userActed) {
+        return;
+      }
+      let pic: string = '';
+      for (let k: number = 0; k < names.length; k++) {
+        if (isImageName(names[k])) {
+          pic = names[k];
+          break;
+        }
+      }
+      if (pic.length === 0) {
+        continue;   // 本层没有图片：不重建（避免把图片态换成目录态）
+      }
+      // 只做 1 次同步 open：确认子文件真能读，量级与启动探测同级。
+      let openOk: boolean = false;
+      let f: fs.File | undefined = undefined;
+      try {
+        f = fs.openSync(stripTrailingSlash(cand) + '/' + pic, fs.OpenMode.READ_ONLY);
+        openOk = true;
+      } catch (e) {
+        openOk = false;
+      } finally {
+        if (f !== undefined) {
+          try {
+            fs.closeSync(f);
+          } catch (e) {
+            hilog.warn(DOMAIN, TAG, 'relist close skipped');
+          }
+        }
+      }
+      if (!relistProbeOkOf(names.length > 0, openOk)) {
+        continue;
+      }
+      hilog.info(DOMAIN, TAG, 'relist: dir readable, rebuild list (%{public}d entries)',
+        names.length);
+      this.status = '正在按目录授权重新读取…';
+      const ok: boolean = await this.openFolder(cand, false);
+      if (!this.pageAlive || this.restoreCancelled) {
+        return;
+      }
+      if (ok && this.items.length > 0) {
+        this.status = relistOkHint(RELIST_TAG);
+        this.diagLine = 'restore RELISTED | ' + RELIST_TAG + ' | ' +
+          this.items.length + ' 张 | v' + APP_VERSION;
+        hilog.info(DOMAIN, TAG, 'relist: recovered %{public}d images', this.items.length);
+      } else {
+        hilog.warn(DOMAIN, TAG, 'relist: list ok but no readable image, stay READONLY');
+      }
+      return;
+    }
+    hilog.warn(DOMAIN, TAG, 'relist: no candidate readable, stay READONLY');
   }
 
   /** activate 收口点：只跑一次，清掉超时定时器，然后照常进入恢复链。
@@ -3137,6 +3256,8 @@ struct Index {
         });
         // 第七十七轮：本地目录也排一次延迟自愈（warm 只对网络目录生效）。
         this.scheduleRestoreHeal();
+        // 第七十九轮：本地目录再用持久授权目录做一次重列举兜底。
+        this.scheduleReadonlyRelist();
       }
       // ⚠️ setItems → applyItems 末尾会 markPos() + snapDirty=true，500ms 后 flushPos
       //    会把「只有 1 张」的列表写进快照，覆盖掉上次会话的整批 uri；位置记忆也会被
@@ -3624,6 +3745,9 @@ struct Index {
         });
         // 第七十七轮：本地目录也排一次延迟自愈（warm 只对网络目录生效）。
         this.scheduleRestoreHeal();
+        // 第七十九轮：本地目录再用持久授权目录做一次重列举兜底
+        // （启动探测只探 okUri 一张，那张被移走就会误判整批失效）。
+        this.scheduleReadonlyRelist();
       }
       this.snapDirty = false;         // 列表本来就是从快照来的，没必要再写回去
       this.status = this.status + '（来自上次会话）';

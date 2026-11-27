@@ -285,3 +285,54 @@ export function dirOnlyResumeWanted(dirCtx: string, autoEnabled: boolean,
   }
   return DIR_RESUME_CONTEXT;
 }
+
+// ---------------------------------------------------------------------------
+// 第七十九轮：只读名单态的「目录重列举兜底」（2026-11-27）
+//
+// 实机现象（用户截图）：退出后重开，左栏 42 张名单都在、当前行也高亮，但预览区
+// 停在「图片读取授权在重启后已失效」卡片，点行只得到「暂不能预览」。
+//
+// 根因（按真实源码判读）：
+//  · 启动探测只探 1 个候选 —— `probeTakeOf(fast=true)` 恒返回 1，而
+//    `restoreProbeUris` 把 `okUri`（最后一次成功显示的那张）排在第一位。
+//    只要「退出前正在看的那张」被移走 / 改名 / 换了 URI 形态，整批 42 张就被
+//    一起判成「授权失效」。
+//  · 判死之后只有 `healRestoreMode` 再探同一个 `okUri`（仍然 1 个），于是整个
+//    会话永久停在只读名单态。
+//  · 而 picker 的**目录持久授权其实可能仍在**：目录列得出来、子文件读得动，
+//    只是快照里那批旧 URI 形态不再有效。
+//
+// 修法：只读态后用持久授权的目录做一次**轻量**确认（1 次 async listFile +
+// 1 次 openSync），确认可读才交给既有 `openFolder` 真实重建 —— 那时才允许它逐项
+// statSync；确认不通过就保持只读名单。真授权失效时现有提示仍然正确，且绝不把
+// 同步 statSync 循环重新引回主线程（历史 appfreeze 防线不动）。
+// ---------------------------------------------------------------------------
+
+export const RELIST_SKIP: number = 0;
+export const RELIST_TRY: number = 1;
+
+/** 只读名单态是否值得做一次「目录重列举兜底」。
+ *  · `readonlyMode`：只在只读态试；FULL 态本来就正常，不必多一次 IO。
+ *  · `hasDirUri`：没有持久授权目录就无从重列（老数据 / 从未选过目录）。
+ *  · `networkDir`：网络目录交给既有 `warmRestoreDirQuiet` 的重试 + 自愈；
+ *    这里只兜本地目录（本地 listFile 失败是秒级，NAS 可能挂十几秒）。
+ *  · `userActed` / `giveUp` / `count`：用户已接手、已放弃、名单为空 → 不试。 */
+export function readonlyRelistAction(readonlyMode: boolean, hasDirUri: boolean,
+  networkDir: boolean, userActed: boolean, giveUp: boolean, count: number): number {
+  if (!readonlyMode || !hasDirUri || networkDir || userActed || giveUp || count <= 0) {
+    return RELIST_SKIP;
+  }
+  return RELIST_TRY;
+}
+
+/** 轻量确认是否通过：目录**列得出来**且**至少一个图片子项真能 open**。
+ *  只列出目录（本层没有图片）不算恢复 —— 否则会把「图片列表态」换成「目录表态」，
+ *  用户看到的仍然不是退出前那张图。 */
+export function relistProbeOkOf(listed: boolean, openOk: boolean): boolean {
+  return listed && openOk;
+}
+
+/** 重列举成功后的状态栏提示（带诊断标记，便于实机辨认新包）。 */
+export function relistOkHint(tag: string): string {
+  return '已按目录授权重新读取，图片可以正常预览了 · ' + tag;
+}

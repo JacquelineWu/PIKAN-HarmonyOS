@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R78`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R79`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -567,15 +567,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R75（移除名称右侧向上箭头符号列 / REVEAL 目录改以 browseBase 为真值）、
 > R76（间距 5mm / 放大镜改相片上左键 / 仅含 EXIF 相片右上角 EXIF 图标 / 相片右键三项菜单）、
 > R77（重启后 size·日期·预览图·缩略图完整恢复 / EXIF 有效字段同源真值 / 档案列表 adaptive column width）、
-> R78（左栏紧凑显示 / 三个纯图案按钮 / 移除「APP 内上层xxx」提醒）
-> 见下方十八个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R78（左栏紧凑显示 / 三个纯图案按钮 / 移除「APP 内上层xxx」提醒）、
+> R79（只读名单态目录重列举兜底 / 恢复退出前那张预览 / 三场景兼容）
+> 见下方十九个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R78`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R78` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R79`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R79` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R78 新增断言顺延，以 `grep -n 真机步骤 R78 tests/dirname.test.mjs` 为准：10381–10394）
+  （行号随 R79 新增断言顺延，以 `grep -n 真机步骤 R79 tests/dirname.test.mjs` 为准：10484–10493）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -618,6 +619,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R76 | 间距 5mm / 左键放大镜 / EXIF 图标 / 相片右键三项菜单 / 单张·并排模式 | 10030–10044 |
 | R77 | 重启资料·预览图·缩略图恢复 / EXIF 有效字段同源 / adaptive column width | 10231–10246 |
 | R78 | 左栏紧凑显示 / 三个纯图案按钮 / 移除「APP 内上层xxx」提醒 | 10381–10394 |
+| R79 | 只读名单态目录重列举兜底 / 恢复退出前那张预览 / 三场景兼容 | 10484–10493 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1879,6 +1881,87 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第七十九轮：重启后「图片授权已失效」误判修复 —— 只读名单态目录重列举兜底（2026-11-27，R79）
+
+> 用户报障（截图 + 原文）：「退出 APP 后再次打开 APP 时，界面显示截图中的错误信息，而且无法预览退出前正在查看的图片。」截图：左栏 42 张名单与当前高亮行都在、三个图案按钮已是 R78 形态，右侧预览区停在「⚠️ 上次名单已恢复，图片暂时不能预览 / 已恢复上次名单（42 张）· 图片读取授权在重启后已失效，点「选择文件夹」重新打开「编号202622 模特 小仙女」即可看图 · ro1」，底部状态栏 `「DSC03381.jpg」暂不能预览（授权已失效）…`。
+
+### 一、现状判读（按真实源码，不凭缓存推断）
+
+- **卡片 / 状态栏 / 诊断标记三者同源**：卡片正文由 `readonlyHint()`（ResumePlan）逐字生成，点行提示由 `readonlyTapHint()` 生成，`ro1` = `RESTORE_TAG` ⇒ 当前确为 `RESTORE_READONLY`。
+- **判死点只有一个 uri**：`restoreFromSnapshot()` → `probeRestoreUris(uris, okUri, savedUri, fast=true)` → `probeTakeOf(fast, n)` **恒返回 1**；而 `restoreProbeUris()` 的候选顺序是 `okUri`（最后一次成功显示的那张）→ `savedUri` → 快照前几条。⇒ 只要「退出前正在看的那张」被移走 / 改名 / 换了 URI 形态，整批 42 张就被一起判成「授权失效」。
+- **自愈也只探同一个**：`healRestoreMode()`（R77 的本地延迟自愈）同样 `fast=true` → 仍只探 `okUri`，于是整个会话永久停在只读态。
+- **目录授权与快照 uri 是两件事**：`openFolder()` 的既有注释写明「picker 的 FOLDER 模式返回的 uri 形态不统一，且 URI 授权是逐项的：能 listFile 不代表能读子文件」。快照里那批旧 uri 不可读，不等于目录持久授权失效；现有链路把两者混为一谈。
+- **不能直接 openFolder 兜底**：`openFolder()` 对每个子项 `fs.statSync`（同步跨进程）；在授权不可用的目录上成百上千次同步调用正是历史 appfreeze 的根因。
+- **三场景同一条链**：正常退出（`quitApp` → `flushPosSync`）、后台被系统回收、强制关闭，都是冷启动走 `beginRestore()` → `activatePersistedUri` → `showLastOnStart` → `restoreFromSnapshot`。差异只在 `flushPosSync` 是否跑完（影响 `lastPos` 的落点精度）；`savedDirUri` 在选目录时就写盘，不依赖退出落盘 ⇒ 三场景表现一致，修复一处即可覆盖。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/ResumePlan.ts` | 新增 `readonlyRelistAction(readonlyMode, hasDirUri, networkDir, userActed, giveUp, count)`（何时值得兜底）、`relistProbeOkOf(listed, openOk)`（轻量确认判据）、`relistOkHint(tag)`；`RELIST_SKIP / RELIST_TRY` 常量。零 SDK / 零 IO / 零异步 / 零 throw / 零定时器 |
+| `pages/Index.ets` | `ESC_BUILD_TAG → R79`；新增 `READONLY_RELIST_DELAY_MS=900` / `RELIST_CAND_MAX=2` / `RELIST_TAG='rl1'` / `readonlyRelistTimer`；新增 `scheduleReadonlyRelist()`（延迟排程）与 `tryReadonlyRelist(base)`（1 次 async `listFile` → 1 次 `openSync` → 通过才 `openFolder(cand, false)` 真实重建）；快照恢复与单张兜底两处 READONLY 分支各排一次；`aboutToDisappear` 清 timer |
+| `tests/dirname.test.mjs` | 构建标记整批升位 `R78 → R79`；新增 R79 组 **13 条**断言（纯函数边界 + 接线契约 + 零回归）+ 真机步骤 `R79-A~D`（`10484–10493`） |
+| `README.md` / 记忆 | 抬头 / 手册 / 步骤表升位 `R79`，新增本章，追加当日与长期记忆 |
+
+### 三、设计要点
+
+- **「只探 1 个」是误判源，但不能简单加大**：`fast` 只探 1 个是为防「失效 uri 的同步 openSync 在 NAS 上挂十几秒」。本轮**不动**这个纪律（`probeTakeOf` / `RESTORE_PROBE_LIMIT` 逐字保留），改在判死之后用一条更可靠的判据补一次：目录能否列出 + 一个子文件能否打开。
+- **先轻量确认、再允许 statSync 循环**：`tryReadonlyRelist()` 先 `await fs.listFile(cand)`（异步，不阻塞主线程），再对第一个图片名做**一次** `openSync` 确认可读；两者都过才把目录交给 `openFolder`。此时目录确实可读，`openFolder` 内部逐项 `statSync` 是安全路径（且 size / date / 目录行都回来了）。确认不通过就原样留在只读名单 —— 真授权失效时现有提示仍然正确。
+- **只兜本地目录**：`readonlyRelistAction` 对 `isNetworkDirUri(base)` 直接 SKIP；网络目录继续走 R44/R45 的 `warmRestoreDirQuiet` 重试 + `healRestoreMode` 自愈，不引入新的 NAS 同步 IO 风险。
+- **落点仍由既有 `restoreIndex` 决定**：`openFolder` → `applyItems(keepView=false)` → `restoreIndex(list)`：先按 `uri` 精确命中，再按 `count + idx` 回退。即使重列举后子 uri 形态变了，只要张数一致就能回到「退出前那张」。
+- **成功判定放在 `await` 之后**：`openFolder` 若命中整表缓存会先用旧 uri 渲染一帧，但真实列举随后必然覆盖；`await` 返回时 `items` 已是真实 uri。故用 `ok && this.items.length > 0` 判定「真恢复」；只列出目录（子文件仍不可读）时 `items` 为空，不会被误判成成功。
+- **不新起一套提示卡**：成功时只改 `status` + `diagLine`，`restoreHintText` 由既有 `applyPendingRestore` 的 FULL 分支清空；失败什么都不改。
+
+### 四、验证用例（用户要求的三场景 + 回归）
+
+| 场景 | 预期 | 证据 |
+| --- | --- | --- |
+| **正常退出后重开** | 名单与预览图都正常，回到退出前那张；状态栏出现 `rl1` | `scheduleReadonlyRelist` 两处接线；`readonlyRelistAction(本地 + 有目录 + 只读) → TRY`；`R79-A / R79-B` |
+| **后台被系统回收后重开** | 与正常退出表现一致（`savedDirUri` 选目录时已落盘，不依赖退出时 flush） | 同一条 `beginRestore` 冷启动链；`readonlyRelistAction` 不看 `flushPosSync` 结果；`R79-D` |
+| **强制关闭后重开** | 同上；即使 `lastPos` 没写盘，最多只是落点从第 1 张起，不再整批白图 | `restoreIndex` 的 `count === list.length` 回退分支；`R79-D` |
+| **退出前那张已被移走 / 改名** | 其余相片仍能预览，不再整批判死 | `relistProbeOkOf` 只看「目录可列 + 一个子文件可读」，绕过 `restoreProbeUris` 的单点误判；`R79-C` |
+| **真授权失效（目录也不可读）** | 保持只读名单 + 现有重选指引，不假装成功 | `readonlyRelistAction` 通过但 `listFile` / `openSync` 全失败 → 只记日志；`relistProbeOkOf(false, *)` 恒 false |
+| 回归检查 | ✅ R70–R78 全部零回归 | 防冻结闸门（`probeTakeOf` / `RESTORE_PROBE_LIMIT` / `bulkIoAllowed`）逐字保留；R78 三图案按钮、R77 adaptive / EXIF / HDR、picture menu、左栏五项菜单、放大镜左键不变 |
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2353 passed, 0 failed`**（R78 基线 2340，新增 13 条 R79 断言） |
+| 独立零回归脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**；`git diff --check` 通过 |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 48 s 931 ms`**；`Finished :entry:default@CompileArkTS... after 31 s 194 ms`（**非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（与 R69–R78 一致）；日志 `/tmp/r79-build-final.log` |
+| 产物 | 签名 HAP **1,819,931 B** / 未签名 **1,778,663 B** / `ets/modules.abc` **1,049,156 B**（R78 分别为 1,801,449 / 1,767,745 / 1,043,064 B），mtime 均为本轮编译时刻 |
+| 字节码 | `modules.abc`：**`R79=1 / R78=0 / R77=0 / R76=0 / 1.0.7=1`**；新链路 `rl1=1`、`readonlyRelistAction=2`、`relistProbeOkOf=2`、`relistOkHint=2`、`scheduleReadonlyRelist=2`、`tryReadonlyRelist=2`、`READONLY_RELIST_DELAY_MS=1`、`RELIST_TAG=1`；零回归 `bulkIoAllowed=2`、`probeTakeOf=2`、`openFolder=15`、`ResumePlan=3` |
+| 文档一致性 | 测试 R79 步骤块（`10484–10493`）与本章第六节逐字差异 **0** |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志 / 旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 `R79-A~D`）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:10484` R79 组）
+
+>   ⚠️ 本组是源码静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+>   ⚠️ 真机步骤 R79-A：装新包后 Ctrl+D 角标必须是 R79 / 版本 1.0.7·7；
+>      选一个本地目录、正常退出（点关闭）后重开 → 左栏名单与预览图都应正常，
+>      预览区不再停在「图片读取授权在重启后已失效」卡片。
+>   ⚠️ 真机步骤 R79-B：退出前先切到某张特定相片，正常退出再重开 → 应回到同一张；
+>      状态栏出现「已按目录授权重新读取，图片可以正常预览了 · rl1」。
+>   ⚠️ 真机步骤 R79-C：把退出前那张相片先移走 / 改名再重开 → 其余相片仍能预览，
+>      不再因为「那一张没了」整批判死；确实读不到时才停在只读名单 + 重选指引。
+>   ⚠️ 真机步骤 R79-D：应用进入后台被系统回收 / 强制关闭后重开 → 表现与正常退出一致；
+>      NAS 网络目录仍走原有预热重试 + 自愈，不因本轮改动多出同步 statSync 而变慢。
+
+### 七、边界
+
+- **编译校验 ≠ 真机验证**：静态契约 2353 全绿、真编译成功、字节码有 `R79` 与 `rl1` 标记，只能证明代码 / 产物接线；证明不了 DocumentsProvider 在真机上的授权恢复时机、`listFile` + `openSync` 两次探测的实际耗时、以及重建后落点是否真回到「退出前那张」。请按 `R79-A~D` 回传。
+- **不保证「真授权失效」也能救回**：若 picker 的目录持久授权在系统侧真的没了（当初 `persistPermission` 被 `PERSISTENCE_FORBIDDEN` 拒绝、或用户在系统设置里撤销），`listFile` 同样会失败 —— 此时正确行为就是保持只读名单并提示重选，本轮不硬闯。
+- **探测纪律未放宽**：`probeTakeOf(fast=true)` 仍恒 1、`RESTORE_PROBE_LIMIT=3` 未动。修复走的是「判死后再用更可靠判据补一次」，不是把启动期的同步 openSync 变多。
+- **只兜本地目录**：网络目录仍走 `warmRestoreDirQuiet` 重试 + `healRestoreMode`，避免 NAS 冷挂载时引入新的同步 IO。
+- **与 R77 自愈并存**：900ms 的兜底先跑（更可靠），1200ms 的 `healRestoreMode` 仍保留（对「目录列举也慢」是第二道保险）；两者都只在 `!bulkIoAllowed` 时动作，不会互相打架。
+- **版本恒定 `1.0.7 / versionCode 7`**，未跑 `build.sh`、未把 HAP 放桌面、**本轮未 push**（用户未授权；R71–R79 共九个本地提交仍未 push）；GitHub PAT revoke / 轮换提醒仍有效。
 
 ---
 
