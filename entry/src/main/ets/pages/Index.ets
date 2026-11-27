@@ -281,7 +281,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R110';
+const ESC_BUILD_TAG: string = 'R111';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1467,6 +1467,10 @@ struct Index {
   /** 本次拖动改的是哪一态：true = 收起宽（collapsedW），false = 展开宽（listW）。
    *  两态各自记忆、互不覆盖。 */
   private splitDragCollapsed: boolean = false;
+  /** 第一百一十一轮：最近一次按下是否落在中间 « 按钮上（由按钮的 onMouse/onTouch 置位）。
+   *  只用于**跳过双击复位**判定：双击按钮本意是收起 / 展开，不该顺手改宽度。
+   *  分隔条在本帧读走并清零，绝不留到下一次按下。 */
+  private splitPressOnButton: boolean = false;
   /** 光标是否已被我们改成左右箭头 —— 只在自己改过时才 restoreDefault，
    *  避免把系统 / 其它控件正在用的光标状态冲掉。 */
   private splitCursorSet: boolean = false;
@@ -3179,13 +3183,15 @@ struct Index {
   }
 
   /** 按下（鼠标左键 / 手指 / 笔）：
-   *  · **展开 / 收起两态都参与拖动**（第一百一十轮）：收起态改的是 collapsedW，
-   *    与展开宽分开记忆，互不覆盖；
+   *  · **整条分割栏任意位置**都能起拖（含中间 « 按钮）；收起态改 collapsedW，
+   *    展开态改 listW，两态宽度分开记忆、互不覆盖；
+   *  · `onButton` = 这次按下是否落在中间按钮上 → 只用来跳过双击复位
+   *    （双击按钮的本意是收起 / 展开，不该顺带改宽度）；
    *  · 双击（两次按下间隔 < SPLIT_DOUBLE_TAP_MS 且上一次没怎么移动）→ 复位当前态自适应；
    *  · 否则进入拖动：记录起始宽 + 起始绝对 X，**此刻不改宽度**（用户可能只是点一下）。 */
-  private onSplitPointerDown(absX: number): void {
+  private onSplitPointerDown(absX: number, onButton: boolean = false): void {
     const now: number = Date.now();
-    const dbl: boolean = (now - this.splitLastDownMs) < SPLIT_DOUBLE_TAP_MS &&
+    const dbl: boolean = !onButton && (now - this.splitLastDownMs) < SPLIT_DOUBLE_TAP_MS &&
       this.splitMovedPx <= SPLIT_CLICK_TOL_PX;
     this.splitLastDownMs = now;
     this.splitMovedPx = 0;
@@ -3202,7 +3208,9 @@ struct Index {
     this.sidebarDragging = true;
     this.markUserActive();
     this.applySplitCursor();
-    this.status = splitStatusOf(this.splitStartW, true);
+    // 第一百一十一轮：按下**不写状态栏** —— 整条分割栏（含中间按钮）都能按，
+    // 若按下就写「拖动中…」，点一下 « 会先闪一句「拖动中」再被「已收起左栏」覆盖。
+    // 真正的文案从第一次真实位移开始写（onSplitDragUpdate）。
   }
 
   /** 移动：**每帧都按「起始宽 + 绝对位移」重算**（不做增量累加，丢帧也不会漂）。
@@ -3241,18 +3249,22 @@ struct Index {
    *  · 重算一次 refreshAdaptiveLayout：按新的左栏宽对齐两态宽度、hideMeta 与三列宽。 */
   private onSplitDragEnd(): void {
     const active: boolean = this.splitDragActive;
+    const moved: boolean = this.splitMovedPx > SPLIT_CLICK_TOL_PX;
     this.splitDragActive = false;
     this.sidebarDragging = false;
     if (!active) {
       this.applySplitCursor();
       return;
     }
+    // 纯点击（含点在中间 « 按钮上）：宽度一个像素都没变 —— 不写盘、不重排、不写状态栏，
+    // 把「接下来发生什么」完全交回按钮自己的 onClick（收起 / 展开）。
+    if (!moved) {
+      this.applySplitCursor();
+      return;
+    }
     this.chromeW = -1;
     this.chromeH = -1;
-    // 只是点了一下（没拖动）就别写盘，免得把「点一下就记住」变成噪声。
-    if (this.splitMovedPx > SPLIT_CLICK_TOL_PX) {
-      this.persistSidebarWNow();
-    }
+    this.persistSidebarWNow();
     const rowNames: Array<string> = [];
     for (let i = 0; i < this.rows.length; i++) {
       rowNames.push(this.rows[i].name);
@@ -10340,12 +10352,20 @@ struct Index {
                 this.markWindowRect();
                 this.status = this.listCollapsed ? '已收起左栏（Ctrl+B / » 展开）' : '已展开左栏';
               })
-              // 第一百零九轮：按钮上的按下 / 抬起不冒泡给分隔条 ——
-              // 否则点一下 « 会先被当成「拖拽起点」，状态栏还会被「拖动中…」覆盖掉。
-              // 只拦 onMouse 冒泡，按钮自己的 click 语义不受影响。
+              // 第一百一十一轮：按钮上**不再拦冒泡** —— 整条分割栏任意位置（含这枚按钮）
+              // 都能拖。按下会冒泡到 Column 的 onMouse/onTouch，走与其它位置完全相同的
+              // onSplitPointerDown/Move/End；只要产生位移就不会触发按钮的 click，
+              // 没位移才由上面的 onClick 收起 / 展开（默认命中行为即可，无需改 hitTest）。
+              // 这里只留一个瞬时标记：这次按下落在按钮上 → 分隔条跳过「双击复位」判定，
+              // 否则双击 « 会顺手把宽度复位（用户只想收起 / 展开）。
               .onMouse((event: MouseEvent) => {
-                if (event.action === MouseAction.Press || event.action === MouseAction.Release) {
-                  event.stopPropagation();
+                if (event.action === MouseAction.Press) {
+                  this.splitPressOnButton = true;
+                }
+              })
+              .onTouch((event: TouchEvent) => {
+                if (event.type === TouchType.Down) {
+                  this.splitPressOnButton = true;
                 }
               })
           }
@@ -10369,9 +10389,12 @@ struct Index {
             width: SPLIT_W + SPLIT_HIT_EXTRA_VP * 2, height: '100%' })
           // 鼠标：左键 Press 起拖，Move 实时改宽，Release 收尾。
           // Press 处 stopPropagation —— 否则这次按下还会被预览 / 根容器当成「点画布」。
+          // 整条栏（含中间按钮）共用这一套：按钮不拦冒泡，事件冒到这里走同一组处理。
           .onMouse((event: MouseEvent) => {
             if (event.action === MouseAction.Press && event.button === MouseButton.Left) {
-              this.onSplitPointerDown(this.splitMouseAbsX(event));
+              const onBtn: boolean = this.splitPressOnButton;
+              this.splitPressOnButton = false;
+              this.onSplitPointerDown(this.splitMouseAbsX(event), onBtn);
               event.stopPropagation();
               return;
             }
@@ -10387,7 +10410,9 @@ struct Index {
           // 手指按下后系统会把后续 Move 都投递给本组件（触摸捕获），因此窄条也能连续拖。
           .onTouch((event: TouchEvent) => {
             if (event.type === TouchType.Down) {
-              this.onSplitPointerDown(this.splitTouchAbsX(event));
+              const onBtn: boolean = this.splitPressOnButton;
+              this.splitPressOnButton = false;
+              this.onSplitPointerDown(this.splitTouchAbsX(event), onBtn);
               return;
             }
             if (event.type === TouchType.Move) {
