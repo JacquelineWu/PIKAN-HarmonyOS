@@ -25,10 +25,15 @@
 export const PM_ACT_EXIF: string = 'pmExif';
 export const PM_ACT_SINGLE: string = 'pmSingle';
 export const PM_ACT_SPREAD: string = 'pmSpread';
+/** 第九十四轮：幻灯片播放入口从「自动隐藏顶栏」迁到相片右键菜单（第四项）。 */
+export const PM_ACT_SLIDE: string = 'pmSlide';
 
 export const PM_LABEL_EXIF: string = '显示exif资料框';
 export const PM_LABEL_SINGLE: string = '单张预览';
 export const PM_LABEL_SPREAD: string = '左右并排预览';
+/** 幻灯片两项文案：按当前是否正在播放切换，语义与旧顶栏按钮完全一致（播放 / 暂停）。 */
+export const PM_LABEL_SLIDE_PLAY: string = '播放幻灯片';
+export const PM_LABEL_SLIDE_PAUSE: string = '暂停幻灯片';
 
 /** 一个菜单项：动作码 + 显示文案。 */
 export interface PmMenuItem {
@@ -36,16 +41,25 @@ export interface PmMenuItem {
   label: string;
 }
 
-/** 菜单项真值源：恒 3 项、顺序固定，每次返回新数组（零共享可变状态）。 */
-export function pmItemsOf(): Array<PmMenuItem> {
-  return [
+/** 菜单项真值源：**前三项顺序固定**（R76 契约不变），第四项是第九十四轮新增的幻灯片开关。
+ *
+ *  `playing` 只影响第四项文案（播放 / 暂停），前三项与顺序一字不动 —— 这样
+ *  `pmFirstThreeOrderedOf` 的既有契约继续成立，UI 与测试都不必改判据。
+ *  每次返回新数组（零共享可变状态）。 */
+export function pmItemsOf(playing: boolean = false): Array<PmMenuItem> {
+  const base: Array<PmMenuItem> = [
     { act: PM_ACT_EXIF, label: PM_LABEL_EXIF },
     { act: PM_ACT_SINGLE, label: PM_LABEL_SINGLE },
     { act: PM_ACT_SPREAD, label: PM_LABEL_SPREAD }
   ];
+  base.push({
+    act: PM_ACT_SLIDE,
+    label: playing ? PM_LABEL_SLIDE_PAUSE : PM_LABEL_SLIDE_PLAY
+  });
+  return base;
 }
 
-/** 菜单项数（恒 3，供 UI / 测试快速判定）。 */
+/** 菜单项数（恒 4：R76 三项 + R94 幻灯片）。 */
 export function pmItemCountOf(): number {
   return pmItemsOf().length;
 }

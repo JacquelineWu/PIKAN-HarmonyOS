@@ -2,12 +2,17 @@
  * pages/Index.ets — 鸿蒙 PC 原生 HEIC/JPG 看图软件（ACDSee 风格）· R75 主线（R39 起组件化）· FITS/XISF 天文图像预览 · 档案列表右键菜单
  *
  * 布局（ACDSee 风格）：
- *   · 顶栏：标题 + 当前文件名 + 「全屏」+ 幻灯片
- *            （11-10 起依次取消「打开图库」「选择图片」「回到上次」三个按钮）
+ *   · 顶栏：**第九十四轮已整条移除**（原「贴顶唤出的自动隐藏栏」）。
+ *           目录名改由系统窗口标题栏（window.setWindowTitle）独家显示，界面内不再有自绘标题栏。
  *   · 左侧：抬头下「排序 / 往上层 / 选择文件夹」同一行等宽排列；
  *            图像档案列表（悬停缩略图 + 文件名 + 体积 + 日期），列宽按最长名字自适应、行高紧凑
  *   · 右侧：大图预览（GPU 合成渲染），悬浮信息层 + 缩放角标
  *   · 底栏：状态栏
+ *
+ * 入口位置（第九十四轮起）：
+ *   · 全屏：F11 / 双击画布 / ESC 退出（界面上不再有「全屏」按钮）
+ *   · 幻灯片：**只在预览图片上右键**弹出的上下文菜单第四项「播放幻灯片 / 暂停幻灯片」
+ *             （原顶栏按钮与其 doAction('play') 分发路径一并删除；键盘空格键作为快捷键保留）
  *
  * 图片来源：
  *   · 选择文件夹 —— DocumentViewPicker FOLDER，浏览目录（含中文 / 多级路径）；
@@ -22,8 +27,8 @@
  *   · 鼠标滚轮控制上一张 / 下一张（Ctrl + 滚轮 = 缩放，互不冲突）
  *   · 缩放 / 旋转 ±90° / 水平垂直镜像 / 拖拽平移 / 双指捏合；
  *     第七轮起**左键单击不再放大**，双击画布 = 进入 / 退出全屏
- *   · 全屏：F11 / 双击进入，Esc / F11 / 双击退出；隐藏应用三块栏 +
- *     隐藏系统状态栏/导航栏，画布铺满屏幕
+ *   · 全屏：F11 / 双击进入，Esc / F11 / 双击退出；隐藏应用两块栏 + 状态栏 +
+ *     隐藏系统状态栏/导航栏，画布铺满屏幕（保留原行为，第九十四轮未改）
  *   · 键盘：← → 翻页，↑ ↓ 缩放，空格 幻灯片，R 旋转，F 1:1，0 复位，Esc 关闭应用
  *   · 快速：缩略图随 List 虚拟化懒加载，仅可见项参与解码
  *   · 后台预载：载入时把整库按「可直接显示」档位解码成 PixelMap 并缓存复用；
@@ -58,7 +63,7 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
   upContextBaseOf, upContextRawOf, pathChainOf,
-  realPathOf, hierPathOf, titleParentOf,
+  realPathOf, hierPathOf,
   isStrictParentOf, sameEntryNames,
   isUpListPseudoName, mergeUpListNames, rootFormParentOf,
   isSameOrUnderLevelOf, restoreBrowseLevelOf, rawBrowseFormOf,
@@ -123,7 +128,7 @@ import { FF_GIVEUP, deadTagOf, deadMemoryMatches,
   failFastAction, restoreIoHeld, probeTakeOf, elapsedSince,
   failFastHint } from '../common/FailFast';
 import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
-  topBarPeekOf, loupeDiameterVp, loupeCircleOrigin, loupeClampedOffset,
+  loupeDiameterVp, loupeCircleOrigin, loupeClampedOffset,
   loupeInFrame, loupeEligibleOf, LOUPE_PANE_NONE, LOUPE_PANE_LEFT,
   LOUPE_PANE_RIGHT, LOUPE_CM_14, loupePaneActiveOf, loupePaneAfterHover,
   loupeResetOnModeChange, loupeHoverAfterModeChange,
@@ -235,7 +240,7 @@ import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COP
   FcMenuItem, FcMenuPos } from '../common/FileContextMenu';
 // 第七十六轮：预览区「相片右键菜单 / EXIF 图标 / EXIF 资料框 / 预览模式」唯一真值源。
 // 与左栏 FileContextMenu 两套菜单互不影响：本套只在预览区相片上右键触发，恒三项。
-import { PM_ACT_EXIF, PM_EXIF_LABEL, PM_EXIF_MARGIN_VP, PM_EXIF_EMPTY,
+import { PM_ACT_EXIF, PM_ACT_SLIDE, PM_EXIF_LABEL, PM_EXIF_MARGIN_VP, PM_EXIF_EMPTY,
   PM_MENU_W, PM_MENU_ITEM_H, PM_MENU_TITLE_H, PM_MENU_PAD_V,
   PM_MODE_AUTO, PmMenuItem, PmMenuPos, PmExifField,
   pmItemsOf, pmHasActOf, pmModeAfterAct, pmSpreadWantedOf,
@@ -251,7 +256,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R93';
+const ESC_BUILD_TAG: string = 'R94';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -369,14 +374,6 @@ const BOOT_REFRESH_RETRY_MAX: number = 12;
 const RESUME_SCENE_BACK: number = 0;
 const RESUME_SCENE_BOOT: number = 1;
 
-/** 全屏时顶栏自动隐藏（Win64 4666 / 4670）：鼠标压到窗口最上面 TOPBAR_EDGE_PX 个像素
- *  才把顶栏浮出来，顶栏高度 52 + 下方 TOPBAR_KEEP_PX 之内保持显示。
- *  鸿蒙收不到「鼠标移出窗口」事件，故另加一个「停手 2s 自动收起」的兜底。
- *  顶栏用 Stack + position 浮在画布上，不占布局，出现/消失都不会把预览区挤一下。 */
-const TOPBAR_EDGE_PX: number = 10;
-const TOPBAR_KEEP_PX: number = 8;
-const TOPBAR_H: number = 52;
-const TOPBAR_HIDE_MS: number = 2000;
 /** 第九十三轮：全屏切换后的「画布信任窗」——这段时间内禁止根容器反推覆盖实测画布。
  *  进出全屏时 root 与 preview 两个 onAreaChange 必然错帧，反推值会偏小（实测 1490×978 → 1470×941），
  *  而预览 Stack 的实测值才是真值。 */
@@ -385,12 +382,6 @@ const CANVAS_ROOT_TRUST_MS: number = 1500;
 const CANVAS_SHRINK_TOL_VP: number = 2;
 /** 第九十一轮：退出全屏后第二次画布采样的延迟（晚于 260ms 的落定、早于用户感知「稳定」）。 */
 const FULL_EXIT_SAMPLE_MS: number = 1500;
-/** 第十三轮：非全屏时整栏「贴顶唤出」的滞回带（vp，MouseEvent.y 相对根 Stack）。
- *  默认整栏不渲染（完全不占布局）；鼠标压进页面最顶 TRIGGER 内才浮出，
- *  浮出后只要还在顶栏 + KEEP 缓冲内就保持，越过才收起 —— 显示阈值窄、隐藏阈值宽，
- *  边界微抖不会反复翻转（不闪烁）。显隐都是纯条件渲染，不改主体尺寸、不触发 resize。 */
-const TOPBAR_PEEK_TRIGGER_VP: number = 10;
-const TOPBAR_PEEK_KEEP_VP: number = TOPBAR_H + TOPBAR_KEEP_PX;
 /** 第十四轮：预览图放大镜 —— 直径由 3cm 翻倍到 6cm（1vp = 1/160 inch，故约 378vp）、
  *  局部放大仍是 3 倍。直径取 InteractionPlan.LOUPE_CM_14 单一真值来源，避免魔数漂移。
  *  左右并排两页各挂一层、按 pane 独立判定；全屏态同样保留；模式切换时统一复位。
@@ -1252,15 +1243,6 @@ struct Index {
    *  按钮的 enabled / 颜色 / 透明度；「往上层」按钮任何时候都是亮的、可点的。
    *  到卷根 / 图片列表态为 false 时，点击由 browseUp() 给提示、不移动目录。 */
   @State canGoUp: boolean = false;
-  /** 顶栏自动隐藏（Win64 0cfabb2）：鼠标贴近窗口顶端才浮出，默认不占画面 */
-  @State topbarVisible: boolean = true;
-  private topbarTimer: number = -1;   // 「停手 N 秒自动收起」的兜底计时器
-  /** 第十一轮：「全屏 / 幻灯片」按钮组（第二栏工具区）默认隐藏；
-   *  仅鼠标悬停页面顶部区域时显示，离开立即恢复隐藏（无动画 / 无延迟 / 无计时器）。 */
-  @State topToolsVisible: boolean = false;
-  /** 第十三轮：整栏「贴顶唤出」开关。默认 false → 整栏不渲染（完全不占布局空间）。
-   *  由 onRootMouse 走 topBarPeekOf 滞回判定置位；浮层显隐都不改主体尺寸。 */
-  @State topBarPeek: boolean = false;
   /** 第十三轮：左栏可见范围（onScrollIndex 上报，-1 = 尚未上报）。
    *  只作点选 / 翻页的滚动判据，不参与 UI 渲染，故不用 @State。 */
   private listFirstRow: number = -1;
@@ -1396,7 +1378,7 @@ struct Index {
   /** 全屏时是否由我们主动最大化过窗口 —— 退出时才知道要不要 recover 回自由窗口 */
   private maximizedByUs: boolean = false;
   /** 进入全屏前的视图 / 界面状态快照：ESC 退出时要「切回之前的完整界面」，
-   *  包含缩放平移、手动旋转、状态栏文案、顶栏可见性，不能只翻 fullscreen 一个布尔。 */
+   *  包含缩放平移、手动旋转、状态栏文案，不能只翻 fullscreen 一个布尔。 */
   private hasFullSnapshot: boolean = false;
   private preFullZoom: number = 1;
   private preFullTx: number = 0;
@@ -1405,7 +1387,6 @@ struct Index {
   private preFullFlipH: boolean = false;
   private preFullFlipV: boolean = false;
   private preFullStatus: string = '';
-  private preFullTopbar: boolean = true;
   /** 第九十二轮：进入全屏前「系统窗口装饰（标题栏 / 边框）」是否可见。
    *
    *  退出时旧代码无条件 `setWindowDecorVisible(true)`，等于**强制**给窗口加回一条标题栏；
@@ -1415,7 +1396,7 @@ struct Index {
   private preFullDecorVisible: boolean = true;
   /** 第八十九轮：视图快照的**独立有效性标志**。
    *
-   *  `hasFullSnapshot` 管的是「界面还原」（rot / flip / status / topbar），退出时会被置 false。
+   *  `hasFullSnapshot` 管的是「界面还原」（rot / flip / status），退出时会被置 false。
    *  视图（zoom / tx / ty）恢复**不能**跟着它走：任何一条路径先把 `hasFullSnapshot` 清掉，
    *  退出就会落到「保持当前倍率」分支 —— 而当前倍率正是进入时 `fitToWindow()` 写下的 1×，
    *  实机表现就是「退出后比进入前小一点」（实测 1.000 → 0.965 这类差别）。
@@ -1994,7 +1975,6 @@ struct Index {
     this.clearLoupeHiRes(); // 第十六轮：页面销毁时释放放大镜专用高清 PixelMap
     this.clearViewSysPx();  // 第六十八轮：页面销毁时释放主预览系统级 AA 精炼产物
     this.clearWheel();
-    this.clearTopbarTimer();
     this.sizeSeq++; // 作废还在跑的体积补测任务
     if (this.resumeTimer !== -1) {
       clearTimeout(this.resumeTimer); // 别让恢复在页面已经销毁后还去改视图
@@ -7535,9 +7515,10 @@ struct Index {
       case 'next':
         this.go(1);
         break;
-      case 'play':
-        this.toggleSlide();
-        break;
+      // 第九十四轮：'play' 分支随顶栏一起删除 —— 幻灯片入口已迁到图片右键菜单
+      // （PM_ACT_SLIDE → toggleSlide()），这里不再保留第二条分发路径，
+      // 杜绝「同一功能两个入口」以及旧控件残留。
+      // 键盘空格（KEYCODE_SPACE）仍直接调 toggleSlide()：那是快捷键不是界面控件。
       // 11-10 起「选择图片」按钮取消，'files' 分支一并移除；
       // openFiles() 本体保留，仍被 openPicker() 的内部降级链调用。
       case 'folder':
@@ -8430,14 +8411,13 @@ struct Index {
     }
     this.fullscreen = on;
     this.pendingReload = true; // 画布尺寸变了 → 落地后按新尺寸重解，避免把旧分辨率拉大发虚
-    // 全屏切换会整块隐藏 / 恢复顶栏、状态栏、左栏，固定栏偏移 chrome 已经失效，
+    // 全屏切换会整块隐藏 / 恢复状态栏、左栏，固定栏偏移 chrome 已经失效，
     // 置 -1 让下一轮 onAreaChange 重新测量，别拿旧偏移去反推画布尺寸。
     this.chromeW = -1;
     this.chromeH = -1;
     // 第九十三轮：全屏切换必然引起 root / preview 回调错帧，开一个信任窗，
     // 窗内禁止根容器反推覆盖预览实测值（否则画布被改小 → 只有图片缩小）。
     this.canvasRootTrustUntil = Date.now() + CANVAS_ROOT_TRUST_MS;
-    this.clearTopbarTimer();
     if (on) {
       // 进全屏：先把「之前的完整界面」逐项存档，ESC 退出时才能原样还原
       this.hasFullSnapshot = true;
@@ -8457,7 +8437,6 @@ struct Index {
       this.preFullFlipV = this.flipV;
       // 第八十九轮：剥掉上一轮退出时补的「· 缩放 N%」，避免反复进出把状态栏越叠越长。
       this.preFullStatus = stripZoomNoteOf(this.status);
-      this.preFullTopbar = this.topbarVisible;
       // 全屏画布基准清零，交给 onAreaChange 记录进入全屏后的最大尺寸。
       // 系统自行退出沉浸时画布会缩小，据此自愈切回完整界面（ESC 常被系统消费）。
       this.fullCanvasW = 0;
@@ -8469,7 +8448,6 @@ struct Index {
       // 第八十八轮：上面存档的 preFullZoom/Tx/Ty 会在退出时**原样恢复**（不再一律 fit），
       // 所以这里的 fit 只影响「全屏期间」的观感，不会改写用户进入前的倍率。
       this.fitToWindow();
-      this.topbarVisible = false;
       this.status = '全屏 · Esc / F11 / 双击退出';
       } else {
         // 第八十八轮：退出全屏**恢复进入前的缩放 / 平移**（R82 的「一律 fit」口径已被本轮推翻）。
@@ -8485,14 +8463,12 @@ struct Index {
         this.fullEnterAt = 0;
         const hadSnapshot: boolean = this.hasFullSnapshot;
         if (hadSnapshot) {
-          // rot / flip 是用户手动设置的，逐项还原；status / topbar 属界面形态，也必须还原。
+          // rot / flip 是用户手动设置的，逐项还原；status 属界面形态，也必须还原。
           this.rot = this.preFullRot;
           this.flipH = this.preFullFlipH;
           this.flipV = this.preFullFlipV;
           this.status = this.preFullStatus;
-          this.topbarVisible = this.preFullTopbar;
         } else {
-          this.topbarVisible = true;
           this.status = '已退出全屏 · Esc 关闭应用';
         }
         // 视图恢复收口在纯函数里（含 clamp 与非法值兜底）。
@@ -8528,70 +8504,14 @@ struct Index {
     this.scheduleKeyRefocus();
   }
 
-  /** 根容器收到鼠标移动：
-   *  · 第十一轮：非全屏时用 y 坐标驱动「全屏 / 幻灯片」按钮组（第二栏）显隐 ——
-   *    鼠标在页面顶部区域（最顶部标题栏 + 按钮所在行，即 TOPBAR_H 之内）就显示，
-   *    离开立即隐藏。作为 onHover 的兜底（部分 2in1 SDK 只派发 Move），同样零延迟。
-   *  · 真全屏下不再有「贴顶唤出工具顶栏」（2026-11-11 用户要求「不会有标题列」）。
-   *    留着 SHOW_FULLSCREEN_CHROME 开关：改回 true 就能恢复旧的唤出式工具条。
-   *  y 是相对根 Stack 的坐标。 */
+  /** 根容器收到鼠标移动：只做「用户活跃」打点（第六十四轮空闲闸门，零 IO、零状态写入量）。
+   *  · 第七十六轮：放大镜改由【预览区相片上左键】切换，根容器不再有任何 toggle 兜底 ——
+   *    左栏档案行 / 按钮 / 空白区 / 右键一律不翻转。
+   *  · 第九十四轮：原「非全屏贴顶唤出整条顶栏 + 全屏贴顶浮出工具条」这两套自动隐藏栏
+   *    已按用户要求**整条移除**。鼠标移动不再读写任何显隐状态，
+   *    也就不会再有任何界面元素因鼠标位置而出现或消失。 */
   private onRootMouse(event: MouseEvent): void {
-    this.markUserActive();   // 第六十四轮：鼠标一动就不算空闲（零 IO、零状态写入量）
-    // 第七十六轮：放大镜改由【预览区相片上左键】切换，根容器不再有任何 toggle 兜底 ——
-    // 左栏档案行 / 按钮 / 空白区 / 右键一律不翻转。左栏档案行与预览区的右键 Press
-    // 都已各自 stopPropagation，两套应用内菜单互不干扰；这里只保留顶栏滞回与空闲计时。
-    if (!this.fullscreen && event.action === MouseAction.Move) {
-      const yTop: number = Number(event.y);
-      if (yTop === yTop) {
-        const inTop: boolean = yTop >= 0 && yTop <= TOPBAR_H;
-        if (inTop !== this.topToolsVisible) {
-          this.topToolsVisible = inTop;
-        }
-        // 第十三轮：整栏贴顶唤出（滞回，稳定不闪烁）。浮层不占布局，
-        // 显隐都不改主体尺寸 → 不触发 resize / 重解码。真值来源统一走纯函数。
-        const peek: boolean = topBarPeekOf(this.topBarPeek, yTop,
-          TOPBAR_PEEK_TRIGGER_VP, TOPBAR_PEEK_KEEP_VP, this.fullscreen);
-        if (peek !== this.topBarPeek) {
-          this.topBarPeek = peek;
-        }
-      }
-    }
-    if (!SHOW_FULLSCREEN_CHROME || !this.fullscreen) {
-      return;
-    }
-    const y: number = Number(event.y);
-    if (y !== y) { // NaN：某些机型 MouseEvent 不给坐标，直接忽略
-      return;
-    }
-    // Win64 TopBarShouldShow：贴顶端才唤出，顶栏内 + 下方 8px 保持
-    const show: boolean = y <= TOPBAR_EDGE_PX + TOPBAR_H + TOPBAR_KEEP_PX;
-    if (show !== this.topbarVisible) {
-      this.topbarVisible = show;
-    }
-    this.armTopbarTimer();
-  }
-
-  /** 每次鼠标移动都重挂计时器：只有「停在顶栏上不动」才会到点收起。
-   *  这是为了补鸿蒙没有 onMouseLeaveWindow 的缺口。 */
-  private armTopbarTimer(): void {
-    if (this.topbarTimer !== -1) {
-      clearTimeout(this.topbarTimer);
-      this.topbarTimer = -1;
-    }
-    if (!this.fullscreen || !this.topbarVisible) {
-      return;
-    }
-    this.topbarTimer = setTimeout(() => {
-      this.topbarTimer = -1;
-      this.topbarVisible = false;
-    }, TOPBAR_HIDE_MS);
-  }
-
-  private clearTopbarTimer(): void {
-    if (this.topbarTimer !== -1) {
-      clearTimeout(this.topbarTimer);
-      this.topbarTimer = -1;
-    }
+    this.markUserActive();
   }
 
   /** 窗口级真全屏（2026-11-11）：隐藏系统标题栏与 dock（PC 任务栏）、状态栏、导航栏。
@@ -9416,9 +9336,9 @@ struct Index {
    *  「标题显示区域不超出系统三按钮区左侧，超出部分以省略号呈现」—— 正是用户要的位置。
    *  （项目旧注释里「鸿蒙没有 setWindowTitle」是 R11 时期的结论，SDK 15 起已不成立。）
    *
-   *  ⚠️ 与本文件 `topBar()` 严格区分：
-   *   · `topBar()` 是**应用内自绘**栏（可随内容重排、全屏时整条隐藏、无系统按钮）；
-   *   · 本方法写的是**系统 decor 标题**（窗口管理器绘制，带三按钮，沉浸全屏时随 decor 隐藏）。
+   *  ⚠️ 应用内自绘顶栏（旧 `topBar()`）已在第九十四轮按要求整条移除：
+   *   目录名从此**只有**系统 decor 标题这一个显示位（窗口管理器绘制，带三按钮，
+   *   沉浸全屏时随 decor 一起隐藏），界面里不再有第二条重复的标题栏。
    *
    *  `@Watch('syncWindowTitle')` 挂在 `@State source` 上 ⇒ 换目录 / 往上层 / 恢复 / 上层清单
    *  全部自动同步。窗口对象未就绪时短延时重试；801（能力不支持）/ 窗口态异常只记日志。 */
@@ -9426,8 +9346,8 @@ struct Index {
     this.applyWindowTitle();
   }
 
-  /** 真正写标题。**刻意不引入任何计时器**（本文件 `rightPageImage → topBar` 那段
-   *  被「零动画 / 零延迟」静态契约切片盯着，多一个 setTimeout 就会误报）：
+  /** 真正写标题。**刻意不引入任何计时器**（本文件的「零动画 / 零延迟」静态契约切片
+   *  盯着预览相关 builder，多一个 setTimeout 就会误报）：
    *  窗口对象未就绪时直接跳过，靠 `@Watch` 的下一次 source 变化或 `onPageShow` 重试。*/
   private applyWindowTitle(): void {
     if (!this.pageAlive) {
@@ -9443,78 +9363,6 @@ struct Index {
       hilog.warn(DOMAIN, TAG, 'setWindowTitle failed: %{public}s', JSON.stringify(e));
     });
     hilog.info(DOMAIN, TAG, 'window title: %{public}s', name);
-  }
-
-  /** 第八十三轮：标题栏里「目录名」右侧的父路径 —— 去掉末尾目录名，避免与左侧名称重复。
-   *  `titlePath` 为空（尚未打开）或已是卷根（父级等于自身）时返回空串，标题栏只显示名称。 */
-  private parentPathOf(): string {
-    // 判据收口在纯函数 `titleParentOf`（可 Node 回归），这里只负责取状态。
-    return titleParentOf(this.titlePath);
-  }
-
-  /** 顶栏：非全屏时常驻；全屏时由 Stack 以绝对定位浮层复用同一份 Builder（见 build）。
-   *  11-10 起「打开图库」「选择图片」「回到上次」三个按钮均已按用户要求取消，
-   *  顶栏只剩「全屏 / 幻灯片」，其余按钮与事件保持不变。 */
-  @Builder
-  topBar() {
-    Row() {
-      Text('PIKAN ' + APP_VERSION)
-        .fontSize(15)
-        .fontWeight(FontWeight.Bold)
-        .fontColor('#f2f5fa')
-      Text('·')
-        .fontSize(14)
-        .fontColor('#4a5262')
-        .margin({ left: 8, right: 8 })
-      // 第八十四轮：目录名改由**系统窗口标题栏**显示（window.setWindowTitle），
-      // 这条应用内自绘栏不再重复写名字；只保留「父路径」当目录上下文。
-      // 父路径仍去掉末尾名字（titleParentOf）⇒ 两处合起来正好一份名字、零重复。
-      // layoutWeight(1) + Ellipsis：窄屏自动省略成「…」，绝不把右侧工具区挤出屏幕。
-      if (this.parentPathOf().length > 0) {
-        Text('·')
-          .fontSize(14)
-          .fontColor('#4a5262')
-          .margin({ left: 8, right: 8 })
-        Text(ellipsizeMiddle(this.parentPathOf(), 52))
-          .fontSize(12)
-          .fontColor('#9fb0c8')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-      } else {
-        Blank()
-      }
-
-      // 第十一轮：包含「全屏 / 幻灯片」的第二栏（工具区）默认隐藏。
-      // Visibility.Hidden = 占位但不可见 → 隐藏时标题栏 / 下方主体布局零位移；
-      // 显示时用 Visibility.Visible，按钮原有样式与 onClick 功能一律不变。
-      Row() {
-        // 11-10 起按用户要求彻底移除「选择图片」与「回到上次」两个按钮及其入口；
-        // 顶栏其余按钮（全屏 / 幻灯片）与事件保持不变。
-        ToolButton({ label: '全屏', act: 'full', flex: false, onAction: (a: string): void => { this.doAction(a); } })
-        Button(this.playing ? '暂停' : '幻灯片')
-          .type(ButtonType.Normal)
-          .fontSize(13)
-          .fontColor(this.playing ? '#101216' : '#e8ecf4')
-          .backgroundColor(this.playing ? '#f6c85f' : '#2a2f3a')
-          .borderRadius(6)
-          .height(32)
-          .padding({ left: 12, right: 12 })
-          .margin({ left: 4 })
-          .onClick(() => this.doAction('play'))
-      }
-      .visibility(this.topToolsVisible ? Visibility.Visible : Visibility.Hidden)
-    }
-    .width('100%')
-    .height(TOPBAR_H)
-    .padding({ left: 16, right: 12 })
-    .backgroundColor('#1a1d23')
-    .border({ width: { bottom: 1 }, color: '#2a2f3a' })
-    // 鼠标悬停页面顶部区域（本 Row 即最顶部标题栏 + 第二栏所在行）时立即显示第二栏；
-    // 离开立即隐藏。纯状态置位、无 animateTo / 无 opacity 过渡 / 无 setTimeout。
-    .onHover((isHover: boolean) => {
-      this.topToolsVisible = isHover;
-    })
   }
 
   build() {
@@ -10095,30 +9943,6 @@ struct Index {
       // 第二十二轮：第三通道 —— 分发阶段，不依赖焦点（见 onKeyDispatch 注释）。
       .onKeyEventDispatch((event: KeyEvent): boolean => this.onKeyDispatch(event))
 
-      // 第十三轮：非全屏时的整栏「贴顶唤出」浮层。
-      // 条件渲染：topBarPeek=false 时组件根本不存在 → 完全不占布局空间（不是占位隐藏），
-      // 显隐都不改主体 Column 尺寸 → 不触发 resize / 重解码；绝对定位盖在画布之上。
-      // 显隐由 onRootMouse 走 topBarPeekOf 滞回判定（显示阈值窄 / 隐藏阈值宽，边界不闪烁）。
-      if (this.topBarPeek && !this.fullscreen) {
-        Column() {
-          this.topBar();
-        }
-        .width('100%')
-        .position({ x: 0, y: 0 })
-        .zIndex(10)
-      }
-
-      // 真全屏下不画工具顶栏（SHOW_FULLSCREEN_CHROME=false）：用户要求「不会有标题列」。
-      // 开关改回 true 才恢复旧的「鼠标贴顶浮出、绝对定位不占布局」行为。
-      if (SHOW_FULLSCREEN_CHROME && this.fullscreen && this.topbarVisible) {
-        Column() {
-          this.topBar();
-        }
-        .width('100%')
-        .position({ x: 0, y: 0 })
-        .zIndex(10)
-      }
-
       // 第二十三轮：R22 截图 f=N r12 说明这个锚点 12 次都没进焦点树。两个原因：
       //  ① `Button() { }` 空 builder 可能不生成真实可聚焦节点 → 改 `Button('·')` 带内容；
       //  ② `.hitTestBehavior(HitTestMode.None)` 让组件完全不参与命中 / 焦点 → 移除。
@@ -10138,7 +9962,8 @@ struct Index {
         .onKeyEvent((event: KeyEvent): boolean => this.onKeyConsumed(event))
 
       // 第七十二轮：右键「详情」面板。根 Stack 直接子项、绝对定位铺满窗口，
-      // zIndex 20 高于贴顶唤出层（10）；点遮罩或「关闭」即收，纯显示层，
+      // zIndex 20（第九十四轮已删掉旧的 zIndex 10 贴顶唤出层，层级更干净）；
+      // 点遮罩或「关闭」即收，纯显示层，
       // 不碰 items / rows / cur / browseBase / 放大镜 / 滚轮 / 任何既有交互。
       if (this.ctxDetailOn) {
         Stack({ alignContent: Alignment.Center }) {
@@ -10257,8 +10082,8 @@ struct Index {
       }
 
       // 第七十六轮：预览区「相片右键菜单」浮层。只由预览区相片上右键 Press 上抛窗口坐标，
-      // 与左栏 R72–R75 五项菜单完全独立；恒三项、顺序固定、共用同一套几何真值源。
-      // zIndex 21 与左栏菜单同级（两者不会同时打开）；点遮罩 / 点任一菜单项即收。
+      // 与左栏 R72–R75 五项菜单完全独立；顺序固定（R76 前三项 + R94 幻灯片，恒四项），
+      // 共用同一套几何真值源。zIndex 21 与左栏菜单同级（两者不会同时打开）；点遮罩 / 点任一菜单项即收。
       if (pmMenuVisibleOf(this.pmMenuOn, this.pmMenuItems.length)) {
         Stack({ alignContent: Alignment.TopStart }) {
           Column()
@@ -10473,7 +10298,7 @@ struct Index {
   // 第三十七轮：纯文本 / 源码文件预览
   // 真值源在 common/TextDoc.ts；本段只做「真异步读字节 → 解码 → 建行数据源 → 渲染」。
   // 放在 build() 之后：既有静态契约的切片全部以方法签名为锚点，落在这里不会
-  // 把新方法混进 previewImage / rightPageImage / topBar / applyItems 等切片。
+  // 把新方法混进 previewImage / rightPageImage / applyItems 等切片。
   // ==================================================================
 
   /** 收掉文本预览态并作废旧读取代号。绝不碰图片缓存 / 目录状态 / 位置记忆。 */
@@ -11297,7 +11122,7 @@ struct Index {
   // 第七十二轮：档案列表右键菜单动作总收口
   // 真值源在 common/FileContextMenu.ts；本方法只做「读 rows → 真行为」。
   // 刻意放在文件末尾：既有静态契约的切片全部以注释 / 方法签名为锚点，
-  // 落在这里不会把新方法混进 build / topBar / applyItems 等既有切片。
+  // 落在这里不会把新方法混进 build / applyItems 等既有切片。
   // ==================================================================
   /** 右键菜单五个动作：打开 / 详情 / 打开档案所在目录 / 复制路径 / 复制档案名称。
    *  · 二次复核 fcHitOf + fcHasActOf：「..」伪行、空白区、越权动作一律拒绝。
@@ -11464,16 +11289,17 @@ struct Index {
   }
 
   /** 第七十六轮：预览区相片上右键 Press → 打开 picture contact menu 浮层。
-   *  只负责「显示」：命中判定 / 三项快照 / 把鼠标窗口坐标裁进可视区；
-   *  三项真实行为全部收口到 onPictureMenuAction。
-   *  与左栏 onFileContextMenu 完全独立：两套菜单的状态、坐标、项、动作互不改写。 */
+   *  只负责「显示」：命中判定 / 菜单快照 / 把鼠标窗口坐标裁进可视区；
+   *  全部真实行为收口到 onPictureMenuAction。
+   *  与左栏 onFileContextMenu 完全独立：两套菜单的状态、坐标、项、动作互不改写。
+   *  第九十四轮：`pmItemsOf(this.playing)` —— 第四项文案随播放态切换（播放 / 暂停幻灯片）。 */
   private openPictureMenu(x: number, y: number): void {
     this.markUserActive();
     // 空态（没有图）/ 文本预览 / 只读指引卡一律不弹，绝不越界。
     if (!pmRightHitOf(this.viewPixelMap !== undefined, this.textMode)) {
       return;
     }
-    const items: Array<PmMenuItem> = pmItemsOf();
+    const items: Array<PmMenuItem> = pmItemsOf(this.playing);
     const h: number = pmMenuHeightOf(items.length);
     const pos: PmMenuPos = pmMenuPosOf(x, y, this.lastRootW, this.lastRootH,
       PM_MENU_W, h);
@@ -11486,14 +11312,23 @@ struct Index {
     this.pmMenuOn = true;
   }
 
-  /** 第七十六轮：picture contact menu 三项动作。
+  /** 第七十六轮：picture contact menu 动作（R76 三项 + R94 幻灯片开关）。
    *  · 第一项「显示exif资料框」：只写标题 + 开关，字段取当前相片 viewExifFields；
    *  · 第二项「单张预览」：强制单页（强制关右页）；
    *  · 第三项「左右并排预览」：有下一张即强制并排，覆盖自动竖图判据；
+   *  · 第四项「播放幻灯片 / 暂停幻灯片」（第九十四轮）：只调 toggleSlide()。
    *  越权动作由 pmHasActOf 拒绝；每个动作都有状态栏明确反馈，绝不静默吞掉。 */
   private onPictureMenuAction(act: string): void {
     this.markUserActive();
     if (!pmHasActOf(act)) {
+      return;
+    }
+    // 第九十四轮：幻灯片入口（从顶栏迁来）。**只调 toggleSlide()**，不写 previewMode、
+    // 不重解右页、不改 rot/flip/fullscreen —— 与原顶栏 `doAction('play')` 的行为逐字一致：
+    // 未播放 → 启动（每 SLIDE_INTERVAL 秒 go(1)，环形）；播放中 → 暂停并清计时器。
+    // 状态栏文案也由 toggleSlide / stopSlide 自己写，保证「启动 / 暂停 / 无图提示」三态与旧版同字。
+    if (act === PM_ACT_SLIDE) {
+      this.toggleSlide();
       return;
     }
     const it: ImageItem | undefined = this.curItem();
