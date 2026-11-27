@@ -254,13 +254,14 @@ import { FC_ACT_OPEN, FC_ACT_DETAIL, FC_ACT_REVEAL, FC_ACT_COPY_PATH, FC_ACT_COP
   FC_MENU_W, FC_MENU_ITEM_H, FC_MENU_TITLE_H, FC_MENU_PAD_V,
   FcMenuItem, FcMenuPos } from '../common/FileContextMenu';
 // 第七十六轮：预览区「相片右键菜单 / EXIF 图标 / EXIF 资料框 / 预览模式」唯一真值源。
-// 与左栏 FileContextMenu 两套菜单互不影响：本套只在预览区相片上右键触发，恒三项。
-import { PM_ACT_EXIF, PM_ACT_SLIDE, PM_ACT_FULL, PM_ACT_SR,
-  PM_MARK_CHECK, PM_MARK_RADIO,
+// 第一百零七轮：菜单改为「1 个动作 + 4 个滑动开关」，本文件只负责渲染与接线。
+import { PM_ACT_EXIF, PM_ACT_SPREAD, PM_ACT_SR, PM_ACT_SLIDE, PM_ACT_FULL,
   PM_EXIF_LABEL, PM_EXIF_MARGIN_VP, PM_EXIF_EMPTY,
-  PM_MENU_W, PM_MENU_ITEM_H, PM_MENU_TITLE_H, PM_MENU_PAD_V,
+  PM_MENU_W, PM_MENU_ITEM_H, PM_MENU_TITLE_H, PM_MENU_PAD_V, PM_MENU_PAD_H,
+  PM_SWITCH_W, PM_SWITCH_H, PM_SWITCH_GAP,
   PM_MODE_AUTO, PM_MODE_SPREAD, PmMenuItem, PmMenuPos, PmExifField,
-  pmItemsOf, pmHasActOf, pmModeAfterAct, pmSpreadWantedOf,
+  pmItemsOf, pmHasActOf, pmSpreadWantedOf, pmSpreadModeOf,
+  pmMenuWidthOf, pmSwitchStatusOf, pmSwitchDescOf,
   pmExifBadgeVisibleOf, pmPhotoReadyOf, pmExifPanelTitleOf, pmExifEmptyOf,
   pmRightHitOf, pmMenuHeightOf, pmMenuPosOf, pmMenuVisibleOf,
   pmMenuTitleOf, pmStatusOf } from '../common/PictureMenu';
@@ -275,7 +276,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R106';
+const ESC_BUILD_TAG: string = 'R107';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1390,6 +1391,11 @@ struct Index {
   @State pmMenuName: string = '';
   @State pmMenuItems: Array<PmMenuItem> = [];
   @State pmMenuHover: string = '';
+  /** 第一百零七轮：本次浮层的实际宽度（随根容器自适应，桌面 232vp / 窄屏收窄）。 */
+  @State pmMenuW: number = PM_MENU_W;
+  /** 第一百零七轮：当前获得键盘焦点的开关行（动作码）。只用于画焦点框 ——
+   *  键盘 Tab 到某个开关时整行有可见描边，读屏软件另有原生 Toggle 语义兜底。 */
+  @State pmFocusAct: string = '';
   /** 第一百零六轮：菜单目标下标 —— 右键按在**哪一页**就锁哪一页（并排时右页即 spreadB）；
    *  -1 = 未指定（落在图片间隙 / 空白，沿用「当前图」的既有口径）。 */
   @State pmTargetIdx: number = -1;
@@ -1405,7 +1411,9 @@ struct Index {
   /** 「显示exif资料框」动作的独立浮层。 */
   @State exifPanelOn: boolean = false;
   @State exifPanelTitle: string = '';
-  /** 自动 / 单张 / 并排三态；默认自动 = 既有竖图对开行为逐字不变。 */
+  /** 预览形态：AUTO（初始值，既有竖图自动对开）/ SPREAD（并排开关「开」）/ SINGLE（「关」）。
+   *  第一百零七轮起用户只有「并排」一个开关，AUTO 只是首次进入时的初值，
+   *  一旦拨动开关就固定为 SPREAD 或 SINGLE，不再回到 AUTO。 */
   @State previewMode: number = PM_MODE_AUTO;
   /** 真全屏：应用内三块栏 + 系统标题栏 / dock / 状态栏 / 导航栏全部不显示，画面只剩图片。
    *  2026-11-11 起 applyWindowFullScreen() 会调 window 最大化沉浸接口，详见该方法注释。 */
@@ -10716,8 +10724,9 @@ struct Index {
       }
 
       // 第七十六轮：预览区「相片右键菜单」浮层。只由预览区相片上右键 Press 上抛窗口坐标，
-      // 与左栏 R72–R75 五项菜单完全独立；顺序固定（R76 前三项 + R94 幻灯片，恒四项），
-      // 共用同一套几何真值源。zIndex 21 与左栏菜单同级（两者不会同时打开）；点遮罩 / 点任一菜单项即收。
+      // 与左栏 R72–R75 五项菜单完全独立；第一百零七轮起恒 5 项（1 个动作 + 4 个滑动开关），
+      // 共用同一套几何真值源。zIndex 21 与左栏菜单同级（两者不会同时打开）；
+      // 点遮罩即收；动作行点整行即执行；开关行只认开关本体与文字（避免与 Toggle 双触发）。
       if (pmMenuVisibleOf(this.pmMenuOn, this.pmMenuItems.length)) {
         Stack({ alignContent: Alignment.TopStart }) {
           Column()
@@ -10726,6 +10735,7 @@ struct Index {
             .onClick(() => {
               this.pmMenuOn = false;
               this.pmMenuHover = '';
+              this.pmFocusAct = '';
             })
           Column() {
             Text(this.pmMenuName)
@@ -10735,32 +10745,82 @@ struct Index {
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .height(PM_MENU_TITLE_H)
-              .padding({ left: 12, right: 12 })
+              .padding({ left: PM_MENU_PAD_H, right: PM_MENU_PAD_H })
             ForEach(this.pmMenuItems, (it: PmMenuItem) => {
               Row() {
-                // 第一百零六轮：前置标记列 —— 单选项 ●、开关项 ✓、纯动作项留空。
-                // 列宽固定 14：有没有标记，六项标签的左边缘都对齐、不跳。
-                Text(it.mark === PM_MARK_RADIO ? '●' : (it.mark === PM_MARK_CHECK ? '✓' : ''))
-                  .fontSize(10)
-                  .fontColor(it.enabled ? '#8fb8e8' : '#4a5260')
-                  .width(14)
-                  .textAlign(TextAlign.Center)
+                if (it.sw) {
+                  // 左：滑动开关。用原生 Toggle.Switch —— 滑块位移 + 轨道变色由系统绘制
+                  // （点击必有明确视觉反馈），并自带键盘可达与「已选中 / 未选中」读屏语义。
+                  // 状态读 pmSwitchOnOf（实时真值）：菜单项快照只决定顺序 / 文案 / 可用性，
+                  // 开关本身永远显示「此刻真正生效」的状态，不复制第二份影子状态。
+                  Toggle({ type: ToggleType.Switch, isOn: this.pmSwitchOnOf(it.act) })
+                    .width(PM_SWITCH_W)
+                    .height(PM_SWITCH_H)
+                    .selectedColor('#3f7fd6')
+                    .switchPointColor('#f2f5fa')
+                    // 开关恒可操作：菜单只在「预览区确有相片」时打开，四个开关此刻必然可用。
+                    // 刻意不写 .enabled(false) —— 全工程既有契约是「控件永不禁用」；
+                    // 纯函数里的 enabled 只用来把文字置灰（不可达状态下的兜底样式）。
+                    // 可点击区域：可视 44×26，热区扩到 60×44（= 整行高）。
+                    // 桌面端鼠标好点，移动端也不会因为开关太细而点不中。
+                    .responseRegion({ x: -8, y: -9, width: PM_SWITCH_W + 16, height: PM_MENU_ITEM_H })
+                    .focusable(true)
+                    .accessibilityText(it.label)
+                    .accessibilityDescription(pmSwitchDescOf(it.act, this.pmSwitchOnOf(it.act)))
+                    .accessibilityLevel('yes')
+                    .onFocus(() => {
+                      this.pmFocusAct = it.act;
+                    })
+                    .onBlur(() => {
+                      if (this.pmFocusAct === it.act) {
+                        this.pmFocusAct = '';
+                      }
+                    })
+                    .onChange((on: boolean) => {
+                      this.onPmSwitch(it.act, on);
+                    })
+                } else {
+                  // 纯动作行：与开关同宽的留白列 —— 五个标签的左边缘严格对齐、不跳。
+                  Row()
+                    .width(PM_SWITCH_W)
+                    .height(PM_SWITCH_H)
+                }
+                // 右：功能名称。点文字同样切换（第二处大热区），与开关本体不重叠、不双触发。
                 Text(it.label)
                   .fontSize(13)
-                  .fontColor(it.enabled ? '#e8ecf4' : '#59616f')
+                  .fontColor(it.enabled
+                    ? (it.sw && this.pmSwitchOnOf(it.act) ? '#d6e5fb' : '#e8ecf4')
+                    : '#59616f')
+                  .fontWeight(it.sw && this.pmSwitchOnOf(it.act) ? FontWeight.Medium : FontWeight.Normal)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .layoutWeight(1)
+                  .height(PM_MENU_ITEM_H)
+                  .textAlign(TextAlign.Start)
+                  .margin({ left: PM_SWITCH_GAP })
+                  .onClick(() => {
+                    // 只有开关行由文字触发切换；动作行（EXIF）由整行 onClick 收口，
+                    // 避免文字 → 行冒泡导致同一次点击被执行两遍。
+                    if (!it.sw || !it.enabled) {
+                      return;
+                    }
+                    this.onPmRowTap(it);
+                  })
               }
               .width('100%')
               .height(PM_MENU_ITEM_H)
-              .padding({ left: 12, right: 12 })
+              .padding({ left: PM_MENU_PAD_H, right: PM_MENU_PAD_H })
               .backgroundColor(this.pmMenuHover === it.act ? '#333b4a' : '#00000000')
-              .borderRadius(4)
+              .borderRadius(6)
+              // 键盘焦点框：Tab 到开关时整行有可见描边（读屏之外的第二重可见反馈）。
+              .border({ width: this.pmFocusAct === it.act ? 1 : 0, color: '#5a9bf0' })
               .onHover((on: boolean) => {
                 // 禁用项不给悬停高亮（点了也没反应，高亮会骗人）
                 this.pmMenuHover = (on && it.enabled) ? it.act : '';
               })
               .onClick(() => {
-                if (!it.enabled) {
+                // 开关行不接管整行点击：否则与 Toggle 自身的 onChange 叠加，一按翻两次。
+                if (it.sw || !it.enabled) {
                   return;
                 }
                 const act: string = it.act;
@@ -10770,7 +10830,7 @@ struct Index {
               })
             }, (it: PmMenuItem) => it.act)
           }
-          .width(PM_MENU_W)
+          .width(this.pmMenuW)
           .padding({ top: PM_MENU_PAD_V, bottom: PM_MENU_PAD_V })
           .backgroundColor('#262b35')
           .border({ width: 1, color: '#3a4150' })
@@ -11966,19 +12026,95 @@ struct Index {
     if (idx < 0 || idx >= this.items.length) {
       return;                                  // 连当前图都没有：不弹（绝不拿空数据凑菜单）
     }
-    // 菜单状态与真实状态同源：单张 / 并排的单选点、全屏与超分辨的勾，都取此刻的真值。
-    const items: Array<PmMenuItem> = pmItemsOf(this.playing, this.previewMode,
+    // 菜单状态与真实状态同源：并排 / 幻灯片 / 全屏 / 超分辨四个开关都取此刻的真值。
+    // 并排传的是 spreadShown()（眼前是否真的并排），不是 previewMode 枚举 ——
+    // AUTO 下竖图自动对开时开关同样显示「开」，用户看到的就是实际形态。
+    const items: Array<PmMenuItem> = pmItemsOf(this.playing, this.spreadShown(),
       this.fullscreen, this.srMode, this.viewPixelMap !== undefined);
+    const w: number = pmMenuWidthOf(this.lastRootW);
     const h: number = pmMenuHeightOf(items.length);
-    const pos: PmMenuPos = pmMenuPosOf(x, y, this.lastRootW, this.lastRootH,
-      PM_MENU_W, h);
+    const pos: PmMenuPos = pmMenuPosOf(x, y, this.lastRootW, this.lastRootH, w, h);
     this.pmMenuName = pmMenuTitleOf(this.items[idx].name);
     this.pmMenuItems = items;
+    this.pmMenuW = w;
     this.pmMenuX = pos.x;
     this.pmMenuY = pos.y;
     this.pmMenuHover = '';
+    this.pmFocusAct = '';
     this.pmTargetIdx = idx;
     this.pmMenuOn = true;
+  }
+
+  /** 第一百零七轮：开关的真实状态 —— 开关行渲染、无障碍描述、读屏朗读都取这里。
+   *  全部读实时状态（@State），菜单项快照不参与，杜绝「勾着却没生效」。 */
+  private pmSwitchOnOf(act: string): boolean {
+    if (act === PM_ACT_SPREAD) {
+      return this.spreadShown();
+    }
+    if (act === PM_ACT_SR) {
+      return this.srMode;
+    }
+    if (act === PM_ACT_SLIDE) {
+      return this.playing;
+    }
+    if (act === PM_ACT_FULL) {
+      return this.fullscreen;
+    }
+    return false;
+  }
+
+  /** 第一百零七轮：开关被拨动 —— **每个分支都复用该功能原有的开启 / 关闭逻辑**，
+   *  这里只做「显式状态 → 原有收口」的翻译，不重新实现一遍行为。
+   *   · 并排：写 previewMode（原来的模式覆盖点）后 refreshSpread()；
+   *   · 超分辨：setSuperResMode()（原 toggleSuperResMode 的显式版）；
+   *   · 幻灯片：toggleSlide()（进入 / 唤出全流程、叠显、计时器都在里面）；
+   *   · 全屏：setFull()（F / 双击 / F11 / Esc 共用的同一个收口）。
+   *  拨完菜单**不关闭**：开关要有可见的状态变化，也方便连续拨几项。 */
+  private onPmSwitch(act: string, on: boolean): void {
+    this.markUserActive();
+    if (act === PM_ACT_SPREAD) {
+      this.previewMode = pmSpreadModeOf(on);
+      // 播放中拨并排：把进入播放时抓的快照一起改掉，否则开关拨了、画面要等停播才变。
+      this.slideSpreadHold = on;
+      this.refreshSpread();
+      this.status = pmSwitchStatusOf(PM_ACT_SPREAD, on, ESC_BUILD_TAG);
+    } else if (act === PM_ACT_SR) {
+      this.setSuperResMode(on, this.cur);
+    } else if (act === PM_ACT_SLIDE) {
+      // 已有状态与目标一致就不重复触发；失败（没有可播的图）时 toggleSlide 会自己写明确提示，
+      // 所以这里不再覆盖状态文案 —— 开关会自己弹回「关」（状态读的是真实 playing）。
+      if (on !== this.playing) {
+        this.toggleSlide();
+      }
+    } else if (act === PM_ACT_FULL) {
+      this.setFull(on);
+      this.status = pmSwitchStatusOf(PM_ACT_FULL, on, ESC_BUILD_TAG);
+    }
+    this.clampPmMenu();
+  }
+
+  /** 第一百零七轮：点「功能名称」文字 = 拨同一个开关（第二处大热区）。 */
+  private onPmRowTap(it: PmMenuItem): void {
+    if (!it.sw) {
+      this.pmMenuOn = false;
+      this.pmMenuHover = '';
+      this.onPictureMenuAction(it.act);
+      return;
+    }
+    this.onPmSwitch(it.act, !this.pmSwitchOnOf(it.act));
+  }
+
+  /** 第一百零七轮：布局可能变了（全屏切换 / 画布变化）→ 把浮层收进可视区。
+   *  只夹坐标，不重建菜单项：开关状态是实时读的，重建反而会打断滑块的过渡动画。 */
+  private clampPmMenu(): void {
+    if (!this.pmMenuOn) {
+      return;
+    }
+    const h: number = pmMenuHeightOf(this.pmMenuItems.length);
+    const pos: PmMenuPos = pmMenuPosOf(this.pmMenuX, this.pmMenuY,
+      this.lastRootW, this.lastRootH, this.pmMenuW, h);
+    this.pmMenuX = pos.x;
+    this.pmMenuY = pos.y;
   }
 
   /** 父级兜底通道（图片间隙 / 空白处右键）：保持既有口径 —— 以当前图为目标。
@@ -11999,13 +12135,16 @@ struct Index {
     return e !== undefined ? e.exifFields : [];
   }
 
-  /** 第一百零六轮：picture contact menu 动作（R76 三项 + R94 幻灯片 + R106 全屏 / 超分辨）。
-   *  目标图由 pmTargetIdx 锁定；每个动作都有状态栏明确反馈，绝不静默吞掉。
-   *  越权动作由 pmHasActOf 拒绝。 */
+  /** 第一百零七轮：菜单里的**纯动作行**（只剩「显示exif资料框」一项）。
+   *  开关项一律走 onPmSwitch —— 保持「改状态只有一条路径」，不会出现
+   *  「菜单关掉后状态被改两次」这类隐蔽 bug。越权动作由 pmHasActOf 拒绝。 */
   private onPictureMenuAction(act: string): void {
     this.markUserActive();
     if (!pmHasActOf(act)) {
       return;
+    }
+    if (act !== PM_ACT_EXIF) {
+      return;                                  // 开关项不从这里分发
     }
     let idx: number = this.pmTargetIdx;
     if (idx < 0 || idx >= this.items.length) {
@@ -12014,47 +12153,28 @@ struct Index {
     const it: ImageItem | undefined = (idx >= 0 && idx < this.items.length)
       ? this.items[idx] : undefined;
     const name: string = it !== undefined ? it.name : '';
-    // 幻灯片入口：只调 toggleSlide()，不写 previewMode、不重解右页（与 R94 逐字一致）。
-    if (act === PM_ACT_SLIDE) {
-      this.toggleSlide();
-      return;
-    }
-    // 第一百零六轮：全屏模式 —— 与 F / 双击 / F11 同一个收口 setFull（状态文案由它自己写）。
-    if (act === PM_ACT_FULL) {
-      this.setFull(!this.fullscreen);
-      return;
-    }
-    // 第一百零六轮：超分辨模式 —— 总开关；关掉即刻释放产物回原图。
-    if (act === PM_ACT_SR) {
-      this.toggleSuperResMode(idx);
-      return;
-    }
-    const mode: number = pmModeAfterAct(this.previewMode, act);
-    this.previewMode = mode;
-    if (act === PM_ACT_EXIF) {
-      // 字段取「目标那张」：并排时右键右页 → 展示右页的 EXIF，而不是主视图那张。
-      this.exifPanelTitle = pmExifPanelTitleOf(name);
-      this.exifPanelFields = this.exifFieldsAt(idx);
-      this.exifPanelOn = true;
-    } else {
-      // 单张 / 并排都要求立刻重算右页；自动模式（未选时）沿用既有竖图对开，零回归。
-      this.refreshSpread();
-    }
-    this.status = pmStatusOf(act, name, mode, ESC_BUILD_TAG);
+    // 字段取「目标那张」：并排时右键右页 → 展示右页的 EXIF，而不是主视图那张。
+    this.exifPanelTitle = pmExifPanelTitleOf(name);
+    this.exifPanelFields = this.exifFieldsAt(idx);
+    this.exifPanelOn = true;
+    this.status = pmStatusOf(act, name, this.previewMode, ESC_BUILD_TAG);
   }
 
-  /** 第一百零六轮：超分辨模式开关。
+  /** 第一百零七轮：超分辨模式开关（原 toggleSuperResMode 的**显式状态版**）。
    *  开 → 立刻对目标图补跑一次（只有主视图参与超分，右页不参与，故仅当目标是当前图才触发）；
    *  关 → 立刻释放产物回原图，并让后续 maybeSuperResolve 直接跳过。
-   *  与「全屏模式」互不干扰：两者都是独立开关，勾选状态各自取真值。 */
-  private toggleSuperResMode(idx: number): void {
-    this.srMode = !this.srMode;
-    if (!this.srMode) {
-      this.clearViewSrPx();
-      this.status = '超分辨模式：已关闭 · 已回到原图 · ' + ESC_BUILD_TAG;
+   *  与「全屏模式」互不干扰：两者都是独立开关，状态各自取真值。 */
+  private setSuperResMode(on: boolean, idx: number): void {
+    if (on === this.srMode) {
       return;
     }
-    this.status = '超分辨模式：已开启（AI 超分将按需生效）· ' + ESC_BUILD_TAG;
+    this.srMode = on;
+    if (!on) {
+      this.clearViewSrPx();
+      this.status = pmSwitchStatusOf(PM_ACT_SR, false, ESC_BUILD_TAG);
+      return;
+    }
+    this.status = pmSwitchStatusOf(PM_ACT_SR, true, ESC_BUILD_TAG);
     if (idx === this.cur && this.viewPixelMap !== undefined) {
       const uri: string = this.items[this.cur].uri;
       this.viewSrKeyDone = '';                 // 允许同一张再算一次（刚被关掉过）

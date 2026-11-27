@@ -1,105 +1,144 @@
 /**
- * common/PictureMenu.ts —— 第七十六轮：预览区「相片右键菜单」的唯一真值源
+ * common/PictureMenu.ts —— 预览区「相片右键菜单」的唯一真值源
  *
- *  用户要求（四项里的第 3 / 4 项）：
- *    · 仅对【含有 EXIF 资料】的相片，在【右上角】显示 EXIF 图标；不含的不显示；
- *    · 相片上方【右键】触发 picture contact menu（与左栏档案列表五项右键菜单互不影响）；
- *    · 菜单【前三项按顺序固定】：① 显示exif资料框 ② 单张预览 ③ 左右并排预览；
- *    · 选择各项分别：显示 EXIF 资料框 / 进入单张预览 / 进入左右并排预览。
+ *  第一百零七轮（R107）改版：菜单从「一堆勾选项」变成「一个动作 + 四个滑动开关」。
+ *    · 每一项都是「左侧滑动开关 + 右侧功能名称」的横向行，开关与文字垂直居中；
+ *    · 恒 5 项，顺序固定：
+ *        ① 显示exif资料框（纯动作，无开关）
+ *        ② 左右并排预览（开关，默认关 = 单页；原「单张预览」项已移除）
+ *        ③ 超分辨模式（开关，默认开）
+ *        ④ 播放幻灯片（开关，默认关）
+ *        ⑤ 全屏模式（开关，默认关）
+ *    · 「单张预览」不再作为独立功能项存在：它就是并排开关的「关」。
+ *    · 开关状态一律取**眼前真值**（并排是否真的显示、是否真的在播、是否真的全屏），
+ *      不复制一份影子状态，避免「勾了却没生效」。
+ *
+ *  历史（保留，便于对照实机行为）：
+ *    · 第七十六轮：仅对含 EXIF 的相片显示右上角 EXIF 图标；右键弹三项菜单；
+ *    · 第九十四轮：幻灯片入口迁到这里；第一百零六轮：全屏 / 超分辨入口。
  *
  *  与 FileContextMenu.ts 的分工（两套菜单互不干扰）：
- *    · FileContextMenu.ts —— 左栏档案列表条目的五项菜单（R72–R75 已定稿，本轮零改动）。
- *    · 本文件 —— 预览区当前相片的三项菜单、EXIF 图标显隐、EXIF 段探测、预览模式决策、
- *      菜单浮层几何与状态文案。
- *
- *  放大镜检查点：本轮把放大镜触发从「右键」改为「预览区相片上左键」，
- *  纯函数 loupeEnabledAfterLeftClick 落在 InteractionPlan.ts；这里只提供
- *  「右键是否该弹相片菜单」的命中判定 pmRightHitOf（零 SDK、零 IO）。
+ *    · FileContextMenu.ts —— 左栏档案列表条目的五项菜单（R72–R75 已定稿，零改动）。
+ *    · 本文件 —— 预览区当前相片的菜单、EXIF 图标显隐、EXIF 段探测、预览模式决策、
+ *      菜单浮层几何、开关语义与状态文案。
  *
  *  严格零 SDK / 零 IO / 零异步 / 零 throw / 零定时器 / 零 Promise / 零全局可变状态。
  */
 
 // ==================================================================
-// ① 菜单动作码与文案（顺序即用户指定顺序，恒三项）
+// ① 菜单动作码与文案（顺序即用户指定顺序，恒 5 项）
 // ==================================================================
+/** 唯一一项「纯动作」：点一下弹 EXIF 资料框，不表示任何持续状态。 */
 export const PM_ACT_EXIF: string = 'pmExif';
-export const PM_ACT_SINGLE: string = 'pmSingle';
+/** 以下四项都是「滑动开关」项：都表示一个持续状态，点一下翻转一次。 */
 export const PM_ACT_SPREAD: string = 'pmSpread';
-/** 第九十四轮：幻灯片播放入口从「自动隐藏顶栏」迁到相片右键菜单（第四项）。 */
-export const PM_ACT_SLIDE: string = 'pmSlide';
-/** 第一百零六轮：第五项「全屏模式」、第六项「超分辨模式」。 */
-export const PM_ACT_FULL: string = 'pmFull';
 export const PM_ACT_SR: string = 'pmSr';
+/** 第九十四轮：幻灯片播放入口从「自动隐藏顶栏」迁到相片右键菜单。 */
+export const PM_ACT_SLIDE: string = 'pmSlide';
+/** 第一百零六轮：全屏模式。 */
+export const PM_ACT_FULL: string = 'pmFull';
 
 export const PM_LABEL_EXIF: string = '显示exif资料框';
-export const PM_LABEL_SINGLE: string = '单张预览';
 export const PM_LABEL_SPREAD: string = '左右并排预览';
-/** 幻灯片两项文案：按当前是否正在播放切换，语义与旧顶栏按钮完全一致（播放 / 暂停）。 */
-export const PM_LABEL_SLIDE_PLAY: string = '播放幻灯片';
-export const PM_LABEL_SLIDE_PAUSE: string = '暂停幻灯片';
-export const PM_LABEL_FULL: string = '全屏模式';
 export const PM_LABEL_SR: string = '超分辨模式';
-
-/** 菜单项前置标记形态：纯动作项无标记；开关项打勾；单选项打圆点。 */
-export const PM_MARK_NONE: number = 0;
-export const PM_MARK_CHECK: number = 1;
-export const PM_MARK_RADIO: number = 2;
+/** 第一百零七轮：开关项的文案是**固定功能名**，不再随状态改名
+ *  （开关本身就是状态表达；文案在「播放 / 暂停」之间跳会让读屏与视觉都不稳定）。 */
+export const PM_LABEL_SLIDE: string = '播放幻灯片';
+export const PM_LABEL_FULL: string = '全屏模式';
 
 /** 一个菜单项：动作码 + 文案 + 状态。
- *  `checked` / `mark` 给出选中反馈（单选项圆点、开关项打勾），`enabled` 给出禁用态：
- *  灰显且点不动 —— 三者在 UI 上走同一套渲染，不另开分支。 */
+ *  · `sw`      —— 是否以「左侧滑动开关 + 右侧功能名」的行式渲染（false = 纯动作行）；
+ *  · `checked` —— 开关当前是否处于「开」（纯动作行恒 false）；
+ *  · `enabled` —— false = 灰显且点不动。
+ *  三者由同一套渲染读取，UI 不另开分支。 */
 export interface PmMenuItem {
   act: string;
   label: string;
-  /** 是否处于「已选中 / 已开启」态。 */
+  /** 是否处于「已开启」态（纯动作项恒 false）。 */
   checked: boolean;
   /** 是否可用；false = 灰显且点击无响应。 */
   enabled: boolean;
-  /** 前置标记形态（PM_MARK_*）。 */
-  mark: number;
+  /** 是否为「滑动开关」项。 */
+  sw: boolean;
 }
 
-/** 菜单项真值源：**前三项顺序固定**（R76 契约不变），第四项幻灯片（R94），
- *  第五项全屏模式、第六项超分辨模式（R106）。
+/** 菜单项真值源：**顺序固定** —— ① EXIF 动作 ② 并排预览 ③ 超分辨 ④ 幻灯片 ⑤ 全屏。
  *
- *  参数说明（全部有默认值，旧调用零改动）：
- *   · playing    —— 第四项文案在「播放 / 暂停幻灯片」间切换；
- *   · mode       —— 第二 / 三项的单选点：单张 or 并排（AUTO 时两者都不选中）；
- *   · fullscreen —— 第五项的勾：当前是否全屏；
- *   · srMode     —— 第六项的勾：超分辨模式是否开启；
- *   · srEnabled  —— 第六项是否可用（例如没有上屏图时为 false）。
+ *  参数说明（全部有默认值）：
+ *   · playing    —— 幻灯片开关当前是否在播；
+ *   · spreadOn   —— **当前是否真的在并排显示**（`spreadShown()` 的真值，
+ *                   AUTO 下竖图自动对开时也是 true —— 开关显示的是眼前事实，不是内部枚举）；
+ *   · fullscreen —— 全屏开关；
+ *   · srMode     —— 超分辨开关；
+ *   · srEnabled  —— 超分辨开关是否可用（无上屏图时为 false）。
  *  每次返回新数组（零共享可变状态）。 */
-export function pmItemsOf(playing: boolean = false, mode: number = PM_MODE_AUTO,
+export function pmItemsOf(playing: boolean = false, spreadOn: boolean = false,
   fullscreen: boolean = false, srMode: boolean = true,
   srEnabled: boolean = true): Array<PmMenuItem> {
   return [
     { act: PM_ACT_EXIF, label: PM_LABEL_EXIF,
-      checked: false, enabled: true, mark: PM_MARK_NONE },
-    { act: PM_ACT_SINGLE, label: PM_LABEL_SINGLE,
-      checked: mode === PM_MODE_SINGLE, enabled: true, mark: PM_MARK_RADIO },
+      checked: false, enabled: true, sw: false },
     { act: PM_ACT_SPREAD, label: PM_LABEL_SPREAD,
-      checked: mode === PM_MODE_SPREAD, enabled: true, mark: PM_MARK_RADIO },
-    { act: PM_ACT_SLIDE,
-      label: playing ? PM_LABEL_SLIDE_PAUSE : PM_LABEL_SLIDE_PLAY,
-      checked: playing, enabled: true, mark: PM_MARK_CHECK },
-    { act: PM_ACT_FULL, label: PM_LABEL_FULL,
-      checked: fullscreen, enabled: true, mark: PM_MARK_CHECK },
+      checked: spreadOn === true, enabled: true, sw: true },
     { act: PM_ACT_SR, label: PM_LABEL_SR,
-      checked: srMode, enabled: srEnabled, mark: PM_MARK_CHECK }
+      checked: srMode === true, enabled: srEnabled === true, sw: true },
+    { act: PM_ACT_SLIDE, label: PM_LABEL_SLIDE,
+      checked: playing === true, enabled: true, sw: true },
+    { act: PM_ACT_FULL, label: PM_LABEL_FULL,
+      checked: fullscreen === true, enabled: true, sw: true }
   ];
 }
 
-/** 菜单项数（恒 6：R76 三项 + R94 幻灯片 + R106 全屏 / 超分辨）。 */
+/** 菜单项数（恒 5：1 个动作 + 4 个开关）。 */
 export function pmItemCountOf(): number {
   return pmItemsOf().length;
 }
 
-/** 前三项顺序是否严格符合要求 —— 静态契约与 UI 共用的唯一判据。 */
-export function pmFirstThreeOrderedOf(items: Array<PmMenuItem>): boolean {
-  return items.length >= 3 &&
-    items[0].act === PM_ACT_EXIF && items[0].label === PM_LABEL_EXIF &&
-    items[1].act === PM_ACT_SINGLE && items[1].label === PM_LABEL_SINGLE &&
-    items[2].act === PM_ACT_SPREAD && items[2].label === PM_LABEL_SPREAD;
+/** 开关项的动作码（顺序即展示顺序）—— 「三个新功能 + 并排」共四项，全是开关。 */
+export function pmSwitchActsOf(): Array<string> {
+  return [PM_ACT_SPREAD, PM_ACT_SR, PM_ACT_SLIDE, PM_ACT_FULL];
+}
+
+/** 菜单顺序是否严格符合要求 —— 静态契约与 UI 共用的唯一判据。 */
+export function pmMenuOrderOkOf(items: Array<PmMenuItem>): boolean {
+  return items.length === 5 &&
+    items[0].act === PM_ACT_EXIF && items[0].sw === false &&
+    items[1].act === PM_ACT_SPREAD && items[1].sw === true &&
+    items[2].act === PM_ACT_SR && items[2].sw === true &&
+    items[3].act === PM_ACT_SLIDE && items[3].sw === true &&
+    items[4].act === PM_ACT_FULL && items[4].sw === true;
+}
+
+/** 每个开关的默认状态（进入应用、未被用户拨动时的初始值）。
+ *  这也是「实现说明」里那份默认态清单的唯一真值源，测试直接断言它。 */
+export function pmSwitchDefaultOf(act: string): boolean {
+  // 超分辨：默认开 —— R99 起的「按需自动超分」就是默认行为，开关只是给它一个总闸。
+  if (act === PM_ACT_SR) {
+    return true;
+  }
+  // 并排 / 幻灯片 / 全屏：默认关。并排关 ≠ 以前那个「单张预览」强制项：
+  // 初始仍是 PM_MODE_AUTO（竖图自动对开），开关只显示「现在是否真的并排」。
+  return false;
+}
+
+/** 开关动作码 → 固定功能名（无障碍标签与状态文案共用）。未知动作返回空串。 */
+export function pmLabelOf(act: string): string {
+  if (act === PM_ACT_EXIF) {
+    return PM_LABEL_EXIF;
+  }
+  if (act === PM_ACT_SPREAD) {
+    return PM_LABEL_SPREAD;
+  }
+  if (act === PM_ACT_SR) {
+    return PM_LABEL_SR;
+  }
+  if (act === PM_ACT_SLIDE) {
+    return PM_LABEL_SLIDE;
+  }
+  if (act === PM_ACT_FULL) {
+    return PM_LABEL_FULL;
+  }
+  return '';
 }
 
 /** 某个动作是否属于该菜单；杜绝越权动作分发。 */
@@ -114,24 +153,21 @@ export function pmHasActOf(act: string): boolean {
 }
 
 // ==================================================================
-// ② 预览模式（用户选择「三项 + 模式覆盖」：不选时保持既有自动竖图对开）
+// ② 预览模式（并排开关的两种落点；AUTO 只是初始值）
 // ==================================================================
-/** 自动：完全沿用 R56 的 spreadRightWantedOf(左图比例) 自动竖图对开，零回归。 */
+/** 自动：完全沿用 R56 的 spreadRightWantedOf(左图比例) 自动竖图对开，零回归。
+ *  第一百零七轮起它**只是初始值**：用户一旦拨动并排开关，就固定为 SINGLE / SPREAD 之一。 */
 export const PM_MODE_AUTO: number = 0;
-/** 单张预览：强制单页（spreadB = -1）。 */
+/** 并排开关「关」：单页居中显示（spreadB = -1）。旧的「单张预览」菜单项已移除，
+ *  这个值不再有独立的用户入口，只是开关关闭态的落点。 */
 export const PM_MODE_SINGLE: number = 1;
-/** 左右并排预览：只要有下一张就强制并排，不再要求左图为竖图。 */
+/** 并排开关「开」：只要有可配对的下一张就并排，不再要求左图为竖图。 */
 export const PM_MODE_SPREAD: number = 2;
 
-/** 菜单动作 → 预览模式；非模式类动作（EXIF 资料框）保持当前模式不变。 */
-export function pmModeAfterAct(current: number, act: string): number {
-  if (act === PM_ACT_SINGLE) {
-    return PM_MODE_SINGLE;
-  }
-  if (act === PM_ACT_SPREAD) {
-    return PM_MODE_SPREAD;
-  }
-  return current;
+/** 并排开关的状态 → 预览模式。开 = 强制并排，关 = 单页。
+ *  纯布尔映射：UI 的开关与内部模式枚举之间只有这一条转换，不会再出现第三个用户态。 */
+export function pmSpreadModeOf(on: boolean): number {
+  return on === true ? PM_MODE_SPREAD : PM_MODE_SINGLE;
 }
 
 /** 是否真的要显示右页：
@@ -152,7 +188,7 @@ export function pmSpreadWantedOf(mode: number, hasNext: boolean,
 /** 模式名（状态栏反馈用）。 */
 export function pmModeLabelOf(mode: number): string {
   if (mode === PM_MODE_SINGLE) {
-    return '单张预览';
+    return '单页显示';
   }
   if (mode === PM_MODE_SPREAD) {
     return '左右并排预览';
@@ -348,13 +384,40 @@ export function pmRightHitOf(hasImage: boolean, textMode: boolean): boolean {
   return pmPhotoReadyOf(hasImage, textMode);
 }
 
-/** 菜单宽 / 项高 / 标题高 / 上下内边距（vp），与左栏菜单同口径但独立常量。 */
-export const PM_MENU_W: number = 200;
-export const PM_MENU_ITEM_H: number = 34;
+/** 菜单宽 / 项高 / 标题高 / 上下内边距（vp），与左栏菜单同口径但独立常量。
+ *
+ *  第一百零七轮：行高 34 → **44**。开关行的行高就是整行的可点击高度，
+ *  44vp 是移动端 / 桌面端都够用的最小触控目标；标题行与内边距不动。 */
+export const PM_MENU_W: number = 232;
+export const PM_MENU_ITEM_H: number = 44;
 export const PM_MENU_TITLE_H: number = 24;
 export const PM_MENU_PAD_V: number = 6;
 export const PM_MENU_EDGE_V: number = 8;
 export const PM_MENU_NAME_MAX: number = 28;
+/** 菜单左右内边距（vp）：开关与文字共用，保证两列视觉对齐。 */
+export const PM_MENU_PAD_H: number = 10;
+/** 开关可视尺寸（vp）：44×26 是 HarmonyOS 原生 Switch 的稳定观感尺寸；
+ *  实际可点击区域由 responseRegion 扩到 44 高（= 整数行高），满足触控目标。 */
+export const PM_SWITCH_W: number = 44;
+export const PM_SWITCH_H: number = 26;
+/** 开关与功能名之间的间距（vp）。 */
+export const PM_SWITCH_GAP: number = 12;
+/** 菜单最小可用宽度：再窄就放不下「开关 + 五个字」，宁可让浮层贴近屏幕边缘。 */
+export const PM_MENU_W_MIN: number = 200;
+
+/** 菜单实际宽度：随根容器自适应。
+ *  桌面（宽屏）用 PM_MENU_W；移动端窄屏（如 360vp）按「留 16vp 边距」收窄，
+ *  下限 PM_MENU_W_MIN，绝不超出可视区。rootW 非法（0 / NaN）时退回 PM_MENU_W。纯数值。 */
+export function pmMenuWidthOf(rootW: number): number {
+  if (!(rootW > 0)) {
+    return PM_MENU_W;
+  }
+  const fit: number = rootW - 16;
+  if (fit < PM_MENU_W_MIN) {
+    return PM_MENU_W_MIN;
+  }
+  return fit < PM_MENU_W ? Math.floor(fit) : PM_MENU_W;
+}
 
 /** 菜单浮层在根 Stack 里的绝对位置。 */
 export interface PmMenuPos {
@@ -416,8 +479,50 @@ export function pmStatusOf(act: string, name: string, mode: number, tag: string)
   if (act === PM_ACT_EXIF) {
     return '已显示「' + (name.length > 0 ? name : '相片') + '」EXIF 资料框' + tail;
   }
-  if (act === PM_ACT_SINGLE || act === PM_ACT_SPREAD) {
-    return '已进入' + pmModeLabelOf(mode) + tail;
+  if (act === PM_ACT_SPREAD) {
+    return pmSwitchStatusOf(PM_ACT_SPREAD, mode === PM_MODE_SPREAD, tag);
   }
   return '';
+}
+
+// ==================================================================
+// ⑤ 滑动开关：状态文案 / 无障碍描述 / 键盘切换语义（第一百零七轮）
+// ==================================================================
+/** 开关拨到 `on` 之后状态栏那句话 —— 与「原有开启 / 关闭逻辑」的真实后果逐条对应：
+ *   · 并排：开 = 有可配对的下一张就并排；关 = 单页居中；
+ *   · 超分辨：开 = AI 超分按需生效；关 = 立刻回原图、后续不再触发；
+ *   · 幻灯片：开 = 开始播放（沿用进入时的并排 / 单页形态）；关 = 暂停并收掉叠显层；
+ *   · 全屏：开 = 隐藏左栏与状态栏、画面只剩图片；关 = 原样还原退出前的视图。
+ *  纯字符串，零 IO。 */
+export function pmSwitchStatusOf(act: string, on: boolean, tag: string): string {
+  const tail: string = tag.length > 0 ? ' · ' + tag : '';
+  if (act === PM_ACT_SPREAD) {
+    return on === true
+      ? '左右并排预览：已开启（有可配对的一张就并排）' + tail
+      : '左右并排预览：已关闭（单页居中显示）' + tail;
+  }
+  if (act === PM_ACT_SR) {
+    return on === true
+      ? '超分辨模式：已开启（AI 超分按需生效）' + tail
+      : '超分辨模式：已关闭 · 已回到原图' + tail;
+  }
+  if (act === PM_ACT_SLIDE) {
+    return on === true
+      ? '幻灯片：播放中（每 3 秒切换 · 淡入淡出）' + tail
+      : '幻灯片：已暂停' + tail;
+  }
+  if (act === PM_ACT_FULL) {
+    return on === true ? '全屏模式：已开启（Esc 退出）' + tail : '全屏模式：已关闭' + tail;
+  }
+  return '';
+}
+
+/** 无障碍描述（读屏 / 辅助技术读到的「这是什么 + 现在什么状态 + 怎么切」）。
+ *  开关的「选中与否」本身由原生 Toggle 语义提供，这里补的是可读文案。 */
+export function pmSwitchDescOf(act: string, on: boolean): string {
+  const name: string = pmLabelOf(act);
+  if (name.length === 0) {
+    return '';
+  }
+  return name + '，当前' + (on === true ? '已开启' : '已关闭') + '，按空格或回车切换';
 }
