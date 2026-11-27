@@ -271,7 +271,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R102';
+const ESC_BUILD_TAG: string = 'R103';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1178,7 +1178,7 @@ struct Index {
 
   // ---- 图像档案 ----
   // items 刻意**不加 @State**：几千个元素进状态系统会被逐层建代理，纯属浪费；
-  // UI 只需要 itemCount（第一百零二轮起只作状态快照，抬头不再显示「N 张」）与 LazyForEach 的数据源。
+  // UI 只需要 itemCount（第一百零二/一百零三轮起左栏抬头已整块移除，此值仅作状态快照）与 LazyForEach 的数据源。
   private items: ImageItem[] = [];
   private dataSource: GalleryDataSource = new GalleryDataSource();
   /** 左栏实际显示的行（Win64 FsEntry）。目录浏览态下会多出「..」、子文件夹、
