@@ -251,7 +251,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R90';
+const ESC_BUILD_TAG: string = 'R91';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -377,6 +377,8 @@ const TOPBAR_EDGE_PX: number = 10;
 const TOPBAR_KEEP_PX: number = 8;
 const TOPBAR_H: number = 52;
 const TOPBAR_HIDE_MS: number = 2000;
+/** 第九十一轮：退出全屏后第二次画布采样的延迟（晚于 260ms 的落定、早于用户感知「稳定」）。 */
+const FULL_EXIT_SAMPLE_MS: number = 1500;
 /** 第十三轮：非全屏时整栏「贴顶唤出」的滞回带（vp，MouseEvent.y 相对根 Stack）。
  *  默认整栏不渲染（完全不占布局）；鼠标压进页面最顶 TRIGGER 内才浮出，
  *  浮出后只要还在顶栏 + KEEP 缓冲内就保持，越过才收起 —— 显示阈值窄、隐藏阈值宽，
@@ -1362,6 +1364,8 @@ struct Index {
   private resizeReloadTimer: number = -1;
   /** 第八十二轮：退出全屏后的确认式重新适配计时器（页面销毁时一并清掉）。 */
   private fullExitRefitTimer: number = -1;
+  /** 第九十一轮：退出后再多采一次画布（+1500ms），用来判定「画布是瞬态还是稳态变小」。 */
+  private fullExitSampleTimer: number = -1;
   /** resize 累积判据：上次**真正触发重解**时的画布尺寸（0 = 首帧还没重解过）。
    *  ⚠️ 不能拿「上一帧尺寸」比：拖窗口每帧只变 1~3vp，永远够不到 8vp 阈值，
    *     重解就一次都不会发生 —— 第四轮实机「resize 没反应」的主因之一。 */
@@ -2014,6 +2018,10 @@ struct Index {
     this.clearResizeReload();
     if (this.fullExitRefitTimer !== -1) {
       clearTimeout(this.fullExitRefitTimer); // 第八十二轮：页面销毁后不许再确认式重适配
+      if (this.fullExitSampleTimer !== -1) {
+        clearTimeout(this.fullExitSampleTimer); // 第九十一轮：延迟采样一并作废
+        this.fullExitSampleTimer = -1;
+      }
       this.fullExitRefitTimer = -1;
     }
   }
@@ -6405,6 +6413,26 @@ struct Index {
     }, FULL_EXIT_REFIT_MS);
   }
 
+  /** 第九十一轮：退出 1.5s 后再采一次画布（纯诊断）。
+   *
+   *  为什么需要：`full exit settle` 在 ESC 后 260ms 打，此时 `applyWindowFullScreen(false)`
+   *  那串异步窗口调用（recover / maximize / decor 恢复）未必走完；若画布此后还在变，
+   *  260ms 读到的是**中间态**，不能当成稳态证据。这条延迟采样用来区分：
+   *   · settle2 的 canvas 与 settle 相同 → 稳态就是小 37vp，要查窗口/装饰谁占了它；
+   *   · settle2 的 canvas 回到 enter 的值 → 只是瞬态，修法是「等画布稳定再落定」。 */
+  private armFullExitSample(): void {
+    if (this.fullExitSampleTimer !== -1) {
+      clearTimeout(this.fullExitSampleTimer);
+    }
+    this.fullExitSampleTimer = setTimeout(() => {
+      this.fullExitSampleTimer = -1;
+      if (!this.pageAlive || this.fullscreen) {
+        return;
+      }
+      hilog.info(DOMAIN, TAG, 'full exit settle2: %{public}s', this.viewDiagOf());
+    }, FULL_EXIT_SAMPLE_MS);
+  }
+
   /** 预载档位：按画布尺寸动态取，向上量化到 PRELOAD_QUANT 的倍数。
    *  全屏时上限放宽到 FULLSCREEN_PRELOAD_MAX_EDGE（普通态 1536），让前后 100 张也跟着画布放大。
    *  ⚠️ 必须是 ceil 不是 floor：向下量化会让档位小于屏幕实际像素，命中缓存还得再解一次全清。
@@ -8423,7 +8451,11 @@ struct Index {
         this.hasFullSnapshot = false;
         // 布局重建 / 窗口退出沉浸是异步的：等普通模式画布真正落定后再确认一次「视图未被改动 + 按新画布重解」。
         if (onExit) {
+          // 第九十一轮：退出瞬间先记一条（画布可能还是全屏值），260ms 落定一条，1500ms 再一条。
+          // 三条 canvas 一比，就能判定「画布是瞬态偏小还是稳态变小」。
+          hilog.info(DOMAIN, TAG, 'full exit immediate: %{public}s', this.viewDiagOf());
           this.armFullExitRefit();
+          this.armFullExitSample();
         }
     }
     this.applyWindowFullScreen(on, 0); // 标题栏 / dock / 状态栏 / 导航栏一起处理与还原
