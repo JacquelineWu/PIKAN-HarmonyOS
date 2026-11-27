@@ -121,7 +121,9 @@ import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
 // 第七十七轮：adaptive column width 的唯一真值源（内容长度 + 容器尺寸，零固定宽度）。
 import { AcLayout, acLayoutOf, acWidthSafeOf, acNeedWOf } from '../common/AdaptiveColumn';
 // 第一百零八轮：左栏拖拽调宽的唯一真值源（夹取 / 拖动 / 恢复 / 写盘，全纯函数）。
-import { SPLIT_DIVIDER_W, SPLIT_HIT_EXTRA_VP,
+// 第一百一十二轮：不再用 SPLIT_HIT_EXTRA_VP —— 超界命中区在部分设备上会让容器自身失效，
+// 命中改由「铺满整条栏的命中层」提供。
+import { SPLIT_DIVIDER_W,
   splitDragWOf, splitSidebarWOf, splitRestoreWOf, splitPersistOf,
   splitStatusOf, splitResetOf, splitActiveOf, splitHideMetaOf } from '../common/SidebarSplit';
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
@@ -281,7 +283,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R111';
+const ESC_BUILD_TAG: string = 'R112';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -10332,9 +10334,27 @@ struct Index {
 
           // 分隔条正中的 « / »（Win64 45~49 行）：与 Ctrl+B 同效。
           // 收起后按钮仍在原地，再点一下展回来；全屏时随左栏一起整条隐藏。
-          // 第一百零八轮：整条分隔条 = 拖拽调宽手柄（见下方 gesture），按钮只占中间一段，
-          // 因此「拖」与「点收起」互不影响。
-          Column() {
+          // 第一百零八轮：整条分隔条 = 拖拽调宽手柄。
+          // 第一百一十二轮：改为「Stack + 铺满整条的命中层 + 居中的按钮」——
+          //   · 命中层是**真实绘制的子节点**（与本栏同色，视觉零变化），保证上 / 下空白处
+          //     一定有可命中的目标；
+          //   · 事件统一冒泡到外层 Stack，只有一套 mouse / touch 处理；
+          //   · 删掉负偏移的 responseRegion（详见下方注释），它是「只有按钮能拖」的元凶。
+          Stack({ alignContent: Alignment.Center }) {
+            // 命中层：铺满整条栏。透明容器不保证参与命中，所以这里给**不透明**同色底，
+            // 与父层同色 ⇒ 看起来仍是一条纯色竖条，但任何一点都有真实命中目标。
+            Column()
+              .width('100%')
+              .height('100%')
+              .backgroundColor(splitActiveOf(this.sidebarDragging, this.sidebarHover)
+                ? '#2f4159' : '#1a1d23')
+              // 悬停判定挂在**命中层**（指针真正落在的节点）：换左右双箭头光标 +
+              // 栏体浅高亮。onHover 不保证沿祖先链上抛，所以不能只挂在外层 Stack。
+              .onHover((on: boolean) => {
+                this.sidebarHover = on;
+                this.applySplitCursor();
+              })
+
             Button(this.listCollapsed ? '»' : '«')
               .type(ButtonType.Normal)
               .fontSize(13)
@@ -10352,11 +10372,8 @@ struct Index {
                 this.markWindowRect();
                 this.status = this.listCollapsed ? '已收起左栏（Ctrl+B / » 展开）' : '已展开左栏';
               })
-              // 第一百一十一轮：按钮上**不再拦冒泡** —— 整条分割栏任意位置（含这枚按钮）
-              // 都能拖。按下会冒泡到 Column 的 onMouse/onTouch，走与其它位置完全相同的
-              // onSplitPointerDown/Move/End；只要产生位移就不会触发按钮的 click，
-              // 没位移才由上面的 onClick 收起 / 展开（默认命中行为即可，无需改 hitTest）。
-              // 这里只留一个瞬时标记：这次按下落在按钮上 → 分隔条跳过「双击复位」判定，
+              // 第一百一十一轮：按钮不拦冒泡，按下照样走整条栏的同一套拖动处理。
+              // 这里只留一个瞬时标记：这次按下落在按钮上 → 跳过「双击复位」判定，
               // 否则双击 « 会顺手把宽度复位（用户只想收起 / 展开）。
               .onMouse((event: MouseEvent) => {
                 if (event.action === MouseAction.Press) {
@@ -10371,25 +10388,16 @@ struct Index {
           }
           .width(SPLIT_W)
           .height('100%')
-          .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
-          // 第一百零八轮：整条分隔条 = 拖拽调宽手柄。
-          // 第一百零九轮：改为**显式的 mouse / touch 通道**（不再用 PanGesture）——
-          // 位置就是左栏的右边界，因此「分割线位置」= listW，与拖拽结果天然一致。
-          // 视觉三态：常态深灰底 / 悬停浅高亮（提示可拖）/ 拖动中蓝色高亮（交互状态可见）。
+          // 父层同样给底色：命中层与父层同色，任何一帧都不会出现色差。
           .backgroundColor(splitActiveOf(this.sidebarDragging, this.sidebarHover)
             ? '#2f4159' : '#1a1d23')
-          // 悬停：换左右双箭头光标（CursorController，2in1 生效；失败只记日志）。
-          .onHover((on: boolean) => {
-            this.sidebarHover = on;
-            this.applySplitCursor();
-          })
-          // 命中区左右各外扩 6vp：可视仍 14vp，但手不用精确戳在那条细缝上。
-          .responseRegion({ x: -SPLIT_HIT_EXTRA_VP, y: 0,
-            width: SPLIT_W + SPLIT_HIT_EXTRA_VP * 2, height: '100%' })
+          // 悬停已下沉到命中层（见上）：本层只处理 mouse / touch。
+          // ⚠️ 第一百一十二轮**删除了** `.responseRegion({ x: -6, width: 26 })`：
+          //   负偏移的超界命中区在部分设备上会让**容器自身**的可命中区域失效
+          //   （子节点 Button 用自己的区域照常命中），表现就是「只有中间按钮能拖」。
+          //   现在命中目标由「铺满整条的命中层」提供，不再依赖超界区域。
           // 鼠标：左键 Press 起拖，Move 实时改宽，Release 收尾。
           // Press 处 stopPropagation —— 否则这次按下还会被预览 / 根容器当成「点画布」。
-          // 整条栏（含中间按钮）共用这一套：按钮不拦冒泡，事件冒到这里走同一组处理。
           .onMouse((event: MouseEvent) => {
             if (event.action === MouseAction.Press && event.button === MouseButton.Left) {
               const onBtn: boolean = this.splitPressOnButton;
