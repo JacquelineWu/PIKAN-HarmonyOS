@@ -235,6 +235,8 @@ export struct ArchiveRow {
    *  不参与 cur / select() / onRowTap / 目录切换，只由 SidebarView 按名字 + 行种类算出。 */
   @Prop inverted: boolean = false;
   @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
+  /** 第七十九轮：名称列放不下完整名称时改多行换行（Clip），不再用 Ellipsis 截断。 */
+  @Prop nameWrap: boolean = false;
   /** 第七十七轮：大小 / 内容数目列与日期列的 adaptive 动态宽（Index → SidebarView → 本行）。
    *  不再有 .width(66) / .width(88) 之类的预设固定宽度；0 表示首帧容器尺寸还没到手，
    *  由 ArkUI 按内容自适应，onAreaChange 后立刻换成动态计算值。 */
@@ -399,16 +401,20 @@ export struct ArchiveRow {
       // 另外两列由父组件下传动态宽（按本列内容长度 + 根容器尺寸实时算出），
       // 不再有任何预设 / 固定宽度；三栏顺序、字段、数据展示与起始位置完全不变；
       // 点击 / 双击 / hover / 条纹 / bindPopup 等既有交互逐字保留。
+      // 第七十九轮：名称列以「完整显示」为硬要求 —— 默认单行；当 acLayoutOf 判定
+      // 内容超出「窗口可用宽」（nameWrap=true）时改多行换行 + Clip，绝不 Ellipsis 截断。
+      // 行高锚点由 .height(26) 改为 constraintSize({ minHeight: 26 })：单行仍是 26vp
+      // （与原值等价），多行时随行数自然增高，不会被固定高度裁掉。
       Text(this.name)
         .fontSize(12)
         .fontColor(this.labelColor())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .maxLines(this.nameWrap ? 99 : 1)
+        .textOverflow({ overflow: this.nameWrap ? TextOverflow.Clip : TextOverflow.Ellipsis })
         // 第七十七轮：移除名称列按内容估宽写死的 minWidth 预设宽度兜底。
-        // 名称列纯由 layoutWeight(1) 弹性吸收剩余空间，长名由 Ellipsis 截断；
-        // 左栏整体宽 / 收起宽 / 另外两列宽都由 acLayoutOf 按内容 + 容器动态推出。
+        // 名称列纯由 layoutWeight(1) 弹性吸收剩余空间；左栏整体宽 / 收起宽 /
+        // 另外两列宽都由 acLayoutOf 按内容 + 容器动态推出（R80 起不再比例夹逼）。
         .layoutWeight(1)
-        .height(26)   // R75：行高锚点自被删的符号列原值迁入；11-10 起压缩行高 42 → 26
+        .constraintSize({ minHeight: 26 })   // R75 行高锚点原值 26；R80 改 minHeight 以容纳换行
 
       // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
       // 第六十四轮：目录行在既有「字节」列位改画内容量统计结果 —— 同字号 10 /

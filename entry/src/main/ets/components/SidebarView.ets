@@ -50,6 +50,8 @@ export struct SidebarView {
   @Prop collapsedW: number = 0;
   @Prop colSizeW: number = 0;
   @Prop colDateW: number = 0;
+  /** 第七十九轮：名称列放不下完整名称时改多行换行（逐行共用同一判定）。 */
+  @Prop nameWrap: boolean = false;
   /** 第六十四轮：与 Index 的 rows 同下标的目录内容量文案（非目录行为空串）。
    *  @Prop 数组每次整份换新引用；读它的方法同时读 dirCountVersion 建立 V1 依赖。 */
   @Prop dirCountLabels: Array<string> = [];
@@ -107,6 +109,8 @@ export struct SidebarView {
       // 第七十七轮：三列宽按内容 / 容器动态伸缩，逐行共用同一套值。
       colSizeW: this.colSizeW,
       colDateW: this.colDateW,
+      // 第七十九轮：名称完整优先 —— 放不下时整列改多行换行，不用 Ellipsis 截断。
+      nameWrap: this.nameWrap,
       thumbDisabled: this.restoreReadonly(),
       onTap: (i: number) => {
         this.onRowTap(i);

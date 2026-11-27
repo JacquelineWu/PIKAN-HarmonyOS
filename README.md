@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R79`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R80`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -568,15 +568,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R76（间距 5mm / 放大镜改相片上左键 / 仅含 EXIF 相片右上角 EXIF 图标 / 相片右键三项菜单）、
 > R77（重启后 size·日期·预览图·缩略图完整恢复 / EXIF 有效字段同源真值 / 档案列表 adaptive column width）、
 > R78（左栏紧凑显示 / 三个纯图案按钮 / 移除「APP 内上层xxx」提醒）、
-> R79（只读名单态目录重列举兜底 / 恢复退出前那张预览 / 三场景兼容）
-> 见下方十九个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
+> R79（只读名单态目录重列举兜底 / 恢复退出前那张预览 / 三场景兼容）、
+> R80（左列栏宽按最长名称完整显示 / 越界改多行换行 / 文件与目录同等）
+> 见下方二十个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R79`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R79` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R80`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R80` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R79 新增断言顺延，以 `grep -n 真机步骤 R79 tests/dirname.test.mjs` 为准：10484–10493）
+  （行号随 R80 新增断言顺延，以 `grep -n 真机步骤 R80 tests/dirname.test.mjs` 为准：10580–10589）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -620,6 +621,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R77 | 重启资料·预览图·缩略图恢复 / EXIF 有效字段同源 / adaptive column width | 10231–10246 |
 | R78 | 左栏紧凑显示 / 三个纯图案按钮 / 移除「APP 内上层xxx」提醒 | 10381–10394 |
 | R79 | 只读名单态目录重列举兜底 / 恢复退出前那张预览 / 三场景兼容 | 10484–10493 |
+| R80 | 左列栏宽按最长名称完整显示 / 越界改多行换行 / 文件与目录同等 | 10580–10589 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1881,6 +1883,89 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第八十轮：左列栏宽以「最长名称完整显示」为唯一标准（2026-11-27，R80）
+
+> 用户要求（原文）：「左列的栏宽需要根据内容自适应调整：无论是文件名还是目录名，都要以能够完整显示当前最长名称为标准，确保名称不被截断、不因省略号而隐藏，也不需要手动拖拽调整才能查看完整内容；当名称长度变化或窗口缩放时，栏宽应同步重新计算，且该标准需同时适用于文件和目录两类条目。」
+
+> 方向澄清（`AskUserQuestion`，用户选推荐项）：**极端长名时保留预览区、名称改多行换行完整显示** —— 左栏最多占「窗口宽 − 分隔条 − 预览区最小宽」，超出部分换行，不出现省略号，预览区始终保留。
+
+### 一、现状判读（按真实源码，不凭缓存推断）
+
+- **宽度被比例夹逼**：`AdaptiveColumn.acLayoutOf()` 里 `cap = floor(rootW × AC_SIDEBAR_RATIO=0.62)`、`sidebarW = min(need, cap)`。1440 窗口下左栏最多 892vp，名称 + 大小 + 日期一旦超过就压左栏。
+- **压窄后必然截断**：`ArchiveRow` 名称列是 `.layoutWeight(1)` + `.maxLines(1)` + `.textOverflow({ overflow: TextOverflow.Ellipsis })` ⇒ 剩余空间不够就出省略号，正是用户要消除的现象。
+- **没有手动拖拽**：`SidebarView` / 分隔条没有任何 `PanGesture`（项目内 `PanGesture` 只用于预览区平移），所以「不需要手动拖拽」= 只要自动算准即可，无需移除既有能力。
+- **估宽是估算**：`textWidthVp()` 按「中文 1em / 数字大写 0.6em / 小写 0.55em」估算，个别字符真实宽度略大；若按估算刚好算够，实机仍可能差一两像素而截断 ⇒ 必须留安全余量。
+
+### 二、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/AdaptiveColumn.ts` | 新增 `AC_SPLIT_W=14` / `AC_PREVIEW_MIN_W=240` / `AC_PREVIEW_RATIO=0.20` / `AC_NAME_SAFETY_VP=10`；新增 `acSidebarCapOf(rootW)`（= 窗口宽 − 分隔条 − 预览区最小宽，0 表示无上限）；`acLayoutOf()` 去掉 `AC_SIDEBAR_RATIO` 夹逼、改名按 `cap` 撑开、`need` 计入安全余量，并返回 `nameWrap`；`collapsedW` 同步改用同一个 `cap` |
+| `components/ArchiveRow.ets` | 新增 `@Prop nameWrap`；名称列 `.maxLines(this.nameWrap ? 99 : 1)` + `TextOverflow.Clip`（展开态才用 Ellipsis 兜底）；行高锚点 `.height(26)` → `.constraintSize({ minHeight: 26 })`（单行等价、多行不裁） |
+| `components/SidebarView.ets` | 新增 `@Prop nameWrap` 并逐行下传给 `ArchiveRow` |
+| `pages/Index.ets` | 新增 `@State nameWrap`（初值与四个宽度量同源）；`refreshAdaptiveLayout()` 里 `this.nameWrap = a.nameWrap;`；`SidebarView` 下传；`ESC_BUILD_TAG → R80` |
+| `tests/dirname.test.mjs` | 构建标记整批升位 `R79 → R80`；订正 7 条旧断言（`.height(26)` 行高锚点、`maxLines(1)` 计数、`collapsedW` 上限）；新增 R80 组 **11 条**断言 + 真机步骤 `R80-A~D`（`10580–10589`） |
+| `README.md` / 记忆 | 抬头 / 手册 / 步骤表升位 `R80`，新增本章，追加当日与长期记忆 |
+
+### 三、设计要点
+
+- **唯一标准是「最长名称放得下」**：`need = 最长名称估宽 + 安全余量 + 大小列 + 日期列 + 间距开销`；`cap` 不再按比例给左栏留白，只保「预览区最小宽」。`need ≤ cap` 时 `sidebarW = need`（名称单行完整显示），`need > cap` 时 `sidebarW = cap` 且 `nameWrap = true`。
+- **安全余量 10vp 是「不截断」的保险**：`textWidthVp` 是估算，按估算刚好算够时实机可能差一点；`AC_NAME_SAFETY_VP` 让左栏比理论值宽 10vp，代价是名称右侧多 10vp 空隙，换来「实机也不出省略号」。
+- **越界改换行而不是截断**：`nameWrap=true` 时名称列 `maxLines(99)` + `TextOverflow.Clip`，行高由 `constraintSize({ minHeight: 26 })` 保证「单行 26vp、多行自然增高」，既完整显示又不裁字。`TextOverflow.Ellipsis` 只在单行态保留（用于极窄的脏值兜底），正常路径永远不会命中。
+- **文件与目录天然同等**：`refreshAdaptiveLayout(rowNames)` 传的是 `rows` 全量名称（含 `..` / 子目录 / 图片 / 文本行），`acTextWidestOf` 取最长者，不区分行种类 —— 一轮改动同时覆盖两类条目。
+- **名称变化 / 窗口缩放同步重算**：`applyItems()` 每次换源 / 重排 / 重扫都会重算 `rowNames` 并调 `refreshAdaptiveLayout`；`onAreaChange` 的 `lastRootW` 变化也会重算 —— 两者都走同一个 `acLayoutOf`，不存在第二套宽度逻辑。
+- **紧凑态同源**：`collapsedW` 也从 `acCollapsedContentOf(names)`（最长名称 + 三按钮）改用同一个 `cap`，所以 `«` / Ctrl+B 的紧凑态同样以完整名称为准。
+
+### 四、验证用例
+
+| 项 | 预期 | 证据 |
+| --- | --- | --- |
+| **最长名称完整显示** | 短/中长名：栏宽恰等于内容所需宽，无省略号 | `acLayoutOf(1440,['DSC03322.jpg'],['1.2 MB']).sidebarW === nameVp + safety + sizeW + dateW + overhead`；`nameWrap=false`；`R80-A` |
+| **文件与目录同等** | 混排时按最长者（目录名更长则按目录名） | `acLayoutOf(0,['人像','DSC03322.jpg'],[])` 与只传最长者等价；`R80-A` |
+| **名称变化重算** | 新增长名变宽、删掉最长名收回 | `refreshAdaptiveLayout` 单点收口 + `applyItems` 每次换源重算；`R80-B` |
+| **窗口缩放重算** | 同批长名在 1000 / 2000 窗口下宽度随可用宽变化 | `acSidebarCapOf(1000)=746` / `(2000)=1586`；`R80-C` |
+| **极端长名不截断** | 顶到上限时改多行换行、预览区仍保留 | `nameWrap=true` + `maxLines(99)` + `Clip` + `minHeight(26)`；`sidebarW === acSidebarCapOf(1000)`；`R80-C` |
+| 回归检查 | ✅ R70–R79 全部零回归 | R79 只读重列举、R78 三图案按钮、R77 HDR/adaptive/EXIF、左栏五项菜单、放大镜左键、版本 `1.0.7 / 7` |
+
+### 五、真实编译 / 产物核验（本轮实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `node tests/dirname.test.mjs` → **`ALL PASS 2364 passed, 0 failed`**（R79 基线 2353，新增 11 条 R80 断言） |
+| 独立零回归脚本 | `node tests/hdrprobe.mjs` → **`ALL PASS 16 checks, 0 failed`**；`git diff --check` 通过 |
+| 真实 ArkTS 编译 | `hvigorw assembleHap --no-daemon`（**未跑 `build.sh`**）→ **`BUILD SUCCESSFUL in 1 min 34 s 20 ms`**；`Finished :entry:default@CompileArkTS... after 1 min 8 s 304 ms`（**非 UP-TO-DATE**）；**0 ERROR / 17 WARN**（与 R69–R79 一致）；日志 `/tmp/r80-build-final.log` |
+| 产物 | 签名 HAP **1,828,537 B** / 未签名 **1,784,342 B** / `ets/modules.abc` **1,052,840 B**（R79 分别为 1,819,931 / 1,778,663 / 1,049,156 B），mtime 均为本轮编译时刻 |
+| 字节码 | `modules.abc`：**`R80=1 / R79=0 / R78=0 / 1.0.7=1`**；新链路 `acSidebarCapOf=2`、`nameWrap=8`、`AC_NAME_SAFETY_VP=1`、`AC_PREVIEW_MIN_W=1`、`AC_SPLIT_W=1`、`minHeight=1`、`TextOverflow=1`、`AdaptiveColumn=3` |
+| 文档一致性 | 测试 R80 步骤块（`10580–10589`）与本章第六节逐字差异 **0** |
+
+> ⚠️ 沿用 R70 教训：收口前先核验**产物字节码标记 + mtime**，确认不是旧日志 / 旧 HAP
+> 充当新包证据；`CompileArkTS` 必须是 `Finished ... after ...` 而非 `UP-TO-DATE`。
+> 真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成（见 `R80-A~D`）。
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:10580` R80 组）
+
+>   ⚠️ 本组是源码静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。
+>   ⚠️ 真机步骤 R80-A：装新包后 Ctrl+D 角标必须是 R80 / 版本 1.0.7·7；
+>      打开一个含长文件名（40+ 字符）的目录 → 左栏自动加宽到名称完整显示，无省略号；
+>      子目录名同样适用（按当前最长者计算，文件 / 目录两类同等）。
+>   ⚠️ 真机步骤 R80-B：新增长名档案 / 改名后重新进入该目录 → 栏宽同步变宽；
+>      删掉最长名的档案 → 栏宽自动收回，不留大片空白。
+>   ⚠️ 真机步骤 R80-C：拖窄 / 放宽窗口 → 左栏宽度实时重算；
+>      窗口窄到放不下最长名称时，名称改为多行换行完整显示（不出现省略号），预览区仍保留。
+>   ⚠️ 真机步骤 R80-D：紧凑态（« / Ctrl+B）下同样以完整名称为准；
+>      三图案按钮 / 大小·日期列 / 右键菜单 / 预览 / HDR / 版本全部零回归。
+
+### 七、边界
+
+- **编译校验 ≠ 真机验证**：静态契约 2364 全绿、真编译成功、字节码有 `R80` 标记，只能证明代码 / 产物接线；证明不了 `textWidthVp` 估算与实机字体在长名上的真实偏差、多行换行后的行高观感、以及「预览区最小宽 240vp / 20%」在实机 DPI 下是否合适。请按 `R80-A~D` 回传。
+- **极端长名的必然取舍**：物理上无法同时做到「单行 + 完整 + 预览区保留」，本轮按用户选择走「保留预览区 + 名称换行」。若某个名字长到多行仍显拥挤，可调 `AC_PREVIEW_MIN_W` / `AC_PREVIEW_RATIO` 一个常量即可。
+- **安全余量会让栏宽略宽于理论值**：`AC_NAME_SAFETY_VP=10` 是刻意的（估算换成实机不截断），名称右侧会有约 10vp 空隙；若实机觉得多余，可下调该常量，但不要再设成 0。
+- **`AC_SIDEBAR_RATIO` 已退出宽度计算**：常量仍导出（历史断言 import 依赖它），但 `acLayoutOf` 内部不再引用；新代码请用 `acSidebarCapOf`。
+- **紧凑态同源**：`«` / `Ctrl+B` 的收起宽也改用同一个 `cap`，不再有 0.30 比例下限；名称超长时紧凑态同样换行。
+- **版本恒定 `1.0.7 / versionCode 7`**，未跑 `build.sh`、未把 HAP 放桌面、**本轮未 push**（用户未授权；R71–R80 共十个本地提交仍未 push）；GitHub PAT revoke / 轮换提醒仍有效。
 
 ---
 
