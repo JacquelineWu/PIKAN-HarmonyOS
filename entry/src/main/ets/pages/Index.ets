@@ -246,7 +246,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R83';
+const ESC_BUILD_TAG: string = 'R84';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1206,7 +1206,10 @@ struct Index {
   @State dirCountVersion: number = 0;
   /** Ctrl+D 诊断层显示的当前 TTL 文案（@State，设置变更即时刷新）。 */
   @State dirCountTtlLabel: string = dcTtlLabelOf(DC_TTL_DEFAULT_MS);
-  @State source: string = '尚未打开';
+  /** 第八十四轮：`source` 一变就把目录名同步到**系统窗口标题栏**（见 syncWindowTitle）。
+   *  用 @Watch 一处收口，5 个 source 赋值点（恢复 / applyItems ×2 / 文本态 / 上层清单）
+   *  全部自动跟随，不需要在业务分支里手写调用。 */
+  @State @Watch('syncWindowTitle') source: string = '尚未打开';
   @State cur: number = -1;          // 当前选中索引；-1 表示空
   /** 第五十九轮：往上层落地后「返回前所在子目录名」的反色标记（空串 = 无反色）。
    *  ⚠️ 与 cur / selected / dataSource 的常规选中链完全隔离：不参与点选、目录切换、
@@ -1733,6 +1736,8 @@ struct Index {
     this.registerWindowStatusSync(0);
     this.scheduleKeyRefocus();
     this.registerEscHotkey();
+    // 第八十四轮：首屏也先把系统窗口标题写成「尚未打开」；之后全靠 @Watch 跟随 source。
+    this.syncWindowTitle('');
   }
 
   /** 切后台 / 锁屏 / 被别的应用盖住：这是「退出 APP」最常走的路径。
@@ -1773,6 +1778,9 @@ struct Index {
     // 也不抢恢复期 IO（本方法只改内存标记 + 文案数组，零磁盘 IO）。
     this.markUserActive();
     this.invalidateDirCounts();
+    // 第八十四轮：回到前台时窗口对象必定已就绪，补一次系统标题同步
+    // （冷启动首屏可能比 EntryAbility 的 mainWindow 存盘更早，那一次会被跳过）。
+    this.syncWindowTitle('');
   }
 
   /** 返回刷新的唯一决策落点。真值源是 ResumeRefresh.ts 的纯函数，
@@ -9145,6 +9153,41 @@ struct Index {
   // 主构建
   // ------------------------------------------------------------------
 
+  /** 第八十四轮：把当前目录名写进**系统窗口标题栏**（带最小化 / 最大化 / 关闭按钮那条 decor）。
+   *
+   *  SDK 26 `@ohos.window.d.ts:7773` 的 `setWindowTitle(titleName)`（`@since 15`）注释明确：
+   *  「标题显示区域不超出系统三按钮区左侧，超出部分以省略号呈现」—— 正是用户要的位置。
+   *  （项目旧注释里「鸿蒙没有 setWindowTitle」是 R11 时期的结论，SDK 15 起已不成立。）
+   *
+   *  ⚠️ 与本文件 `topBar()` 严格区分：
+   *   · `topBar()` 是**应用内自绘**栏（可随内容重排、全屏时整条隐藏、无系统按钮）；
+   *   · 本方法写的是**系统 decor 标题**（窗口管理器绘制，带三按钮，沉浸全屏时随 decor 隐藏）。
+   *
+   *  `@Watch('syncWindowTitle')` 挂在 `@State source` 上 ⇒ 换目录 / 往上层 / 恢复 / 上层清单
+   *  全部自动同步。窗口对象未就绪时短延时重试；801（能力不支持）/ 窗口态异常只记日志。 */
+  private syncWindowTitle(propName: string = ''): void {
+    this.applyWindowTitle();
+  }
+
+  /** 真正写标题。**刻意不引入任何计时器**（本文件 `rightPageImage → topBar` 那段
+   *  被「零动画 / 零延迟」静态契约切片盯着，多一个 setTimeout 就会误报）：
+   *  窗口对象未就绪时直接跳过，靠 `@Watch` 的下一次 source 变化或 `onPageShow` 重试。*/
+  private applyWindowTitle(): void {
+    if (!this.pageAlive) {
+      return;
+    }
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    if (!win) {
+      hilog.info(DOMAIN, TAG, 'window title: window not ready, skip');
+      return;
+    }
+    const name: string = this.source.length > 0 ? this.source : 'PIKAN';
+    win.setWindowTitle(name).catch((e: Object) => {
+      hilog.warn(DOMAIN, TAG, 'setWindowTitle failed: %{public}s', JSON.stringify(e));
+    });
+    hilog.info(DOMAIN, TAG, 'window title: %{public}s', name);
+  }
+
   /** 第八十三轮：标题栏里「目录名」右侧的父路径 —— 去掉末尾目录名，避免与左侧名称重复。
    *  `titlePath` 为空（尚未打开）或已是卷根（父级等于自身）时返回空串，标题栏只显示名称。 */
   private parentPathOf(): string {
@@ -9166,26 +9209,18 @@ struct Index {
         .fontSize(14)
         .fontColor('#4a5262')
         .margin({ left: 8, right: 8 })
-      // 第八十三轮：目录名从左侧边栏移到标题栏，作为主信息。
-      // maxLines(1) + Ellipsis + 限宽 45%：窄屏（移动端 / 平板）只省略不溢出、不错位；
-      // 宽屏且名字短时 layoutWeight 不生效，按内容自然展开，不会被无谓截断。
-      Text(this.source.length > 0 ? this.source : '尚未打开')
-        .fontSize(14)
-        .fontWeight(FontWeight.Medium)
-        .fontColor('#dfe5ef')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .constraintSize({ maxWidth: '45%' })
-      // 第八十三轮：父路径作为次要信息，**去掉末尾目录名**（parentPathOf）避免与左侧名称重复；
-      // layoutWeight(1) 吸收剩余宽度，窄屏时自动省略成「…」，绝不把右侧工具区挤出屏幕。
+      // 第八十四轮：目录名改由**系统窗口标题栏**显示（window.setWindowTitle），
+      // 这条应用内自绘栏不再重复写名字；只保留「父路径」当目录上下文。
+      // 父路径仍去掉末尾名字（titleParentOf）⇒ 两处合起来正好一份名字、零重复。
+      // layoutWeight(1) + Ellipsis：窄屏自动省略成「…」，绝不把右侧工具区挤出屏幕。
       if (this.parentPathOf().length > 0) {
         Text('·')
           .fontSize(14)
           .fontColor('#4a5262')
           .margin({ left: 8, right: 8 })
-        Text(ellipsizeMiddle(this.parentPathOf(), 44))
-          .fontSize(11)
-          .fontColor('#6b7385')
+        Text(ellipsizeMiddle(this.parentPathOf(), 52))
+          .fontSize(12)
+          .fontColor('#9fb0c8')
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .layoutWeight(1)
