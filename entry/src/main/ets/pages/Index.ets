@@ -151,6 +151,11 @@ import { SuperResPlan, SR_RUN, SR_MIN_GAIN,
   superResPlanOf, superResNeedEdgeOf, superResAcceptOf, superResKeyOf,
   superResReasonOf } from '../common/SuperResPlan';
 import { SuperResolutionService, SuperResOutcome } from '../services/SuperResolutionService';
+// 第一百轮：「AI超分辨率」标记 —— 文案 / 几何 / 配色 / 显隐判据都在 common/SrBadge.ts（零依赖纯函数）。
+// 本页只负责把它摆到预览框左上角，数值一个都不在此处硬编码。
+import { SR_BADGE_TEXT, SR_BADGE_INSET, SR_BADGE_H, SR_BADGE_PAD_X, SR_BADGE_FONT,
+  SR_BADGE_RADIUS, SR_BADGE_BORDER_W, SR_BADGE_BG, SR_BADGE_FG, SR_BADGE_BORDER,
+  srBadgeShownOf } from '../common/SrBadge';
 import { CrossFade, SLIDE_FADE_STEPS, crossFadeStepOf, slideFadeReadyOf,
   slideFadeTickMsOf } from '../common/SlideFade';
 // 第二十三轮：多模输入服务按键订阅（系统级通道，不经 ArkUI 焦点 / 组件分发）。
@@ -266,7 +271,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R99';
+const ESC_BUILD_TAG: string = 'R100';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -6661,10 +6666,13 @@ struct Index {
         return;
       }
       const oldSr: image.PixelMap | undefined = this.viewSrPx;
-      this.viewSrPx = op;
+      // 第一百轮：**先写 uri / 长边，最后写 @State 的 pixelMap**。
+      // 标记的显隐读的是「px 存在 且 uri 对得上 且 长边 > 0」，三者在同一次赋值里必须一致；
+      // 把 @State 放最后，重建时读到的永远是这套完整值，不会出现「有图但 uri 还是空」→ 标记闪一下才出。
       this.viewSrUri = uri;
       this.viewSrEdge = Math.max(outW, outH);
       this.viewSrKeyDone = key;
+      this.viewSrPx = op;
       if (oldSr !== undefined && oldSr !== op) {
         try {
           oldSr.release();
@@ -9701,6 +9709,54 @@ struct Index {
     }
   }
 
+  /** 第一百轮：这张图此刻是否吃到超分（真值源在 common/SrBadge.ts）。
+   *  只用「屏幕上真正在画的那张超分产物」做判据 —— 产物被释放后画面回到原图，
+   *  标记必须同时消失，绝不留下「标了却没超分」的假标签。 */
+  private srBadgeShownFor(uri: string): boolean {
+    return srBadgeShownOf(this.viewSrPx !== undefined, this.viewSrUri, uri, this.viewSrEdge);
+  }
+
+  /** 第一百轮：「AI超分辨率」标记。
+   *
+   *  位置：`.position({ x: 10, y: 10 })` —— **相对预览框**左上角，不是相对图片内容。
+   *  所以无论 zoom / 平移 / 旋转 / 镜像，无论单张、并排、全屏、窗口拉大拉小，
+   *  标记永远钉在同一个角落、同一尺寸（数值全是 vp 常量，不参与 layoutWeight 摊分）。
+   *  若改成「贴在图片内容的左上角」，缩放时它会跟着跑，反而成了干扰。
+   *
+   *  交互：`HitTestMode.Transparent` —— 不阻塞任何兄弟节点 / 祖先节点的命中测试，
+   *  事件照旧落到下面的图与预览 Stack 上。所以左键放大镜、右键相片菜单、拖拽平移、
+   *  滚轮切图 / 缩放**完全不受影响**，悬停（放大镜 onHover）也不会被这枚标签截走。
+   *  这里刻意沿用本文件「浮层一律 Transparent」的既有口径（信息层 / 角标 / 提示卡同款），
+   *  不用 `None`：`None` 会让整棵子树退出命中链，个别机型上会让祖先的 onHover 断流，
+   *  对一枚纯展示标签没有收益。
+   *
+   *  对比度：深底（#CC111318）+ 白字 + 0.35 白描边，压纯白画面 ≥10:1、压纯黑 ≥19:1
+   *  （见 common/SrBadge.ts 的核算），不做亮/暗图双套样式 —— 那会随切换忽明忽暗。
+   *
+   *  未超分时整个 Row 都不渲染（`if` 条件渲染），不是 opacity 0 的透明占位：
+   *  既不占位、也不可能被点到、更不会在无障碍树里留一个空标签。 */
+  @Builder
+  srBadgeLayer(uri: string) {
+    if (this.srBadgeShownFor(uri)) {
+      Row() {
+        Text(SR_BADGE_TEXT)
+          .fontSize(SR_BADGE_FONT)
+          .fontColor(SR_BADGE_FG)
+          .fontWeight(FontWeight.Medium)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .height(SR_BADGE_H)
+      .padding({ left: SR_BADGE_PAD_X, right: SR_BADGE_PAD_X })
+      .backgroundColor(SR_BADGE_BG)
+      .borderRadius(SR_BADGE_RADIUS)
+      .border({ width: SR_BADGE_BORDER_W, color: SR_BADGE_BORDER })
+      .position({ x: SR_BADGE_INSET, y: SR_BADGE_INSET })
+      .hitTestBehavior(HitTestMode.Transparent)
+      .accessibilityText(SR_BADGE_TEXT)
+    }
+  }
+
   /** 主视图：优先画「我们自己解码的 PixelMap」（清晰，且一定是当前这张）；
    *  只有自解码失败（如某些 uri 打不开）时才回退到 Image(uri) 交给系统解码兜底。
    *
@@ -9794,6 +9850,12 @@ struct Index {
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
           .opacity(this.slideOutOpacity)
       }
+
+      // 第一百轮：超分标记压在**所有图片层之上**（主图 / 低清过渡 / 旧图淡出），
+      // 但在放大镜之前 —— 放大镜是「用户正在用的工具」，不该被一枚标签挡住。
+      // 标记不透明度恒为 1，不参与幻灯片淡化：它标的是「这一张是超分图」这个事实，
+      // 若是跟着淡出层一起淡，反而会在过场里闪一下。
+      this.srBadgeLayer(uri);
 
       // 第十四轮：放大镜浮层排在最后一层（z 序最高），按左页 pane 独立判定。
       this.loupeLayer(LOUPE_PANE_LEFT, uri, half);
