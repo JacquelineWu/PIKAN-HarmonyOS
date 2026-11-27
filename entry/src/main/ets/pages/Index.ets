@@ -271,7 +271,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R103';
+const ESC_BUILD_TAG: string = 'R104';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -3047,7 +3047,8 @@ struct Index {
     const base: string = this.browseBase;
     const label: string = baseName(base);
     const rows: ImageItem[] = [];
-    rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+    // 第一百零四轮：原来的「..」往上层伪行已按要求整行移除（含它占的那一行高度）。
+    // 往上层仍有两个入口：工具行「⇧」按钮 与 键盘 Backspace（→ browseUp()）。
     for (let i = 0; i < this.upDirCache.length; i++) {
       const snap: UpDirSnapshot = this.upDirCache[i];
       if (!sameDirPath(snap.path, base)) {
@@ -3104,7 +3105,7 @@ struct Index {
       this.rescanTimer = -1;
     }
     this.status = '「' + label + '」· 本层没有图片 · ' +
-      (rows.length - 1) + ' 个条目（点名称重新真实列举）· ' + ESC_BUILD_TAG;
+      rows.length + ' 个条目（点名称重新真实列举）· ' + ESC_BUILD_TAG;
     this.diagLine = 'up CTX | ' + UP_CTX_TAG + ' | dironly=1 | L' + dirLevelOf(base) +
       ' | rows=' + rows.length + ' | no-picker | v' + APP_VERSION;
     this.markRestoreEntered();
@@ -7704,11 +7705,9 @@ struct Index {
         others.reverse();
       }
       const rows: ImageItem[] = [];
-      // 对齐 Windows 文件管理器：只要还在目录浏览态就恒列「..」行，与「向上」按钮一样
-      // 永不因内部路径判定而消失。到卷根时点了由 browseUp() 给「没有父级了」提示、不上移。
-      // 2026-11-11：旧版用 canGoUpFrom(base) 控制这一行，遇到还原不出卷根的文档 URI
-      // 会把深层目录的「..」行也一起藏掉 —— 那正是「按钮区莫名其妙变灰 / 少一行」的来源。
-      rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+      // 第一百零四轮：首行的「..」往上层伪行整行移除 —— 列表第一行就是真正的目录 / 图片，
+      // 三按钮与列表之间不再有那两枚小点占着的空行。往上层入口保留：
+      // 工具行「⇧」与键盘 Backspace 都走 browseUp()（到卷根给「没有父级了」提示）。
       for (let i = 0; i < dirs.length; i++) {
         rows.push(dirs[i]);
       }
@@ -7982,8 +7981,9 @@ struct Index {
         break;
       case 'up':
         // 2026-11-11：按钮**永不禁用**，任何状态都能点进来。
-        // 按钮 / 键盘退格 / '..' 行三条入口全部收口 browseUp()，由 upNavStateOf
-        // 分派（上移 / 到顶提示 / 图片列表提示 / URI 层级判不出的兜底），结论一致。
+        // 第一百零四轮起只剩两条入口：工具行「⇧」按钮 与 键盘退格（'..' 行已移除），
+        // 两条都收口 browseUp()，由 upNavStateOf 分派（上移 / 到顶提示 / 图片列表提示 /
+        // URI 层级判不出的兜底），结论一致。
         this.browseUp();
         break;
       case 'sort':
@@ -8183,7 +8183,7 @@ struct Index {
       others.reverse();
     }
     const out: ImageItem[] = [];
-    out.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+    // 第一百零四轮：「..」伪行同样不再生成（与左侧列表保持同一口径）。
     for (let i = 0; i < dirs.length; i++) {
       out.push(dirs[i]);
     }
@@ -8591,7 +8591,7 @@ struct Index {
   private showUpListInApp(target: string, targetName: string, current: string,
     parents: string[], state: number, level: number): void {
     const rows: ImageItem[] = [];
-    rows.push({ uri: '', name: '..', size: -1, mtime: 0, kind: ROW_UP, itemIndex: -1 });
+    // 第一百零四轮：「..」伪行已移除；本清单同样以真实子目录开头。
     // ① 第二十九轮：父层的**全部**真实子目录。多层会话快照 + 旧单槽缓存 +
     //    当前目录名一起聚合，伪说明行由 mergeUpListNames 剔除、按原名去重。
     //    旧版只认一个 lastUpNames 单槽：一旦被下一层覆盖或缓存里装的是伪清单，
@@ -8664,8 +8664,8 @@ struct Index {
       this.rescanTimer = -1;
     }
     // 第七十八轮：「APP 内上层xxx」提醒及状态栏拼接整体移除，只留中性目录态说明；
-    //  计数由 rows.length - 2 改为 - 1（伪说明行已删，只扣 '..' 一行）。
-    this.status = '「' + targetName + '」· ' + (rows.length - 1) + ' 个条目 · ' + ESC_BUILD_TAG +
+    //  第一百零四轮：「..」伪行也删了 ⇒ 条目数直接就是 rows.length（不再扣 1）。
+    this.status = '「' + targetName + '」· ' + rows.length + ' 个条目 · ' + ESC_BUILD_TAG +
       (this.restoreMode === RESTORE_READONLY
         ? ' · 图片授权已失效，点「选择文件夹」重新打开该目录即可看图' : '');
     this.diagLine = 'up LIST | ' + UP_LIST_TAG + ' | st=' + state +
