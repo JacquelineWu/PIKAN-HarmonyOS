@@ -145,6 +145,12 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   windowStatusIsFullscreen, shouldSyncFullFromWindow,
   fullKeyEligibleOf, fullToggleAllowedOf } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
+// 第九十九轮：Core Vision Kit 图像超分 —— 判据在 common/SuperResPlan.ts（纯函数），
+// 能力调用在 services/SuperResolutionService.ts（唯一 import Kit 的地方），本页只做接线。
+import { SuperResPlan, SR_RUN, SR_MIN_GAIN,
+  superResPlanOf, superResNeedEdgeOf, superResAcceptOf, superResKeyOf,
+  superResReasonOf } from '../common/SuperResPlan';
+import { SuperResolutionService, SuperResOutcome } from '../services/SuperResolutionService';
 import { CrossFade, SLIDE_FADE_STEPS, crossFadeStepOf, slideFadeReadyOf,
   slideFadeTickMsOf } from '../common/SlideFade';
 // 第二十三轮：多模输入服务按键订阅（系统级通道，不经 ArkUI 焦点 / 组件分发）。
@@ -260,7 +266,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R98';
+const ESC_BUILD_TAG: string = 'R99';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -429,6 +435,9 @@ const SPLIT_W: number = 14;   // 分隔条宽度（不是档案列表列宽）
 const MIN_SCALE: number = 0.05;
 const MAX_SCALE: number = 16.0;
 const SLIDE_INTERVAL: number = 3000;
+/** 第九十九轮：图像超分的调用超时（ms）。超分是 NPU 推理，正常几百毫秒；
+ *  2.5s 还没回来就认定这拍不走超分，立刻用原图渲染（画面绝不等 AI）。 */
+const SR_TIMEOUT_MS: number = 2500;
 /** 第九十六轮：幻灯片交叉淡化的总时长与每步间隔（步数真值源在 common/SlideFade.ts）。
  *  420ms：短于 3s 间隔的 1/6，用户读完一张的时间不受影响；又足够长到「看得出是淡入淡出」
  *  而不是「跳一下」。 */
@@ -1589,6 +1598,18 @@ struct Index {
   /** 一张比 viewPixelMap 更密、经系统 AA 预滤波的精炼图源；undefined = 走 R62 组件级链。
    *  刻意不进 previews 缓存：它只是某张图在某档画质下的临时重采样结果。 */
   @State viewSysPx: image.PixelMap | undefined = undefined;
+  /** 第九十九轮：超分产物（比 viewPixelMap / viewSysPx 更大更清晰的那张）。
+   *  三处图源的优先级：超分产物 > 系统 AA 精炼 > 自解码原图（见 viewDisplayPx）。
+   *  用 uri 对账，绝不让上一张的超分结果画到新图上。 */
+  @State viewSrPx: image.PixelMap | undefined = undefined;
+  private viewSrUri: string = '';
+  private viewSrEdge: number = 0;
+  /** 作废在途超分的代号（切图 / 释放时自增）。 */
+  private viewSrToken: number = 0;
+  /** 已做过超分的「uri@目标档位」：同图同档不重复推理（缩放抖动会反复触发）。 */
+  private viewSrKeyDone: string = '';
+  /** 能力封装（懒初始化，页面销毁时 destroy）。 */
+  private srService: SuperResolutionService | undefined = undefined;
   private viewSysUri: string = '';
   private viewSysEdge: number = 0;
   private viewSysToken: number = 0;
@@ -2030,6 +2051,11 @@ struct Index {
     this.clearLoupeHiRes(); // 第十六轮：页面销毁时释放放大镜专用高清 PixelMap
     this.clearViewSysPx();  // 第六十八轮：页面销毁时释放主预览系统级 AA 精炼产物
     this.endSlideFade(true); // 第九十六轮：页面销毁时清掉淡化计时器并释放叠显层那张图
+    this.clearViewSrPx();    // 第九十九轮：释放超分产物
+    if (this.srService !== undefined) {
+      this.srService.destroy();  // 内部 catch，绝不因清理失败影响退出
+      this.srService = undefined;
+    }
     this.clearWheel();
     this.sizeSeq++; // 作废还在跑的体积补测任务
     if (this.resumeTimer !== -1) {
@@ -4559,7 +4585,9 @@ struct Index {
       ' pre=' + (this.preFullViewValid ? r3(this.preFullZoom) : 'none') +
       ' spread=' + (this.spreadShown() ? 'T' : 'F') +
       ' decor=' + (this.decorVisibleOf() ? 'T' : 'F') +
-      ' preDecor=' + (this.preFullDecorVisible ? 'T' : 'F');
+      ' preDecor=' + (this.preFullDecorVisible ? 'T' : 'F') +
+      // 第九十九轮：超分是否已上屏 + 产物长边（一眼看出「这张有没有吃到超分」）
+      ' sr=' + (this.viewSrPx !== undefined ? 'T' : 'F') + '/' + this.viewSrEdge;
   }
 
   private zoomBy(factor: number): void {
@@ -6198,6 +6226,7 @@ struct Index {
     this.viewFailed = false;
     this.viewPixelMap = undefined;
     this.clearViewSysPx(); // 第六十八轮：切图即刻作废并释放系统级产物，杜绝上一张错画
+    this.clearViewSrPx();  // 第九十九轮：超分产物同理 —— 切图即刻作废，绝不留上一张
     this.imgW = 0;
     this.imgH = 0;
     // 新张还没解码出来前，别把上一张的色彩 / HDR / EXIF 元数据挂在信息浮层上
@@ -6449,6 +6478,9 @@ struct Index {
     this.setViewMeta(best);
     // 第六十八轮：切图 / resize / 全屏 / 档位升级的共同落点 —— 一次系统 native AA 精炼。
     this.ensureViewSysPx(uri, best.px, token);
+    // 第九十九轮：解码落地 → 判一次「图 vs 图框」，不够大就走 Core Vision Kit 超分。
+    // 放在这里而不是渲染路径：低频、只跑一次、失败无副作用（画面继续用 best.px）。
+    this.maybeSuperResolve(uri, best.px, token);
     if (FOCUS_BLUR) {
       this.finishFocus(); // 清晰图到位 → 低清模糊层淡出（这才是「动态模糊」的收尾）
     } else {
@@ -6503,6 +6535,11 @@ struct Index {
   /** 主预览统一图源出口：系统级 AA 精炼产物优先（uri 对账），否则 R62 自解码图源。
    *  ⚠️ @Builder 内只做只读选择，不触发任何解码 / 缩放 / 状态写入。 */
   private viewDisplayPx(uri: string): image.PixelMap {
+    // 第九十九轮：超分产物优先级最高 —— 它是唯一「按图框需求补出真实像素」的图源；
+    // 系统 AA 精炼产物只是重采样，像素量并没有增加。两者都用 uri 对账，防止串图。
+    if (this.viewSrPx !== undefined && this.viewSrUri === uri) {
+      return this.viewSrPx!;
+    }
     if (this.viewSysPx !== undefined && this.viewSysUri === uri) {
       return this.viewSysPx!;
     }
@@ -6517,6 +6554,128 @@ struct Index {
     this.viewSysUri = '';
     this.viewSysEdge = 0;
     this.releaseViewSysPx(oldSys);
+  }
+
+  /** 第九十九轮：释放超分产物并作废在途请求。
+   *  与 viewSysPx 同一口径：先撤 @State 引用（组件下一帧就不再引用它），再 release。 */
+  private clearViewSrPx(): void {
+    this.viewSrToken++;
+    this.viewSrUri = '';
+    this.viewSrEdge = 0;
+    const oldSr: image.PixelMap | undefined = this.viewSrPx;
+    this.viewSrPx = undefined;
+    if (oldSr !== undefined) {
+      try {
+        oldSr.release();
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'sr release skipped');
+      }
+    }
+  }
+
+  /** 第九十九轮：按需超分 —— **先比较「图 vs 图框」，再决定是否调用 Core Vision Kit**。
+   *
+   *  触发链路：loadViewNow() 解码落地 → 这里读解码产物尺寸 → superResPlanOf 出结论 →
+   *  只有 `SR_RUN` 才把图交给 SuperResolutionService（能力封装）→ 成功后设为最高优先图源。
+   *
+   *  为什么在这里判、而不是在渲染里判：
+   *   渲染是每帧都跑的，超分是几百毫秒的重活；必须在「解码落地」这种低频时机做一次决策，
+   *   并把结论缓存成 `viewSrKeyDone`（uri@目标档位），否则窗口缩放抖动会反复触发推理。
+   *
+   *  刻意**不在**这些场景触发（都能被下一帧的普通路径覆盖，不影响正确性）：
+   *   · `textMode`：显示的不是图片；
+   *   · `playing` / `slideBlending`：幻灯片在换图与交叉淡化，不要和淡化抢 NPU/内存（R97 的教训）；
+   *   · 只读名单态：连原图都可能打不开，不做额外推理。
+   */
+  private maybeSuperResolve(uri: string, px: image.PixelMap, token: number): void {
+    if (this.textMode || this.playing || this.slideBlending) {
+      return;
+    }
+    let info: image.ImageInfo | undefined = undefined;
+    try {
+      info = px.getImageInfoSync();
+    } catch (e) {
+      return;
+    }
+    if (info === undefined || info.size === undefined) {
+      return;
+    }
+    const srcW: number = Number(info.size.width) || 0;
+    const srcH: number = Number(info.size.height) || 0;
+    // 「图框所需尺寸」用与解码同一套口径算，但**不夹源图上限**，否则永远算不出差多少。
+    const needEdge: number = superResNeedEdgeOf(this.viewEdge(), this.canvasW, this.canvasH,
+      this.zoom, DISPLAY_HEADROOM);
+    const plan: SuperResPlan = superResPlanOf(srcW, srcH, needEdge);
+    if (plan.action !== SR_RUN) {
+      hilog.info(DOMAIN, TAG, 'sr plan %{public}s src=%{public}d need=%{public}d',
+        superResReasonOf(plan.action), plan.srcEdge, plan.needEdge);
+      return;
+    }
+    const key: string = superResKeyOf(uri, plan.targetEdge);
+    if (this.viewSrKeyDone === key) {
+      return;                                  // 同图同档做过一次就够，别重复推理
+    }
+    if (this.srService === undefined) {
+      this.srService = new SuperResolutionService();
+    }
+    const svc: SuperResolutionService = this.srService;
+    const myToken: number = ++this.viewSrToken;
+    hilog.info(DOMAIN, TAG,
+      'sr run src=%{public}d need=%{public}d target=%{public}d ratio=%{public}d/100',
+      plan.srcEdge, plan.needEdge, plan.targetEdge, Math.round(plan.ratio * 100));
+    svc.enhance(px, SR_TIMEOUT_MS).then((out: SuperResOutcome): void => {
+      // 期间切了图 / 已释放 → 结果作废，**必须由这里负责释放**，否则每次迟到都漏一张大图
+      if (myToken !== this.viewSrToken || token !== this.curToken) {
+        if (out.pixelMap !== undefined) {
+          try {
+            out.pixelMap.release();
+          } catch (e) {
+            hilog.warn(DOMAIN, TAG, 'sr stale release skipped');
+          }
+        }
+        return;
+      }
+      const op: image.PixelMap | undefined = out.pixelMap;
+      if (op === undefined) {
+        // 初始化失败 / 服务异常 / 超时：**静默降级**，画面继续用原图（GPU 放大），一行状态都不打扰用户
+        hilog.info(DOMAIN, TAG, 'sr skip reason=%{public}s cost=%{public}dms',
+          out.reason, out.elapsedMs);
+        return;
+      }
+      let oi: image.ImageInfo | undefined = undefined;
+      try {
+        oi = op.getImageInfoSync();
+      } catch (e) {
+        oi = undefined;
+      }
+      const outW: number = oi !== undefined && oi.size !== undefined ? (Number(oi.size.width) || 0) : 0;
+      const outH: number = oi !== undefined && oi.size !== undefined ? (Number(oi.size.height) || 0) : 0;
+      if (!superResAcceptOf(outW, outH, plan.srcEdge, SR_MIN_GAIN)) {
+        try {
+          op.release();                        // 没有真实增益：不采用，也不占内存
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'sr weak release skipped');
+        }
+        hilog.info(DOMAIN, TAG, 'sr reject out=%{public}dx%{public}d src=%{public}d',
+          outW, outH, plan.srcEdge);
+        return;
+      }
+      const oldSr: image.PixelMap | undefined = this.viewSrPx;
+      this.viewSrPx = op;
+      this.viewSrUri = uri;
+      this.viewSrEdge = Math.max(outW, outH);
+      this.viewSrKeyDone = key;
+      if (oldSr !== undefined && oldSr !== op) {
+        try {
+          oldSr.release();
+        } catch (e) {
+          hilog.warn(DOMAIN, TAG, 'sr old release skipped');
+        }
+      }
+      hilog.info(DOMAIN, TAG,
+        'sr applied %{public}dx%{public}d (src %{public}dx%{public}d need=%{public}d) cost=%{public}dms',
+        outW, outH, srcW, srcH, plan.needEdge, out.elapsedMs);
+    });
   }
 
   private releaseViewSysPx(px: image.PixelMap | undefined): void {

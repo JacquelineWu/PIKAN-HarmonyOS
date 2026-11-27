@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R98`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R99`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -44,6 +44,7 @@
 | 收起左栏 | `Ctrl+B` 或点左栏与预览区**分隔条正中的 « 按钮**；收起后只留档案名一列，抬头与三个导航按钮仍在；再点 » 展回 |
 | 顶栏 | **R94 起应用内自绘顶栏整条删除**（非全屏「贴顶唤出」栏 + 全屏「贴顶浮出工具条」一起移除）：鼠标移动不再唤出任何栏，界面里也没有「全屏 / 幻灯片」按钮。目录名只由系统窗口标题栏（`window.setWindowTitle`）显示；版本号 / 构建标记改看 `Ctrl+D` 诊断层（见第九十四轮） |
 | 关闭应用 | **`Esc`** 严格按窗口状态两态区分（`escActionByState`，第十九轮定稿，第二十～二十二轮保留）：全屏下首次 `Esc` 只退全屏并恢复进全屏前的几何（**绝不退出 APP**），返回普通模式后再按一次立即关闭。**第二十二轮（R21 截图证据）**：新包角标 `R21 · full=F · win=T` 且**没有黄色诊断行** → `escDiag` 为空 → **零个按键到达 `onKey()`**（不只是 ESC）；`full=F` 说明第二十一轮 `windowStatusChange` 状态同步已生效，剩下的唯一断点是键盘事件被系统 / 焦点拦在 APP 之外。现加 `onKeyEventDispatch` 分发通道（不依赖焦点）、修掉两个 `defaultFocus(true)` 冲突、用官方 `FocusController` + `ANCESTOR_EVENT` 抢焦点并常显结果、关闭在 2in1 上无可见效果却可能让系统保留 ESC 的沉浸最大化、角标常显 `R22` + `keys=N` + 焦点结果。**第二十三轮（R22 截图 `keys=0 · fc=Y f=N r12`）**：判定 ESC 被系统全局消费且焦点树未建立，恢复 `USE_SYSTEM_IMMERSIVE=true`，改走 `inputConsumer.keyPressed` 单键通道（SDK 明确拦截系统默认响应）+ `hotkeyChange` 兜底，补窗口级 `setWindowFocusable` 与「退出全屏瞬间重启焦点重试」，角标加 `dsp/hk/wf`；另提供**右下角可点「退出 APP」**作为不依赖键盘 / 焦点 / 窗口形态的确定解。**第二十四轮（R23 截图 `keys=168 · ESC#1 … (EXIT_FULL)`）**：按键到达与首次 ESC 已完全正常，定位到 `escDownHandled` 永不复位 + 永久对象引用去重吞掉第二次 ESC，改为 Up 配对清除 + ESC 单轮去重，并新增 `Ctrl+Q` 键盘确定解、通道级 `cap/con/dsp` 可观测。**✅ 2026-11-16 实机核验：第二次 ESC 已能正常退出 APP**。见第二十二～二十四轮章节。**第二十五轮**：排查期诊断 UI 收成默认关闭的可开关诊断层（`Ctrl+D` / 单击角标），ESC 退出逻辑一字未改。见第二十五轮章节 |
+| 图像超分 | **R99 起**：解码产物小于「图框所需像素」时（且倍率在 1.15×～3.2× 之间、源图 ≤2048），调 **Core Vision Kit `ImageSRAnalyzer`** 补出真实像素，产物替换原图参与渲染（`Contain` 等比填充，不改布局）。初始化失败 / 服务异常 / 2.5s 超时一律**静默降级**用原图（GPU 放大），不弹窗不打扰（见第九十九轮） |
 | 性能 | `LazyForEach` + `cachedCount(6)` 只建屏上几行；**缩略图只在悬停时解码**（滚动列表时一张都不解）；体积补测分批让出主线程，且**翻页 / 换目录 / 幻灯片期间一律让路** |
 | 后台预载 | 自动预解码当前位置**前后各 100 张**（按画布尺寸取 1024–1536px 档位，直接可显示），窗口随位置滑动，**翻页不等解码**；`216 张 / 1GB` 双重上限，预算装不下整窗时「尽量」填充并收工（防死循环）；状态栏显示 `预载 N 张`、右下角角标显示 `缓存 N 张`（11-11 起均不再显示 MB 占用）。**第二十七轮起原始档案读取全链路真异步 + 到点即放弃超时闸门**，NAS 路径缓存期间不再占住 UI 主线程（见第二十七轮章节） |
 | 切图过渡 | 命中预载 **瞬时上屏、无动画**；未命中才先用 768px 低清占位，清晰图到达后瞬时替换 |
@@ -607,15 +608,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R95（**F / Shift+F 切换全屏**，退出即回到进入前的缩放与窗口状态；可编辑区/浮层去抖三道闸门）、
 > R96（**幻灯片单张播放 + 交叉淡化**：两张重叠过渡、out+in≡1 保证全程无空白，分步可取消）、
 > R97（播放中**保留并排**选项 + 修复淡化**闪屏**：遮挡式单层淡出、层序、去 resetView、淘汰保护）、
-> R98（**进入幻灯片保持进入前形态**：抓「并排/单张」快照，不再被 playing 强推单张；文本页先退回图片视图）
+> R98（**进入幻灯片保持进入前形态**：抓「并排/单张」快照，不再被 playing 强推单张；文本页先退回图片视图）、
+> R99（**Core Vision Kit 图像超分**：图小于图框时先比较再推理，产物替换原图；超时/不可用静默降级）
 > 见下方二十三个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R98`**。测试里早期轮次写的
-  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R98` 包。
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R99`**。测试里早期轮次写的
+  「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R99` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R98 新增断言顺延，以 `grep -n 真机步骤 R98 tests/dirname.test.mjs` 为准：11853–11859）
+  （行号随 R99 新增断言顺延，以 `grep -n 真机步骤 R99 tests/dirname.test.mjs` 为准：12010–12015）
   ⚠️ R94 起应用内顶栏已删除，构建标记**只在 Ctrl+D 诊断层**可见，界面上没有常显位置。
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
@@ -677,6 +679,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R96 | 幻灯片单张播放 + 交叉淡化（两图重叠 / out+in≡1 无空白 / 分步可取消） | 11686–11690 |
 | R97 | 播放中保留并排 + 修复淡化闪屏（遮挡式单层淡出 / 层序 / 同缩放 / 淘汰保护） | 11779–11782 |
 | R98 | 进入幻灯片保持进入前形态（并排/单张快照）+ 文本页进入先回图片视图 | 11853–11859 |
+| R99 | Core Vision Kit 超分：先比较再推理 / 产物替换原图 / 超时与不可用降级 | 12010–12015 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1940,6 +1943,126 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
 
 ---
+
+## 第九十九轮：Core Vision Kit 图像超分（只在「图小于框」时补像素）（2026-11-27，R99）
+
+> 需求：图片尺寸小于预览图框所需尺寸时，**先判断图与框的尺寸关系**，再调超分把图放大到适配图框后渲染；
+> 要有初始化 / 调用接口、倍率与输出尺寸配置、结果替换原图并自适应填充、以及失败与超时的降级。
+
+### 一、能力从哪来（先确认 API 真实存在，再写代码）
+
+官方指南页在沙箱里取不到（JS 渲染 + 登录墙），所以直接读本机 SDK 26.0.0 的声明，比文档更硬：
+
+| 项 | 事实（`@hms.ai.vision.imageSuperResolution.d.ts`） |
+| --- | --- |
+| 入口 | `imageSuperResolution.ImageSRAnalyzer.create(): Promise<ImageSRAnalyzer>`（构造函数 private） |
+| 调用 | `process(request: visionBase.Request): Promise<ISPResponse>`，产物在 `ISPResponse.pixelMap` |
+| 释放 | `destroy(): Promise<void>` |
+| 错误 | `1018700001 服务异常`（BusinessError） |
+| 约束 | `@syscap SystemCapability.AI.Vision.VisionBase`、`@since 26.0.0`、**没有倍率参数** |
+
+最后一条很关键：**API 不接受放大倍率**，倍率由模型自己决定（约 2×）。所以「放大倍率与输出尺寸的配置」
+不是往接口里塞参数，而是**在调用前算清楚要多少、调用后核验有没有真的多出像素**：
+
+- 需求长边 `needEdge = max(解码档位, 画布长边 × zoom × 1.05)`（**故意不夹源图上限**，否则永远算不出差多少）；
+- 目标长边 `targetEdge = min(needEdge, 4096)` —— 输出上限是显存/耗时的硬保护；
+- 产物必须满足 `outEdge ≥ srcEdge × 1.05` 才采用（`superResAcceptOf`），否则丢弃继续用原图。
+
+### 二、模块边界（三层，互不越界）
+
+| 层 | 文件 | 职责 | 边界 |
+| --- | --- | --- | --- |
+| 判据层 | `common/SuperResPlan.ts` | 要不要超分 / 超到多大 / 产物算不算数 / 等比填充尺寸 / 对账 key | **纯函数，零 SDK、零 IO、零依赖**（可直接 Node 回归） |
+| 能力层 | `services/SuperResolutionService.ts` | 懒初始化、并发共享、超时竞速、异常收敛、`destroy` | **全工程唯一 import `@kit.CoreVisionKit` 的地方**，且**永不抛**（失败一律返回 undefined） |
+| 接线层 | `pages/Index.ets` | 在「解码落地」时决策、拿结果替换图源、释放生命周期 | 只调上面两层，不直接碰 Kit |
+
+### 三、触发条件：先比较，再推理
+
+```
+superResPlanOf(srcW, srcH, needEdge)：
+  ① 宽高/需求非法（0、负、NaN、Inf）   → SR_SKIP_INVALID    不跑
+  ② srcEdge >= needEdge                → SR_SKIP_ENOUGH      图比框大，GPU 缩就行
+  ③ srcEdge > 2048                     → SR_SKIP_SRC_LARGE   像素量已不是瓶颈
+  ④ ratio < 1.15                       → SR_SKIP_SMALL_GAIN  双线性与 AI 肉眼无差
+  ⑤ ratio > 3.2                        → SR_SKIP_TOO_TINY    原图太小，超分只会放大噪点
+  ⑥ 其余                                → SR_RUN              targetEdge = min(need, 4096)
+```
+
+每条都写进日志（`sr plan skip:xxx src=… need=…`），所以真机上可以直接判断「没触发」还是「触发了没用上」。
+
+**刻意不触发的场景**：`textMode`（不是图片）、`playing` / `slideBlending`（幻灯片换图与交叉淡化期间，
+别跟淡化抢 NPU 和内存 —— R97 的教训）、以及同一张图同一目标档位已做过（`viewSrKeyDone`，缩放抖动不重复推理）。
+
+### 四、产物怎么替换原图并填满图框
+
+图源优先级从两处变三处（`viewDisplayPx`）：
+
+```
+超分产物 viewSrPx（uri 对账）  >  系统 AA 精炼 viewSysPx  >  自解码 viewPixelMap
+```
+
+超分只改**像素密度**、不改长宽比，所以布局一行没动：仍是 `Image(viewDisplayPx(uri))` +
+`.objectFit(Contain)` + `.width(pageWLeft)/.height(pageH)/.scale(zoom,flip)`。
+「自适应填充」由 `superResFillSizeOf()` 显式算一遍（与 Contain 同算法：取两边缩放比的小值），
+既保证不变形不裁切，也让这个行为可测。
+
+### 五、降级与错误处理（用户永远不该看到「超分失败」）
+
+| 情况 | 处理 | 用户看到什么 |
+| --- | --- | --- |
+| 设备不支持 / `create()` 失败 | 记一次 `sr init failed`，进 **60s 冷却**（不每次切图都去拉服务） | 原图 + GPU 放大，功能完全正常 |
+| `process()` 抛 `1018700001` | catch 收敛成 `error:<code>`，本次放弃 | 同上 |
+| 2.5s 超时 | 超时闸门先返回 undefined；**迟到的产物由回调 release**（防泄漏） | 同上，且画面不等 AI |
+| 产物没有真实增益 | 丢弃并 `release` | 同上 |
+| 期间切了图 | 代号不匹配 → 回调自己 `release` 过期产物 | 不会串图、不会残留 |
+
+生命周期：切图（`showPreviewOf`）与页面销毁都调 `clearViewSrPx()`（先撤 `@State` 引用再 release），
+页面销毁再 `srService.destroy()`；`destroy` 内部也 catch，绝不因清理失败影响退出。
+
+### 六、改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/SuperResPlan.ts`（新增） | `SR_MIN_RATIO/SR_MAX_RATIO/SR_MAX_SRC_EDGE/SR_MAX_OUT_EDGE/SR_MIN_GAIN`、7 个动作码、`superResNeedEdgeOf / superResPlanOf / superResAcceptOf / superResFillSizeOf / superResKeyOf / superResReasonOf` |
+| `services/SuperResolutionService.ts`（新增） | `SuperResolutionService`（`ensureReady / enhance / destroy` + `SuperResOutcome`） |
+| `pages/Index.ets` | 常量 `SR_TIMEOUT_MS=2500`；`@State viewSrPx` + `viewSrUri/Edge/Token/KeyDone/srService`；`maybeSuperResolve()`；`clearViewSrPx()`；`viewDisplayPx` 三源优先级；`loadViewNow` 钩子；切图/销毁释放；诊断串加 `sr=T/长边` |
+| `ESC_BUILD_TAG` | `R99` |
+
+### 七、验证用例（2578 项全绿）
+
+| 项 | 预期 | 证据 |
+| --- | --- | --- |
+| 需求长边 | `max(viewEdge, canvasLong×zoom×1.05)`，不夹源图 | 纯函数 |
+| 图比框大 | `SR_SKIP_ENOUGH`、`ratio=1` | 纯函数 |
+| 缺像素 | `SR_RUN`、`target=min(need,4096)` | 纯函数 |
+| 倍率区间 | `<1.15` 跳过、`=1.15` 放行、`>3.2` 跳过 | 纯函数边界 |
+| 源图过大 | `>2048` 跳过 | 纯函数 |
+| 脏值 | 0/负/NaN/Inf → `SR_SKIP_INVALID` | 纯函数 |
+| 产物增益 | `<1.05×` 不采用 | 纯函数 |
+| 等比填充 | Contain 口径，不裁切不变形 | 纯函数 |
+| 唯一 Kit 入口 | `@kit.CoreVisionKit` 在 Index 中出现 0 次 | 静态 |
+| 请求体 | `new visionBase.Request()` + `inputData={pixelMap}` | 静态 |
+| 超时与迟到释放 | `setTimeout` 闸门 + `releaseQuietly(out)` | 静态 |
+| 图源优先级 | 超分 > 系统 AA > 自解码 | 静态 |
+| 生命周期 | 切图/销毁释放；迟到结果自释放 | 静态 |
+| 版本守卫 | `1.0.7` / `versionCode 7` / 标记 `R99` / 旧标记 `R98` 已清 | 静态 |
+
+### 八、真机验证步骤
+
+| # | 操作 | 预期 |
+| --- | --- | --- |
+| R99-A | 打开小图（如 800×600）→ 放大到 200% → `Ctrl+D` | 诊断串出现 `sr=T/1600` 之类；图明显比 R98 清楚，切图不卡 |
+| R99-B | 打开 4000×3000 大图 | `sr=F`（图比框大，不跑 AI）；画质与 R98 一致 |
+| R99-C | 在不支持 Core Vision Kit 的设备上装同包 | 功能照常，只是没有 sr 增益；hilog 里 `sr init failed` 只出现一次（60s 冷却） |
+| R99-D | 放大后快速连翻 5 张 | 不卡顿、不残留上一张的超分结果；`sr` 会逐张重新判定 |
+
+### 九、边界说明
+
+- **API 没有倍率参数**：模型自己决定放大倍数（约 2×）。我们只负责「算需求、核验产出」，
+  不足的部分仍由 GPU 双线性补齐 —— 所以「输出尺寸」是**验收标准**，不是能塞进接口的参数。
+- **只作用于主视图**：并排右页、放大镜浮层都没接（右页本身是辅助信息、放大镜有自己的高清重解码链），
+  避免把推理开销乘 2～3 倍。
+- **没有做分层/批量推理**：一次只处理当前这一张，且同图同档只做一次；批量会让切图明显变慢。
 
 ## 第九十八轮：进入幻灯片保持「进入前的形态」（2026-11-27，R98）
 
