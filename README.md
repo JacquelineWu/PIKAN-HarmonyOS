@@ -53,6 +53,28 @@
 
 > **HEIC 说明**：HEIC 解码依赖设备系统的图片 codec。在已支持 HEIC 的 HarmonyOS 设备上可直接预览；若某设备系统 codec 未启用 HEIC，对应图片会走 `onError` 提示，不影响其他格式。
 
+## 应用图标（App Icon）
+
+图标母版是 `tools/app-icon/source.png`（1024×1024，紫色圆角底 + 内嵌面板 + 眼睛/山峦/暖色光点），
+由 `tools/app-icon/make-icons.sh` 等比派生全部尺寸：**不裁切、不重绘、不加边框**，只做 Lanczos 缩放，
+≤48px 加一点 unsharp 保住白色眼形描边。
+
+| 尺寸 | 落点 | 用途 |
+| --- | --- | --- |
+| 1024 | `AppScope/resources/base/media/app_icon.png`、`entry/src/main/resources/base/media/app_icon.png` | 应用主图标 / 上架 / 桌面 & 多任务大图 |
+| 192 | `entry/src/main/resources/xxxldpi/media/` | 640dpi（桌面 / 任务栏 / 窗口标题栏） |
+| 144 | `entry/src/main/resources/xxldpi/media/` | 480dpi |
+| 96 | `entry/src/main/resources/xldpi/media/` | 320dpi |
+| 72 | `entry/src/main/resources/ldpi/media/` | 240dpi |
+| 48 | `entry/src/main/resources/mdpi/media/` | 160dpi（1x 基准） |
+| 36 | `entry/src/main/resources/sdpi/media/` | 120dpi |
+| 16/24/32/64/128/180/256/512 | `tools/app-icon/out/` | 其它平台 / 文档 / 商店物料 |
+
+引用链三处同一资源名，**改图即全局生效、无需改 json5**：
+`AppScope/app.json5 → icon: $media:app_icon`、`entry/.../module.json5 → abilities[0].icon` 与
+`startWindowIcon`。细节（为何用密度桶而不是只放 1024、为何不做 layered_image、密度限定符命名坑）见
+`tools/app-icon/README.md`。
+
 ## 在 DevEco Studio 打开并编译
 
 1. 用 **DevEco Studio（支持 HarmonyOS 6 / API 26 的版本，如 DevEco Studio 6.x）** 打开本目录（`PIKAN-HarmonyOS`）作为工程。
