@@ -251,7 +251,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R91';
+const ESC_BUILD_TAG: string = 'R92';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1398,6 +1398,13 @@ struct Index {
   private preFullFlipV: boolean = false;
   private preFullStatus: string = '';
   private preFullTopbar: boolean = true;
+  /** 第九十二轮：进入全屏前「系统窗口装饰（标题栏 / 边框）」是否可见。
+   *
+   *  退出时旧代码无条件 `setWindowDecorVisible(true)`，等于**强制**给窗口加回一条标题栏；
+   *  若进入前本来是无装饰的（本机最大化态默认无标题栏，且 ENTER_IMMERSIVE 是持久形态），
+   *  这一下会让窗口内容区永久少掉「标题栏 37vp 高 + 边框 20vp 宽」——
+   *  实测 canvas 1490×978 → 1470×941，图与整个界面一起缩 3.7%。 */
+  private preFullDecorVisible: boolean = true;
   /** 第八十九轮：视图快照的**独立有效性标志**。
    *
    *  `hasFullSnapshot` 管的是「界面还原」（rot / flip / status / topbar），退出时会被置 false。
@@ -4444,6 +4451,43 @@ struct Index {
     return (pct < 10 ? pct.toFixed(1) : Math.round(pct).toString()) + ' %';
   }
 
+  /** 第九十二轮：读当前窗口装饰（标题栏 / 边框）是否可见。
+   *  取不到窗口 / 接口抛错时保守返回 true（与系统默认一致），绝不因此中断流程。 */
+  private decorVisibleOf(): boolean {
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    if (!win) {
+      return true;
+    }
+    try {
+      return win.getWindowDecorVisible();
+    } catch (e) {
+      return true;
+    }
+  }
+
+  /** 第九十二轮：退出后把「装饰可见性」再钉一次（只在进入前是无装饰时才干预）。
+   *
+   *  `maximize(EXIT_IMMERSIVE)` 由窗口管理器**异步**落地：它可能在我们的
+   *  `setWindowDecorVisible(pre)` 之后又把标题栏加回来，于是内容区又被吃掉 37vp。
+   *  所以在 260ms 落定与 1500ms 稳态各补一次「若被加回来就再关掉」，保证与进入前一致。 */
+  private reassertDecor(): void {
+    if (this.preFullDecorVisible) {
+      return; // 进入前就有装饰：不需要干预，避免和系统状态打架
+    }
+    const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+    if (!win) {
+      return;
+    }
+    try {
+      if (win.getWindowDecorVisible()) {
+        win.setWindowDecorVisible(false);
+        hilog.info(DOMAIN, TAG, 'fullscreen: decor re-asserted hidden');
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'fullscreen: decor re-assert failed');
+    }
+  }
+
   /** 第九十轮：把视图数值拼成**字符串**再交给 hilog。
    *
    *  ⚠️ 本机 hilog 不支持 `%{public}f`：R88/R89 那两行实测被打成
@@ -4459,7 +4503,9 @@ struct Index {
       ' fit=' + r3(this.fitFactor()) +
       ' p=' + this.zoomPercentText() +
       ' pre=' + (this.preFullViewValid ? r3(this.preFullZoom) : 'none') +
-      ' spread=' + (this.spreadShown() ? 'T' : 'F');
+      ' spread=' + (this.spreadShown() ? 'T' : 'F') +
+      ' decor=' + (this.decorVisibleOf() ? 'T' : 'F') +
+      ' preDecor=' + (this.preFullDecorVisible ? 'T' : 'F');
   }
 
   private zoomBy(factor: number): void {
@@ -6384,6 +6430,8 @@ struct Index {
       if (!this.pageAlive || this.fullscreen) {
         return;
       }
+      // 第九十二轮：先把被异步加回来的装饰关掉，再谈重解（否则按小画布解一遍白解）。
+      this.reassertDecor();
       if (shouldReloadOnResize(this.lastReloadW, this.lastReloadH,
           this.canvasW, this.canvasH, RESIZE_MIN_DELTA_PX)) {
         this.pendingReload = false;
@@ -6429,6 +6477,7 @@ struct Index {
       if (!this.pageAlive || this.fullscreen) {
         return;
       }
+      this.reassertDecor();
       hilog.info(DOMAIN, TAG, 'full exit settle2: %{public}s', this.viewDiagOf());
     }, FULL_EXIT_SAMPLE_MS);
   }
@@ -8384,6 +8433,8 @@ struct Index {
       this.preFullZoom = this.zoom;
       this.preFullTx = this.tx;
       this.preFullTy = this.ty;
+      // 第九十二轮：先存档「装饰可见性」，退出时按它还原（不再无条件 true）。
+      this.preFullDecorVisible = this.decorVisibleOf();
       // 第八十九轮：视图快照单独标记（不随 hasFullSnapshot 中途清掉）。
       this.preFullViewValid = true;
       this.exitViewValid = false;
@@ -8659,11 +8710,15 @@ struct Index {
           hilog.warn(DOMAIN, TAG, 'fullscreen: exit immersive failed');
         }
       }
-      // 双保险：显式恢复窗口装饰（标题栏）与 title / dock 热区悬停显示。
-      // SDK 说明 setTitleAndDockHoverShown 与 maximize 同时调用时「最后一次生效」，
-      // 这一步能把进入时设下的「dock 悬停也不显示」彻底覆盖掉。
+      // 第九十二轮：装饰可见性按**进入前的实际值**还原，绝不无条件 true。
+      //  旧代码恒 setWindowDecorVisible(true)：进入前无标题栏的窗口，退出后被强行加回一条
+      //  标题栏（37vp 高）+ 边框（20vp 宽），内容区永久变小 —— 这就是「退出全屏后整个界面/
+      //  元素被缩小」的真正来源（canvas 1490×978 → 1470×941，−3.7%）。
+      //  `preFullDecorVisible` 在进入时用 getWindowDecorVisible() 读真值，跨会话也不会错。
       try {
-        win.setWindowDecorVisible(true);
+        win.setWindowDecorVisible(this.preFullDecorVisible);
+        hilog.info(DOMAIN, TAG, 'fullscreen: decor restore -> %{public}d (pre=%{public}d)',
+          this.decorVisibleOf() ? 1 : 0, this.preFullDecorVisible ? 1 : 0);
       } catch (e) {
         hilog.warn(DOMAIN, TAG, 'fullscreen: decor restore failed');
       }

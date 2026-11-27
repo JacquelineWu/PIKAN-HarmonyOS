@@ -8,7 +8,7 @@
 - **右侧**：大图预览区（**中灰 `#5F5F5F`** 底色，GPU 合成渲染）。左上角信息浮层与右下角
   **缩放百分比**方块（100% = 原图像素 1:1）是 11-11～R54 期间的形态，**R55 起两者均已取消**
   （见下方「真机验证手册」R55 条目）；估算占用 / 上限 / 目录诊断串一律不画。
-  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R91`** 构建标记、
+  **11-16 起 ESC 排查诊断收成默认关闭的诊断层**，按 `Ctrl+D` 即展开 **`R92`** 构建标记、
   `full/win/keys/dsp/hk/wf` 诊断与「退出 APP」入口（见第二十五轮章节）
 
 > 2026-11-07 已按 [`PIKAN-Win64`](https://gitee.com/flyercat/PIKAN-Win64) 11-04 版全量对齐，
@@ -578,15 +578,16 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 > R88（ESC 退出全屏恢复进入前缩放 / 平移，不再一律 fit）、
 > R89（恢复不再依赖瞬时标志 + 落定后再确认 + 状态栏给出缩放百分比）、
 > R90（视图诊断可用：修 hilog `%f` 失效，进出各打一条 zoom/canvas/img/fit/p）、
-> R91（退出后 1.5s 二次采样 canvas，判定「瞬态变小」还是「稳态变小」）
+> R91（退出后 1.5s 二次采样 canvas，判定「瞬态变小」还是「稳态变小」）、
+> R92（**根因修复**：退出时按进入前真值还原窗口装饰，不再强制 `setWindowDecorVisible(true)`）
 > 见下方二十三个独立章节**，其真机步骤在本手册之后、R39–R55 实现说明之前。
 
 ### 使用前必读
 
-- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R91`**。测试里早期轮次写的
+- **确认装的是新包**：`Ctrl+D` 展开诊断层，角标必须是 **`R92`**。测试里早期轮次写的
   「装 `R38` 包」是当时的历史锚点，执行时一律替换为当前 `R86` 包。
   依据：`⚠️ 截图判定：按 Ctrl+D 展开诊断层后须出现 R38，否则说明装的是旧包。`
-  （行号随 R91 新增断言顺延，以 `grep -n 真机步骤 R91 tests/dirname.test.mjs` 为准：11303–11308）
+  （行号随 R92 新增断言顺延，以 `grep -n 真机步骤 R92 tests/dirname.test.mjs` 为准：11352–11358）
 - **证据边界**（逐字取自测试）：
   `⚠️ 本组是静态契约 + 纯函数回归，不替代真机验证；编译校验 ≠ 真机验证。`
   真机 DevEco 安装、`hdc` / `hilog` 侧验证由使用者完成。
@@ -640,6 +641,7 @@ cd /storage/Users/currentUser/WorkBuddy/Project/heicviewer
 | R89 | 恢复不依赖瞬时标志 / 落定后再确认 / 状态栏显示缩放百分比 | 11216–11223 |
 | R90 | 视图诊断可用（修 `%f` 失效，进出各打一条 zoom/canvas/img/fit/p） | 11261–11266 |
 | R91 | 退出后 1.5s 二次采样 canvas（判定瞬态 vs 稳态） | 11303–11308 |
+| R92 | 退出时按真值还原窗口装饰（根因修复） | 11352–11358 |
 | 附 | R36 / R37 / R38 既有步骤 | 5662–5668 / 6019–6027 / 6455–6461 |
 | 附 | 更早轮次的 9 组散落步骤（见下方附节） | 4337–5462 |
 
@@ -1901,6 +1903,104 @@ Node 里构造真实的 FITS 头（2880 字节卡片）+ 大端 int16 像素、X
   文本预览 scrollbar、并排 / 全屏 / 放大镜、R64 内容量统计全部零回归；
 - 未跑 `build.sh`、未升版本（`1.0.7 / versionCode 7`）、未把 HAP 放桌面；
   **本轮未 push**（R63 `0b3416f`、R64 `4881f65` 亦未推送）。
+
+---
+
+## 第九十二轮：根因修复 —— 退出全屏时按真值还原窗口装饰（2026-11-27，R92）
+
+> 前一轮的日志把范围收窄到「canvas 少了 20×37vp」。本轮定位到具体是**窗口装饰（系统标题栏 + 边框）**被无条件打开了。
+
+### 一、根因（一行代码）
+
+`applyWindowFullScreen(false)` 的退出序列里：
+
+```ts
+// 旧代码
+try {
+  win.setWindowDecorVisible(true);   // ← 无条件！不管进入前有没有标题栏
+} catch (e) { ... }
+```
+
+而进入时用的是 `maximize(ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER)` —— 文档明确它是**持久形态设置**。
+于是出现这条链：
+
+1. 某次全屏往返后，窗口处于「无标题栏」形态（decor 隐藏）；
+2. 下次进入全屏前，窗口就是无装饰的 ⇒ 内容区较大（实测 `canvas=1490×978`）；
+3. 退出时 `setWindowDecorVisible(true)` **强行**加回标题栏与边框；
+4. 内容区永久少掉 **37vp 高 + 20vp 宽** ⇒ `canvas=1470×941`；
+5. `fit = h / imgH` 随之从 `0.326` 掉到 `0.314`（−3.7%），**整张图与整个界面一起变小**。
+
+这与日志逐字吻合（`1490×978` → `1470×941`），也与「界面/元素都被缩小」的观感一致 ——
+因为布局是百分比 / `layoutWeight`，内容区一变，所有元素同比缩小。
+
+> 补充：本机 `OnSetWindowLayoutFullScreen` / `OnSetImmersiveModeEnabledState` 都返回
+> `device not support`，说明**窗口尺寸只由装饰与最大化形态决定**，应用内三栏的显隐并不改变窗口 ——
+> 恰好把嫌疑唯一地指向 decor。
+
+### 二、改动
+
+| 位置 | 改动 |
+| --- | --- |
+| `Index.ets` 字段 | 新增 `preFullDecorVisible`（进入前的装饰可见性真值） |
+| `Index.ets` 进入 | `this.preFullDecorVisible = this.decorVisibleOf();`（用 `win.getWindowDecorVisible()` 读真值，取不到则保守 `true`） |
+| `Index.ets` 退出 | `win.setWindowDecorVisible(this.preFullDecorVisible)` —— **不再恒 true**；并打 `decor restore -> X (pre=Y)` |
+| `Index.ets` 护栏 | 新增 `reassertDecor()`：仅当「进入前无装饰」时，在 **260ms 落定**与 **1500ms 稳态**各补一次「若被异步加回来就再关掉」 |
+| `Index.ets` 诊断 | `viewDiagOf()` 增加 `decor=T/F` 与 `preDecor=T/F`，下一份日志即可直接判读 |
+| `ESC_BUILD_TAG` | `R92` |
+
+`decorVisibleOf()` 的实现（容错优先，绝不因平台差异中断流程）：
+
+```ts
+private decorVisibleOf(): boolean {
+  const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
+  if (!win) { return true; }
+  try { return win.getWindowDecorVisible(); } catch (e) { return true; }
+}
+```
+
+### 三、为什么要「再钉两次」
+
+`maximize(EXIT_IMMERSIVE)` 是**异步**的，窗口管理器可能在我们 `setWindowDecorVisible(pre)`
+**之后**又把标题栏加回来。只调一次的话，症状会以「偶发」形式回来（这也解释了为什么前几轮改完像是修好了、又复发）。
+因此在两条既有定时器（260ms 落定 / 1500ms 稳态）里各补一次，且**只在 `preDecor=false` 时干预**，
+避免和系统默认状态打架。
+
+### 四、验证用例
+
+| 项 | 预期 | 证据 |
+| --- | --- | --- |
+| 读真值 | `getWindowDecorVisible()` 冻结进 `preFullDecorVisible` | 静态断言 |
+| 按真值还原 | 退出不再出现恒 `true` | 静态断言（正则 `=== false`） |
+| 时序正确 | 冻结发生在 `applyWindowFullScreen` 之前 | 静态断言 |
+| 护栏到位 | `reassertDecor()` 恰好调用 2 次（260ms / 1500ms） | 静态断言 |
+| 只在该干预时干预 | `preDecor=true` 时直接 return | 静态断言 |
+| 可判读 | 诊断串含 `decor=` / `preDecor=` | 静态断言 |
+
+### 五、真实编译 / 产物核验
+
+| 项 | 结果 |
+| --- | --- |
+| 静态契约 | `ALL PASS 2467 passed, 0 failed`（R91 基线 2459，新增 8 条） |
+| 独立零回归脚本 | `hdrprobe 16/16`；`git diff --check` 通过 |
+| 真实 ArkTS 编译 | `BUILD SUCCESSFUL in 21 s 703 ms`；`CompileArkTS after 13 s 406 ms`（**非 UP-TO-DATE**）；**0 ERROR / 17 WARN**；日志 `/tmp/r92-build.log` |
+| 产物 | 签名 HAP **1,863,478 B** / 未签名 **1,825,016 B** / `ets/modules.abc` **1,075,240 B** |
+| 字节码 | `R92=1 / R91=0 / 1.0.7=1`；`getWindowDecorVisible=1`、`preFullDecorVisible=1`、`reassertDecor=2`、`preDecor==1` |
+
+### 六、真机步骤（逐字取自 `tests/dirname.test.mjs:11352` R92 组）
+
+>   ⚠️ 本组是源码静态契约，不替代真机验证；编译校验 ≠ 真机验证。
+>   ⚠️ 真机步骤 R92-A：确认 Ctrl+D 角标 R92 → 记下当前界面（截图）→ 进全屏 → ESC；
+>      退出后界面尺寸应与进入前完全一致（标题栏是否出现、画布高度都不变）。
+>   ⚠️ 真机步骤 R92-B：反复进出 3 次，每次退出后 canvas 都回到同一个值；
+>      日志里 decor= 应始终等于 preDecor=（若 preDecor=F 而 decor=T，说明再钉护栏没生效）。
+>   ⚠️ 真机步骤 R92-C：重启 APP 后再做一次，确认装饰状态不因上次全屏往返而改变。
+
+### 七、边界与残留风险
+
+- **如果 `preDecor` 本来就是 `true`**：本次改动等于不干预（与原行为一致），说明这台设备进入前就有标题栏，
+  那 37vp 另有来源 —— 届时日志会显示 `decor=T preDecor=T`，据此转入窗口 `maximize` 形态排查。
+- **`decor` 是窗口级持久属性**：一次全屏往返可能改变它并被系统记住，所以 `R92-C`（重启后再测）必须做。
+- **不改任何应用内布局**：本轮只动窗口装饰的还原逻辑，`zoom / canvas / 并排 / 首尾相接` 全部未变。
 
 ---
 
