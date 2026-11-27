@@ -59,6 +59,7 @@ import preferences from '@ohos.data.preferences';
 import pasteboard from '@ohos.pasteboard';  // 第五十一轮：文本态行段选择后复制到系统剪贴板
 import window from '@ohos.window';
 import display from '@ohos.display';
+import pointer from '@ohos.multimodalInput.pointer';  // 第一百零九轮：分隔条悬停光标（WEST_EAST）
 import util from '@ohos.util';
 import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
@@ -280,7 +281,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R108';
+const ESC_BUILD_TAG: string = 'R109';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -447,6 +448,11 @@ const LOUPE_RESAMPLE_MIN_GAIN: number = 96;
  *  第一百零八轮：再叠一层「用户手工拖宽」—— 见 common/SidebarSplit.ts，
  *  用户没拖过（sidebarUserW = 0）时仍逐字走上面的自适应。 */
 const SPLIT_W: number = SPLIT_DIVIDER_W;   // 分隔条宽度（不是档案列表列宽）
+/** 第一百零九轮：拖拽手感参数。
+ *  · CLICK_TOL：位移不超过它就算「点了一下」（不写盘、也不当成拖动）；
+ *  · DOUBLE_TAP：两次按下的间隔上限，落在里面且上一次几乎没动 = 双击（复位自适应）。 */
+const SPLIT_CLICK_TOL_PX: number = 3;
+const SPLIT_DOUBLE_TAP_MS: number = 320;
 
 const MIN_SCALE: number = 0.05;
 const MAX_SCALE: number = 16.0;
@@ -1436,12 +1442,21 @@ struct Index {
    *  2026-11-11 起 applyWindowFullScreen() 会调 window 最大化沉浸接口，详见该方法注释。 */
   @State fullscreen: boolean = false;
 
-  /** 第一百零八轮：本次拖拽是否真的在进行（PanGesture 的 start → update → end 三拍闸门）。
-   *  非 @State：它不参与渲染，只防「没按下就收到 update / 收起态误拖」。 */
+  /** 第一百零八轮：本次拖拽是否真的在进行（按下 → 移动 → 松开的闸门）。
+   *  非 @State：它不参与渲染，只防「没按下就收到 move / 收起态误拖 / 重复收尾」。 */
   private splitDragActive: boolean = false;
-  /** 本次拖拽的起始宽：PanGesture.offsetX 是「相对按下那一刻」的累计位移，
-   *  每帧都按 start + offset 算，绝不做增量累加（增量会随丢帧漂移）。 */
+  /** 本次拖拽的起始宽：每帧都按 start + 绝对位移 算，绝不做增量累加（增量会随丢帧漂移）。 */
   private splitStartW: number = 0;
+  /** 第一百零九轮：按下那一刻的**绝对横坐标**（窗口坐标）。拖动全程只比较
+   *  「当前绝对 X − 起始绝对 X」，因此鼠标冲出 14vp 窄条后依然连续跟手。 */
+  private splitStartX: number = 0;
+  /** 本次按下累计的最大位移：区分「点一下」与「拖动」，也用于双击判据。 */
+  private splitMovedPx: number = 0;
+  /** 上一次按下的时刻（双击复位用）。 */
+  private splitLastDownMs: number = 0;
+  /** 光标是否已被我们改成左右箭头 —— 只在自己改过时才 restoreDefault，
+   *  避免把系统 / 其它控件正在用的光标状态冲掉。 */
+  private splitCursorSet: boolean = false;
 
   private timerId: number = -1;
   private baseZoom: number = 1;
@@ -3080,7 +3095,8 @@ struct Index {
   }
 
   // ------------------------------------------------------------------
-  // 第一百零八轮：左栏拖拽调宽（分隔条 PanGesture 的三个收口 + 记忆）
+  // 第一百零八轮：左栏拖拽调宽（记忆 / 夹取）
+  // 第一百零九轮：修「拖不动」—— 输入通道改为显式 mouse + touch，不再依赖手势竞技场
   // ------------------------------------------------------------------
 
   /** 把当前「用户意图宽」同步写盘（拖完立刻写，不等 600ms 防抖 —— 拖完就退出也不丢）。
@@ -3099,23 +3115,84 @@ struct Index {
     }
   }
 
-  /** 按下分隔条：只记起始宽 + 亮起，不改宽度（用户可能只是点一下）。
-   *  收起态不参与拖拽 —— 此时分隔条贴着窗口最左，拖动语义不明确，交给 « 按钮展开。 */
-  private onSplitDragStart(): void {
+  /** 鼠标事件的**绝对**横坐标（窗口坐标系）。拖拽只认绝对值之差，
+   *  与「鼠标此刻在不在分隔条上」无关 —— 这是「连续跟手」的前提。 */
+  private splitMouseAbsX(event: MouseEvent): number {
+    const v: number = Number(event.displayX ?? event.x);
+    return v === v ? v : this.splitStartX;
+  }
+
+  /** 触摸事件的绝对横坐标。打印 / 手写笔与手指走同一条通道；
+   *  个别设备不给 displayX 时依次退 windowX / x（三者都是同一指头的同一次事件，退级别不会跳）。 */
+  private splitTouchAbsX(event: TouchEvent): number {
+    const list: Array<TouchObject> = event.touches;
+    const t: TouchObject | undefined = (list !== undefined && list.length > 0) ? list[0] : undefined;
+    if (t === undefined) {
+      return this.splitStartX + this.splitMovedPx;
+    }
+    const v: number = Number(t.displayX ?? t.windowX ?? t.x);
+    return v === v ? v : this.splitStartX;
+  }
+
+  /** 光标：悬停在分隔条上 / 正在拖动 → 左右双箭头；离开且没在拖 → 还原系统默认。
+   *  CursorController 是 API 12 起的 UIContext 能力，2in1 上可用；任何异常只记日志，
+   *  绝不让「设不了光标」把拖动本身带崩（拖动不依赖光标）。 */
+  private applySplitCursor(): void {
+    try {
+      const cc = this.getUIContext().getCursorController();
+      if (this.sidebarDragging || this.sidebarHover) {
+        cc.setCursor(pointer.PointerStyle.WEST_EAST);
+        this.splitCursorSet = true;
+      } else if (this.splitCursorSet) {
+        cc.restoreDefault();
+        this.splitCursorSet = false;
+      }
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'sidebarSplit: setCursor failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 按下（鼠标左键 / 手指 / 笔）：
+   *  · 收起态不拖，只给提示（此时分隔条贴着窗口最左，拖动语义不明确）；
+   *  · 双击（两次按下间隔 < SPLIT_DOUBLE_TAP_MS 且上一次没怎么移动）→ 复位自适应；
+   *  · 否则进入拖动：记录起始宽 + 起始绝对 X，**此刻不改宽度**（用户可能只是点一下）。 */
+  private onSplitPointerDown(absX: number): void {
     if (this.listCollapsed) {
       this.splitDragActive = false;
       this.status = '左栏已收起：点 « 或按 Ctrl+B 展开后再拖宽度';
       return;
     }
+    const now: number = Date.now();
+    const dbl: boolean = (now - this.splitLastDownMs) < SPLIT_DOUBLE_TAP_MS &&
+      this.splitMovedPx <= SPLIT_CLICK_TOL_PX;
+    this.splitLastDownMs = now;
+    this.splitMovedPx = 0;
+    if (dbl) {
+      this.splitDragActive = false;
+      this.resetSidebarW();
+      return;
+    }
     this.splitDragActive = true;
     this.splitStartW = this.listW;
+    this.splitStartX = absX;
     this.sidebarDragging = true;
     this.markUserActive();
+    this.applySplitCursor();
     this.status = splitStatusOf(this.listW, true);
   }
 
-  /** 拖动中：**每帧都按「起始宽 + 累计位移」重算**（不做增量累加，丢帧也不会漂）。
+  /** 移动：**每帧都按「起始宽 + 绝对位移」重算**（不做增量累加，丢帧也不会漂）。
    *  位移由 SidebarSplit.splitDragWOf 夹进 [MIN, max(rootW)]，所以拖不出合法区间。 */
+  private onSplitPointerMove(absX: number): void {
+    if (!this.splitDragActive) {
+      return;
+    }
+    const dx: number = absX - this.splitStartX;
+    this.splitMovedPx = Math.abs(dx) > this.splitMovedPx ? Math.abs(dx) : this.splitMovedPx;
+    this.onSplitDragUpdate(dx);
+  }
+
+  /** 拖动中的唯一写宽口：只在这里改 sidebarUserW / listW。 */
   private onSplitDragUpdate(offsetX: number): void {
     if (!this.splitDragActive) {
       return;
@@ -3126,7 +3203,7 @@ struct Index {
     this.status = splitStatusOf(w, true);
   }
 
-  /** 松开（或手势被取消）：落盘 + 复位 chrome 基准 + 重算一次自适应。
+  /** 松开（或触摸被打断）：落盘 + 复位 chrome 基准 + 重算一次自适应 + 还光标。
    *  · chromeW/H 置 -1：固定栏偏移（根宽 − 预览画布）已经变了，必须让预览回调重采一次，
    *    与「收起 / 展开左栏」完全同一套处理（否则根回调会拿旧偏移反推画布）；
    *  · 重算一次 refreshAdaptiveLayout：把 nameWrap（名称完整优先 → 拖窄改多行换行）
@@ -3136,19 +3213,24 @@ struct Index {
     this.splitDragActive = false;
     this.sidebarDragging = false;
     if (!active) {
+      this.applySplitCursor();
       return;
     }
     this.chromeW = -1;
     this.chromeH = -1;
-    this.persistSidebarWNow();
+    // 只是点了一下（没拖动）就别写盘，免得把「点一下就记住」变成噪声。
+    if (this.splitMovedPx > SPLIT_CLICK_TOL_PX) {
+      this.persistSidebarWNow();
+    }
     const rowNames: Array<string> = [];
     for (let i = 0; i < this.rows.length; i++) {
       rowNames.push(this.rows[i].name);
     }
     this.refreshAdaptiveLayout(rowNames);
     this.status = splitStatusOf(this.listW, false);
-    hilog.info(DOMAIN, TAG, 'sidebarW: drag end w=%{public}d root=%{public}d',
-      this.listW, this.lastRootW);
+    this.applySplitCursor();
+    hilog.info(DOMAIN, TAG, 'sidebarW: drag end w=%{public}d root=%{public}d moved=%{public}d',
+      this.listW, this.lastRootW, this.splitMovedPx);
   }
 
   /** 双击分隔条：清掉记忆，回到 acLayoutOf 的自适应宽（写 0 = 没设过）。 */
@@ -9124,6 +9206,22 @@ struct Index {
    *    也就不会再有任何界面元素因鼠标位置而出现或消失。 */
   private onRootMouse(event: MouseEvent): void {
     this.markUserActive();
+    // 第一百零九轮：拖分隔条时鼠标很快会离开那条 14vp 的窄条 —— 一旦离开，
+    // 分隔条自己收不到 Move（鼠标事件只投给指针所在的那条命中链），拖拽就会「断」。
+    // 根 Stack 覆盖整个窗口，Move / Release 一定会冒泡到这里，于是位移由根容器接力：
+    //   · Move   → 用同一个绝对 X 基准继续改宽（连续跟手）；
+    //   · Release→ 收尾（松手时指针可能停在预览区 / 左栏 / 窗口外沿）。
+    // 分隔条自己也挂了同一套处理，两条路径都调用同一个幂等入口，重复触发不会翻倍。
+    if (this.splitDragActive) {
+      if (event.action === MouseAction.Move) {
+        this.onSplitPointerMove(this.splitMouseAbsX(event));
+        return;
+      }
+      if (event.action === MouseAction.Release) {
+        this.onSplitDragEnd();
+        return;
+      }
+    }
   }
 
   /** 窗口级真全屏（2026-11-11）：隐藏系统标题栏与 dock（PC 任务栏）、状态栏、导航栏。
@@ -10205,45 +10303,64 @@ struct Index {
                 this.markWindowRect();
                 this.status = this.listCollapsed ? '已收起左栏（Ctrl+B / » 展开）' : '已展开左栏';
               })
+              // 第一百零九轮：按钮上的按下 / 抬起不冒泡给分隔条 ——
+              // 否则点一下 « 会先被当成「拖拽起点」，状态栏还会被「拖动中…」覆盖掉。
+              // 只拦 onMouse 冒泡，按钮自己的 click 语义不受影响。
+              .onMouse((event: MouseEvent) => {
+                if (event.action === MouseAction.Press || event.action === MouseAction.Release) {
+                  event.stopPropagation();
+                }
+              })
           }
           .width(SPLIT_W)
           .height('100%')
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
-          // 第一百零八轮：分隔条变成可拖拽的调宽手柄 —— 位置就是左栏的右边界，
-          // 因此「分割线位置」= listW，与拖拽结果天然一致，不需要额外同步坐标。
+          // 第一百零八轮：整条分隔条 = 拖拽调宽手柄。
+          // 第一百零九轮：改为**显式的 mouse / touch 通道**（不再用 PanGesture）——
+          // 位置就是左栏的右边界，因此「分割线位置」= listW，与拖拽结果天然一致。
           // 视觉三态：常态深灰底 / 悬停浅高亮（提示可拖）/ 拖动中蓝色高亮（交互状态可见）。
           .backgroundColor(splitActiveOf(this.sidebarDragging, this.sidebarHover)
             ? '#2f4159' : '#1a1d23')
+          // 悬停：换左右双箭头光标（CursorController，2in1 生效；失败只记日志）。
           .onHover((on: boolean) => {
             this.sidebarHover = on;
+            this.applySplitCursor();
           })
           // 命中区左右各外扩 6vp：可视仍 14vp，但手不用精确戳在那条细缝上。
           .responseRegion({ x: -SPLIT_HIT_EXTRA_VP, y: 0,
             width: SPLIT_W + SPLIT_HIT_EXTRA_VP * 2, height: '100%' })
-          // 横向平移 = 调宽（start 记起点 / update 实时改 listW / end 落盘）；
-          // 双击 = 清掉记忆回到自适应。两者互斥，避免「双击时先被判成拖动」。
-          .gesture(
-            GestureGroup(GestureMode.Exclusive,
-              PanGesture({ direction: PanDirection.Horizontal, distance: 2 })
-                .onActionStart(() => {
-                  this.onSplitDragStart();
-                })
-                .onActionUpdate((event: GestureEvent) => {
-                  this.onSplitDragUpdate(event.offsetX);
-                })
-                .onActionEnd(() => {
-                  this.onSplitDragEnd();
-                })
-                .onActionCancel(() => {
-                  this.onSplitDragEnd();
-                }),
-              TapGesture({ count: 2 })
-                .onAction(() => {
-                  this.resetSidebarW();
-                })
-            )
-          )
+          // 鼠标：左键 Press 起拖，Move 实时改宽，Release 收尾。
+          // Press 处 stopPropagation —— 否则这次按下还会被预览 / 根容器当成「点画布」。
+          .onMouse((event: MouseEvent) => {
+            if (event.action === MouseAction.Press && event.button === MouseButton.Left) {
+              this.onSplitPointerDown(this.splitMouseAbsX(event));
+              event.stopPropagation();
+              return;
+            }
+            if (event.action === MouseAction.Move) {
+              this.onSplitPointerMove(this.splitMouseAbsX(event));
+              return;
+            }
+            if (event.action === MouseAction.Release) {
+              this.onSplitDragEnd();
+            }
+          })
+          // 触摸 / 手写笔：Down 起拖，Move 实时改宽，Up / Cancel 收尾。
+          // 手指按下后系统会把后续 Move 都投递给本组件（触摸捕获），因此窄条也能连续拖。
+          .onTouch((event: TouchEvent) => {
+            if (event.type === TouchType.Down) {
+              this.onSplitPointerDown(this.splitTouchAbsX(event));
+              return;
+            }
+            if (event.type === TouchType.Move) {
+              this.onSplitPointerMove(this.splitTouchAbsX(event));
+              return;
+            }
+            if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+              this.onSplitDragEnd();
+            }
+          })
           .accessibilityText('左栏与预览区之间的分隔条，左右拖动可调整左栏宽度，双击恢复自适应')
           .accessibilityLevel('yes')
         }
