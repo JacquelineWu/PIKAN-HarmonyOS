@@ -251,7 +251,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R92';
+const ESC_BUILD_TAG: string = 'R93';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -377,6 +377,12 @@ const TOPBAR_EDGE_PX: number = 10;
 const TOPBAR_KEEP_PX: number = 8;
 const TOPBAR_H: number = 52;
 const TOPBAR_HIDE_MS: number = 2000;
+/** 第九十三轮：全屏切换后的「画布信任窗」——这段时间内禁止根容器反推覆盖实测画布。
+ *  进出全屏时 root 与 preview 两个 onAreaChange 必然错帧，反推值会偏小（实测 1490×978 → 1470×941），
+ *  而预览 Stack 的实测值才是真值。 */
+const CANVAS_ROOT_TRUST_MS: number = 1500;
+/** 第九十三轮：判「画布缩小是否与根同幅」的容差（vp）。小于它视为一致（像素取整 / 滚动条抖动）。 */
+const CANVAS_SHRINK_TOL_VP: number = 2;
 /** 第九十一轮：退出全屏后第二次画布采样的延迟（晚于 260ms 的落定、早于用户感知「稳定」）。 */
 const FULL_EXIT_SAMPLE_MS: number = 1500;
 /** 第十三轮：非全屏时整栏「贴顶唤出」的滞回带（vp，MouseEvent.y 相对根 Stack）。
@@ -1366,6 +1372,8 @@ struct Index {
   private fullExitRefitTimer: number = -1;
   /** 第九十一轮：退出后再多采一次画布（+1500ms），用来判定「画布是瞬态还是稳态变小」。 */
   private fullExitSampleTimer: number = -1;
+  /** 第九十三轮：信任窗截止时刻。窗内只认预览 Stack 的实测画布，不许根容器反推改写。 */
+  private canvasRootTrustUntil: number = 0;
   /** resize 累积判据：上次**真正触发重解**时的画布尺寸（0 = 首帧还没重解过）。
    *  ⚠️ 不能拿「上一帧尺寸」比：拖窗口每帧只变 1~3vp，永远够不到 8vp 阈值，
    *     重解就一次都不会发生 —— 第四轮实机「resize 没反应」的主因之一。 */
@@ -8426,6 +8434,9 @@ struct Index {
     // 置 -1 让下一轮 onAreaChange 重新测量，别拿旧偏移去反推画布尺寸。
     this.chromeW = -1;
     this.chromeH = -1;
+    // 第九十三轮：全屏切换必然引起 root / preview 回调错帧，开一个信任窗，
+    // 窗内禁止根容器反推覆盖预览实测值（否则画布被改小 → 只有图片缩小）。
+    this.canvasRootTrustUntil = Date.now() + CANVAS_ROOT_TRUST_MS;
     this.clearTopbarTimer();
     if (on) {
       // 进全屏：先把「之前的完整界面」逐项存档，ESC 退出时才能原样还原
@@ -9942,6 +9953,12 @@ struct Index {
               this.setFull(false, true);
               return;
             }
+            // 第九十三轮：预览 Stack 的实测值才是真值；若它报来的是「变小」，留痕一条，
+            // 便于和根反推的两条日志一起定位到底是谁改小了画布。
+            if (w < this.canvasW || h < this.canvasH) {
+              hilog.info(DOMAIN, TAG, 'canvas from preview: %{public}dx%{public}d (was %{public}dx%{public}d)',
+                w, h, this.canvasW, this.canvasH);
+            }
             this.canvasW = w;
             this.canvasH = h;
             // ② 第五十八轮：固定栏偏移改走 chromeSampleOf 自洽采样。
@@ -10373,6 +10390,9 @@ struct Index {
         return;
       }
       const changed: boolean = (rw !== this.lastRootW) || (rh !== this.lastRootH);
+      // 第九十三轮：先留下「上一次的根尺寸」，后面判「画布缩小是否与根同幅」时要用。
+      const prevRootW: number = this.lastRootW;
+      const prevRootH: number = this.lastRootH;
       this.lastRootW = rw;
       this.lastRootH = rh;
       if (changed) {
@@ -10408,6 +10428,12 @@ struct Index {
       if (!changed || this.chromeW < 0 || this.chromeH < 0) {
         return; // 基准未就绪（首帧 / 刚进出全屏），等预览 Stack 那边重建
       }
+      // 第九十三轮：信任窗内一律不反推。预览 Stack 的 onAreaChange 才是实测真值；
+      // 这段时间（进出全屏后 1.5s）正是 root / preview 错帧的高发期。
+      if (Date.now() < this.canvasRootTrustUntil) {
+        hilog.info(DOMAIN, TAG, 'canvas resize: trust window, skip root-derived');
+        return;
+      }
       const box: Size2 = canvasFromRootOf(rw, rh, this.chromeW, this.chromeH);
       if (box.w <= 0 || box.h <= 0 || (box.w === this.canvasW && box.h === this.canvasH)) {
         return; // 预览 Stack 已经报过同样的尺寸，别重复触发重解
@@ -10418,6 +10444,22 @@ struct Index {
       if (!canvasResizeAcceptOf(rw, rh, box.w, box.h, CANVAS_MIN_ROOT_RATIO)) {
         hilog.info(DOMAIN, TAG, 'canvas resize: reject shrunk box %{public}d×%{public}d vs root %{public}d×%{public}d',
           box.w, box.h, rw, rh);
+        return;
+      }
+      // 第九十三轮：**画布缩小必须与根容器同幅**，否则判为跨帧错配污染。
+      //   · 合法场景：用户把窗口拖小 → 根与画布一起变小，两者差值 ≈ chrome，应该接受；
+      //   · 污染场景：根尺寸没变（或只变一点），反推的画布却小了 20×37vp —— 这正是
+      //     「只有预览图片变小、其余布局没动」的成因（容器由布局决定，图片尺寸却读画布）。
+      const dRootW: number = rw - prevRootW;
+      const dRootH: number = rh - prevRootH;
+      const dBoxW: number = box.w - this.canvasW;
+      const dBoxH: number = box.h - this.canvasH;
+      const shrinkOkW: boolean = dBoxW >= 0 || Math.abs(dBoxW - dRootW) <= CANVAS_SHRINK_TOL_VP;
+      const shrinkOkH: boolean = dBoxH >= 0 || Math.abs(dBoxH - dRootH) <= CANVAS_SHRINK_TOL_VP;
+      if (!shrinkOkW || !shrinkOkH) {
+        hilog.info(DOMAIN, TAG,
+          'canvas resize: reject unmatched shrink box=%{public}dx%{public}d keep=%{public}dx%{public}d dRoot=%{public}dx%{public}d',
+          box.w, box.h, this.canvasW, this.canvasH, dRootW, dRootH);
         return;
       }
       this.canvasW = box.w;
