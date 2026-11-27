@@ -167,6 +167,41 @@ export interface FullExitView {
   restored: boolean;
 }
 
+/** 第八十九轮：状态栏「缩放提示」的统一后缀（退出全屏时补一次）。 */
+export const ZOOM_NOTE_HEAD: string = ' · 缩放 ';
+
+/**
+ * 第八十九轮：剥掉状态栏末尾的「· 缩放 N %」提示。
+ *
+ *  为什么需要：退出全屏时会把「· 缩放 P%」补进状态栏，而下次进入全屏又会把当前 status
+ *  存成 `preFullStatus`。不剥的话每往返一次就多叠一段，状态栏会变成
+ *  「第 1–2 / 5 张 · 缩放 100 % · 缩放 100 % …」。这里只剥「末尾且形如 N% / N.N%」的那段，
+ *  其它正常文案（含「缩放」字样但后面不是百分比）一律原样返回。
+ */
+export function stripZoomNoteOf(text: string): string {
+  const i: number = text.lastIndexOf(ZOOM_NOTE_HEAD);
+  if (i < 0) {
+    return text;
+  }
+  const tail: string = text.substring(i + ZOOM_NOTE_HEAD.length).trim();
+  if (tail.length < 2 || tail.charAt(tail.length - 1) !== '%') {
+    return text;
+  }
+  // 去掉末尾 % 后再 trim：`zoomPercentText()` 给的是「96.5 %」这种带空格的写法。
+  const num: string = tail.substring(0, tail.length - 1).trim();
+  if (num.length === 0) {
+    return text;
+  }
+  for (let k = 0; k < num.length; k++) {
+    const c: string = num.charAt(k);
+    if (c === '.' || (c >= '0' && c <= '9')) {
+      continue;
+    }
+    return text;
+  }
+  return text.substring(0, i);
+}
+
 /**
  * 第八十八轮：退出全屏的缩放 / 平移恢复 —— 纯函数真值源。
  *
