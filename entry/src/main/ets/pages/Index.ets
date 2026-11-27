@@ -271,7 +271,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R104';
+const ESC_BUILD_TAG: string = 'R105';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -3048,7 +3048,7 @@ struct Index {
     const label: string = baseName(base);
     const rows: ImageItem[] = [];
     // 第一百零四轮：原来的「..」往上层伪行已按要求整行移除（含它占的那一行高度）。
-    // 往上层仍有两个入口：工具行「⇧」按钮 与 键盘 Backspace（→ browseUp()）。
+    // 往上层仍有两个入口：工具行「←」按钮 与 键盘 Backspace（→ browseUp()）。
     for (let i = 0; i < this.upDirCache.length; i++) {
       const snap: UpDirSnapshot = this.upDirCache[i];
       if (!sameDirPath(snap.path, base)) {
@@ -7707,7 +7707,7 @@ struct Index {
       const rows: ImageItem[] = [];
       // 第一百零四轮：首行的「..」往上层伪行整行移除 —— 列表第一行就是真正的目录 / 图片，
       // 三按钮与列表之间不再有那两枚小点占着的空行。往上层入口保留：
-      // 工具行「⇧」与键盘 Backspace 都走 browseUp()（到卷根给「没有父级了」提示）。
+      // 工具行「←」与键盘 Backspace 都走 browseUp()（到卷根给「没有父级了」提示）。
       for (let i = 0; i < dirs.length; i++) {
         rows.push(dirs[i]);
       }
@@ -7981,7 +7981,7 @@ struct Index {
         break;
       case 'up':
         // 2026-11-11：按钮**永不禁用**，任何状态都能点进来。
-        // 第一百零四轮起只剩两条入口：工具行「⇧」按钮 与 键盘退格（'..' 行已移除），
+        // 第一百零四轮起只剩两条入口：工具行「←」按钮 与 键盘退格（'..' 行已移除），
         // 两条都收口 browseUp()，由 upNavStateOf 分派（上移 / 到顶提示 / 图片列表提示 /
         // URI 层级判不出的兜底），结论一致。
         this.browseUp();

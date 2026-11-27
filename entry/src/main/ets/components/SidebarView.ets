@@ -5,7 +5,9 @@
  *    · 工具行（第七十八轮起三个纯图案按钮）→ 空态 / LazyForEach 档案列表
  *    （ArchiveRow 行 + 悬停缩略图）
  *  第一百零二/一百零三轮：顶部「来源 + 档案张数」标题行整块移除，三按钮即左栏第一行。
- *  第一百零四轮：列表首行的「..」往上层伪行也一并移除，往上层走「⇧」按钮 / 键盘退格。
+ *  第一百零四轮：列表首行的「..」往上层伪行也一并移除，往上层走「←」按钮 / 键盘退格。
+ *  第一百零五轮：往上层按钮的图案由「⇧」换成「←」（同一字体 / 同一字号 / 同一颜色，
+ *  与排序的 ↑ / ↓ 属于同一套箭头语言），位置、尺寸、交互一字未改。
  *  第七十八轮：dirHint 提示条随「APP 内上层xxx」提醒一并移除；缩进按钮按下时
  *  左栏切紧凑显示，只留档案名 / 目录名，隐藏全部非名称信息，栏宽按可见内容自适应。
  *  状态仍归 pages/Index.ets（Phase 3 约定）：本组件只收 @Prop 快照 + 回调上抛，
@@ -134,7 +136,8 @@ export struct SidebarView {
 
       // 第七十八轮：三个按钮统一改为「仅图案标识、零文字标签」。
       //  · 排序：'↑' / '↓' 随 sortAsc 切换，方向本身即状态；降序再叠加 active 高亮底色。
-      //  · 往上层：'⇧' 层级上移图案；选择文件夹：'▣' 清晰几何 / 文件夹格图案。
+      //  · 往上层：'←' 左向箭头（= 退回上一层；与排序的 ↑ / ↓ 同字体同字号，线条风格一致）；
+      //    选择文件夹：'▣' 清晰几何 / 文件夹格图案。
       //  · SideToolButton 逐字沿用旧 ToolButton 的 height(30) / padding / margin /
       //    layoutWeight(1) 三等分 / borderRadius，点击区域大小与位置完全不变；
       //    功能仍由 act → doAction('sort' / 'up' / 'folder') 收口，恒亮恒可点。
@@ -144,7 +147,7 @@ export struct SidebarView {
           active: !this.sortAsc, onAction: this.onAction })
         // 「往上层」恒亮恒可点（2026-11-11：不要 grey out、不能禁用）。
         // canGoUp 只用于状态栏 / 诊断串 / browseUp 行为判据，不传进按钮。
-        SideToolButton({ glyph: '⇧', act: 'up', flex: true, onAction: this.onAction })
+        SideToolButton({ glyph: '←', act: 'up', flex: true, onAction: this.onAction })
         SideToolButton({ glyph: '▣', act: 'folder', flex: true, onAction: this.onAction })
       }
       .width('100%')
