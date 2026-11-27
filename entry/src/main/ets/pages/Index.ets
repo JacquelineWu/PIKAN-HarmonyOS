@@ -260,7 +260,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R97';
+const ESC_BUILD_TAG: string = 'R98';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1328,6 +1328,14 @@ struct Index {
   @State slideOutOpacity: number = 0;
   /** 是否处于叠显期（纯逻辑标志，不参与渲染条件 → 不做 @State，少一次刷新）。 */
   private slideBlending: boolean = false;
+  /** 第九十八轮：**进入幻灯片那一刻「是否并排」的快照**。
+   *
+   *  播放期间视图形态一律以它为准（`true` → 全程并排、`false` → 全程单张），
+   *  这样「进入前什么样，播放中就什么样」——既不会被单片默认状态压掉，
+   *  也不会在下一张是横图时又自己跳回单张（那是另一种「强制跳转」）。
+   *  不播放时它完全不起作用（`spreadShown()` / `refreshSpread()` 只在 playing 分支读它），
+   *  所以「单张模式单独使用」的行为一个字节都没变。 */
+  private slideSpreadHold: boolean = false;
   /** 淡出那张是否是「我们自己解码 / 自己精炼」的（结束时必须 release）；
    *  命中预载缓存的那张归缓存所有，绝不能在这里释放。 */
   private slideOutOwned: boolean = false;
@@ -4123,15 +4131,15 @@ struct Index {
 
   /** 当前是否处于并排（对开）渲染：左页 builder 的 `half` 与它同义。
    *
-   *  第九十六轮：幻灯片默认**单张**（每次仅展示一张）；
-   *  第九十七轮：**用户显式选了「左右并排预览」（PM_MODE_SPREAD）就保留并排**，
-   *  绝不再被播放态强行压成单页 —— 是否单张只由 `previewMode` 决定：
-   *   · `PM_MODE_SPREAD` → 播放中照常并排（右页随每张一起换）；
-   *   · `PM_MODE_SINGLE` / `PM_MODE_AUTO` → 播放中单张（R96 默认行为不变）。
-   *  停止播放后仍按 `previewMode` 恢复，不动用户偏好。 */
+   *  第九十八轮：**播放期间不再用 `playing` 去改视图形态**，而是用进入那一刻的快照
+   *  `slideSpreadHold`（原因见字段注释）：
+   *   · 进入前是并排 → 播放中一路并排（下一张是横图也不塌成单张）；
+   *   · 进入前是单张（含 AUTO 下的横图）→ 播放中一路单张；
+   *   · 不在播放 → 完全按 `previewMode` / 自动判据走，与本轮之前一模一样。
+   *  R96 的「按播放态强推单张」正是「从其它状态进入就自动跳成单片」的病根，已删除。 */
   private spreadShown(): boolean {
-    if (this.playing && this.previewMode !== PM_MODE_SPREAD) {
-      return false;
+    if (this.playing) {
+      return this.slideSpreadHold && this.spreadB >= 0 && this.spreadB < this.items.length;
     }
     return this.spreadB >= 0 && this.spreadB < this.items.length;
   }
@@ -5367,11 +5375,22 @@ struct Index {
       this.status = '先打开图片再播放幻灯片';
       return;
     }
+    // 第九十八轮：从「文本 / 源码预览」页进来时先退回图片视图。
+    // 否则 go() 在 textMode 下走的是「滚动文本」分支，幻灯片的 go(1) 只会滚文字、画面永远不动
+    // —— 这正是「从其他页面进入幻灯片」时的另一种异常表现。
+    if (this.textMode) {
+      this.closeTextMode();
+    }
+    // 第九十八轮：**先把进入前的视图形态抓成快照**（并排 or 单张），再翻 playing。
+    // 注意顺序：必须在 playing=true 之前读，否则读到的是「播放期」的判据而不是用户眼前的形态。
+    // 依据是「当前真正显示出来的是什么」，所以直接看 spreadB（render 真实依据），
+    // 不看 previewMode —— AUTO 下竖图对开时 spreadB 同样是有效下标。
+    this.slideSpreadHold = this.spreadB >= 0 && this.spreadB < this.items.length;
     this.playing = true;
-    // 第九十六轮：单张播放 —— 立刻把并排收成单页（判据在 refreshSpread / spreadShown 两处，
-    // 这里主动重算一次，保证「按下播放」的那一刻右页就消失，而不是等下一次翻页）。
+    // 快照已定，这里重算只是把配对/右页按快照对齐（不会再出现「一进播放就塌成单片」）。
     this.refreshSpread();
-    this.status = '幻灯片播放中（每 ' + (SLIDE_INTERVAL / 1000) + ' 秒切换 · 淡入淡出）';
+    this.status = '幻灯片播放中（每 ' + (SLIDE_INTERVAL / 1000) + ' 秒切换 · 淡入淡出 · ' +
+      (this.slideSpreadHold ? '并排' : '单张') + '）';
     this.timerId = setInterval(() => {
       this.slideAdvance();
     }, SLIDE_INTERVAL);
@@ -7028,10 +7047,11 @@ struct Index {
    *  本函数只负责取左图尺寸、维护 spreadB 与右页解码链；既有翻页步长 go(±1)、
    *  右页解码 / 重试、放大镜、文本预览、目录恢复全部不动。 */
   private refreshSpread(): void {
-    // 第九十六轮：幻灯片默认单张 —— 干脆不发起右页解码（省一次解码与内存）。
-    // 第九十七轮：但**显式并排（PM_MODE_SPREAD）不受播放态影响** —— 用户选了并排就继续并排，
-    // 这里必须放行到下面的正常判据（含右页解码），否则「播放中并排」名存实亡。
-    if (this.playing && this.previewMode !== PM_MODE_SPREAD) {
+    // 第九十八轮：播放期间**按进入时的快照**决定要不要配对，不再看 playing 一律收单页。
+    //  · 快照为「并排」→ 继续走正常配对（下面把模式临时当 SPREAD 用，横图也保持并排）；
+    //  · 快照为「单张」→ 收单页，连右页解码都不发起。
+    // 之所以在这里判而不只靠 spreadShown()：右页要不要解码也必须一致，否则并排时会缺半页。
+    if (this.playing && !this.slideSpreadHold) {
       this.spreadB = -1;
       this.clearRightPage();
       return;
@@ -7059,7 +7079,10 @@ struct Index {
     const sz: Size2 = this.leftImageSize(self, seq);
     // 第七十六轮：自动模式原样沿用 R56 判据（零回归）；单张强制关右页；
     // 并排只要有可配对的另一张就强制开右页（尺寸未知也能并排），三者由纯函数统一收口。
-    const wanted: boolean = pmSpreadWantedOf(this.previewMode, hasNext,
+    // 第九十八轮：播放中且快照为并排 → 临时按 SPREAD 口径判（有下一张就并排），
+    // 这样「横图紧随竖图」时也不会突然塌成单页；不播放时仍用用户真实模式，零改动。
+    const pairMode: number = (this.playing && this.slideSpreadHold) ? PM_MODE_SPREAD : this.previewMode;
+    const wanted: boolean = pmSpreadWantedOf(pairMode, hasNext,
       spreadRightWantedOf(sz.w, sz.h, hasNext, SPREAD_PORTRAIT));
     if (!wanted) {
       this.spreadB = -1;
