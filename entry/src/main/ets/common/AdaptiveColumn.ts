@@ -125,6 +125,19 @@ export function acOverheadOf(): number {
   return ROW_GAP_VP * 2 + AC_DATE_GAP_VP + AC_ROW_PAD_VP;
 }
 
+/** 三列**全部完整显示**所需的未夹取总宽（内容长度口径，不含任何窗口上限）。
+ *
+ *  第一百一十轮：从 acLayoutOf 里抽出来单独导出 ——
+ *  左栏被用户拖窄时，「名称还能不能完整显示」要用这条**内容口径**去比，
+ *  而不是比 `sidebarW`（那个值已被窗口上限 cap 夹过，窄窗口下永远比不出差异）。
+ *  纯字符串估宽，零 SDK / 零 IO。 */
+export function acNeedWOf(names: Array<string>, sizeTexts: Array<string>): number {
+  const nameVp: number = acTextWidestOf(names, AC_NAME_FONT_VP);
+  const sizeW: number = acTextWidestOf(sizeTexts, AC_SIZE_FONT_VP);
+  const dateW: number = Math.ceil(textWidthVp(AC_DATE_SAMPLE, AC_DATE_FONT_VP));
+  return nameVp + AC_NAME_SAFETY_VP + sizeW + dateW + acOverheadOf();
+}
+
 /** 依据【内容长度 + 容器尺寸】算出三列与左栏整体宽。
  *  · rootW=0（首帧还没 onAreaChange）→ 纯按内容长度撑开，窗口尺寸到手后再重算；
  *  · 容器变窄 → 先压左栏整体，名称列再由 layoutWeight(1) + Ellipsis 吸收，
@@ -146,7 +159,7 @@ export function acLayoutOf(rootW: number, names: Array<string>,
   const dateW: number = Math.ceil(textWidthVp(AC_DATE_SAMPLE, AC_DATE_FONT_VP));
   const overhead: number = acOverheadOf();
   // 内容长度口径：三列都按本列最长文本撑开（名称再加安全余量，确保实机不截断）。
-  const need: number = nameVp + AC_NAME_SAFETY_VP + sizeW + dateW + overhead;
+  const need: number = acNeedWOf(names, sizeTexts);
   // 容器尺寸口径：只保「预览区最小宽」，不再按比例给左栏留白。
   const cap: number = acSidebarCapOf(rootW);
   const sidebarW: number = cap > 0 && need > cap ? cap : need;

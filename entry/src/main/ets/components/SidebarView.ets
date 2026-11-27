@@ -56,8 +56,10 @@ export struct SidebarView {
   @Prop collapsedW: number = 0;
   @Prop colSizeW: number = 0;
   @Prop colDateW: number = 0;
-  /** 第七十九轮：名称列放不下完整名称时改多行换行（逐行共用同一判定）。 */
-  @Prop nameWrap: boolean = false;
+  /** 第七十九轮：名称列放不下完整名称时改多行换行（逐行共用同一判定）。
+   *  第一百一十轮：多行换行整条移除（名称严格单行 + 截断），此处改为
+   *  「空间不足时自动隐藏大小 / 日期两列」的自适应降级标志。 */
+  @Prop hideMeta: boolean = false;
   /** 第六十四轮：与 Index 的 rows 同下标的目录内容量文案（非目录行为空串）。
    *  @Prop 数组每次整份换新引用；读它的方法同时读 dirCountVersion 建立 V1 依赖。 */
   @Prop dirCountLabels: Array<string> = [];
@@ -116,7 +118,8 @@ export struct SidebarView {
       colSizeW: this.colSizeW,
       colDateW: this.colDateW,
       // 第七十九轮：名称完整优先 —— 放不下时整列改多行换行，不用 Ellipsis 截断。
-      nameWrap: this.nameWrap,
+      // 第一百一十轮：改为「宽度不足 → 隐藏大小 / 日期两列」，名称严格单行截断。
+      hideMeta: this.hideMeta,
       thumbDisabled: this.restoreReadonly(),
       onTap: (i: number) => {
         this.onRowTap(i);

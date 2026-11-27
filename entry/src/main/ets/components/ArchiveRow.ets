@@ -235,8 +235,10 @@ export struct ArchiveRow {
    *  不参与 cur / select() / onRowTap / 目录切换，只由 SidebarView 按名字 + 行种类算出。 */
   @Prop inverted: boolean = false;
   @Prop collapsed: boolean = false;  // 收起左栏时只留档案名一列
-  /** 第七十九轮：名称列放不下完整名称时改多行换行（Clip），不再用 Ellipsis 截断。 */
-  @Prop nameWrap: boolean = false;
+  /** 第一百一十轮：空间不足时**自动隐藏大小 / 日期两列**（左栏被拖窄时由 Index 判定下传）。
+   *  与 collapsed 的区别：collapsed 是用户主动「收起」，本标志是「宽度不够」的自适应降级 ——
+   *  两者都只留档案名一列，但触发原因与恢复条件不同。 */
+  @Prop hideMeta: boolean = false;
   /** 第七十七轮：大小 / 内容数目列与日期列的 adaptive 动态宽（Index → SidebarView → 本行）。
    *  不再有 .width(66) / .width(88) 之类的预设固定宽度；0 表示首帧容器尺寸还没到手，
    *  由 ArkUI 按内容自适应，onAreaChange 后立刻换成动态计算值。 */
@@ -405,18 +407,23 @@ export struct ArchiveRow {
       // 内容超出「窗口可用宽」（nameWrap=true）时改多行换行 + Clip，绝不 Ellipsis 截断。
       // 行高锚点由 .height(26) 改为 constraintSize({ minHeight: 26 })：单行仍是 26vp
       // （与原值等价），多行时随行数自然增高，不会被固定高度裁掉。
+      // ⚠️ 第一百一十轮改回**严格单行 + Ellipsis 截断**：用户明确要求「不得换行，
+      //    超出空间时以截断方式显示，确保布局稳定」—— 多行会让行高参差、列表跳动，
+      //    所以 R79/R80 的换行路径整条移除（连同 nameWrap 标志与 99 行上限）。
       Text(this.name)
         .fontSize(12)
         .fontColor(this.labelColor())
-        .maxLines(this.nameWrap ? 99 : 1)
-        .textOverflow({ overflow: this.nameWrap ? TextOverflow.Clip : TextOverflow.Ellipsis })
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
         // 第七十七轮：移除名称列按内容估宽写死的 minWidth 预设宽度兜底。
         // 名称列纯由 layoutWeight(1) 弹性吸收剩余空间；左栏整体宽 / 收起宽 /
         // 另外两列宽都由 acLayoutOf 按内容 + 容器动态推出（R80 起不再比例夹逼）。
         .layoutWeight(1)
-        .constraintSize({ minHeight: 26 })   // R75 行高锚点原值 26；R80 改 minHeight 以容纳换行
+        .constraintSize({ minHeight: 26 })   // 行高锚点：单行恒 26vp，与换行路径删除前一致
 
       // 三栏的另外两栏：字节 / 日期（Win64 30599ac）。收起时隐藏。
+      // 第一百一十轮：**宽度不够也隐藏** —— 名称放不下完整内容时（hideMeta），
+      // 把两列整块让给名称，避免「三列都被挤成省略号」；名称仍超宽则单行截断。
       // 第六十四轮：目录行在既有「字节」列位改画内容量统计结果 —— 同字号 10 /
       // 同颜色 / 同为 adaptive 动态宽 / 同右对齐，不新增列、不改行高、不改三栏起始位置。
       // 非目录行（图片 / 文本 / 灰行 / 上层）的 fmtBytes 链路逐字保留，交互零回归。
@@ -424,7 +431,7 @@ export struct ArchiveRow {
       // 各加 5mm（= ROW_GAP_VP = 5vp）间距，两处共用同一常量保证严格一致（间距不是列宽，
       // 第七十七轮移除固定列宽时逐字保留）；
       // 日期列既有 .margin({ left: 6 })、字段、数据展示、点击 / 双击 / hover / 条纹全部不变。
-      if (!this.collapsed) {
+      if (!this.collapsed && !this.hideMeta) {
         if (this.kind === ROW_FOLDER) {
           Text(this.countText.length > 0 ? this.countText : DC_LABEL_PENDING)
             .fontSize(10)

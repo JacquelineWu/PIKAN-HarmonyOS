@@ -141,3 +141,16 @@ export function splitResetOf(): number {
 export function splitActiveOf(dragging: boolean, hover: boolean): boolean {
   return dragging === true || hover === true;
 }
+
+/** 第一百一十轮：当前左栏宽放不下「名称 + 大小 + 日期」全部完整显示时，
+ *  是否该把大小 / 日期两列**自动隐藏**，把整个宽度让给档案名 / 目录名。
+ *
+ *  `needW` 是内容口径的未夹取总宽（`acNeedWOf`）：只要当前宽比它小，
+ *  名称列就一定会被两列挤到截断 —— 与其让三列一起糊，不如直接收起两列。
+ *  纯比较，脏值一律 false（宁可三列都在，也不要凭脏数据把信息藏掉）。 */
+export function splitHideMetaOf(w: number, needW: number): boolean {
+  if (!splitFiniteOf(w) || !splitFiniteOf(needW) || w <= 0 || needW <= 0) {
+    return false;
+  }
+  return w < needW;
+}
