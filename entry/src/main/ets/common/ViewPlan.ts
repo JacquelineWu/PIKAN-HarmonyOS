@@ -143,6 +143,19 @@ export function shouldReloadOnResize(oldW: number, oldH: number, newW: number,
   return Math.abs(newW - oldW) >= d || Math.abs(newH - oldH) >= d;
 }
 
+/** 第八十二轮：退出全屏时是否要「重新适配普通容器 + 居中」。
+ *
+ *  用户口径（2026-11-27 确认）：从全屏切回普通模式，图片**再次按普通模式的容器尺寸
+ *  自动缩放并居中**。即进全屏 `fitToWindow()`、退出全屏也 `fitToWindow()`，
+ *  切换前后都呈「按容器铺满 + 居中」，不会因为恢复旧倍率而出现
+ *  「退出后图片尺寸没跟上普通窗口」的观感。
+ *
+ *  纯判据，便于回归：只有「全屏 → 普通」这一个下降沿为 true。
+ *  刻意不做「是否曾手动缩放」的分支 —— 用户要的是稳定的适配态，不是历史位置。 */
+export function fitOnFullExit(prevFull: boolean, on: boolean): boolean {
+  return prevFull && !on;
+}
+
 /** 全屏态下画布相对「全屏基准尺寸」明显缩小 → 判定系统已自行退出沉浸。
  *
  *  真全屏（ENTER_IMMERSIVE_DISABLE_TITLE_AND_DOCK_HOVER）下 ESC 常被窗口管理器先消费，
