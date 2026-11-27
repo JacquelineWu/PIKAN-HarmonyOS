@@ -100,7 +100,8 @@ import { PERSIST_SKIP, persistAction, persistPolicyUris,
 import { Size2, viewEdgeOf, preloadEdgeOf,
   displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, fitOnFullExit, canvasFromRootOf,
   isWideGamutOf, fullscreenStepsOf, spreadRightWantedOf,
-  chromeSampleOf, canvasResizeAcceptOf } from '../common/ViewPlan';
+  chromeSampleOf, canvasResizeAcceptOf,
+  spreadPairIndexOf, spreadPairOkOf, spreadPageTextOf } from '../common/ViewPlan';
 // 第八十六轮：并排（对开）等比适配的唯一真值源（统一高度 + 各自原始比例 + 中间零间隙）。
 import { SpreadFit, spreadFitOf, spreadAspectOf } from '../common/SpreadFit';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
@@ -248,7 +249,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R86';
+const ESC_BUILD_TAG: string = 'R87';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -5029,17 +5030,12 @@ struct Index {
     }
   }
 
-  /** 状态栏页码：对开双页时显示「第 1–2 / N 张」，单页时「第 1 / N 张」 */
+  /** 状态栏页码：对开双页时「第 1–2 / N 张」，单页时「第 1 / N 张」。
+   *  第八十七轮：首尾相接那一对显示「第 N–1 / N 张 · 首尾相接」——
+   *  右页序号小于左页是正常现象（环形配对），必须显式标注，否则用户会误读成
+   *  「翻页回退了」或「排序乱了」。文案收口在纯函数 `spreadPageTextOf`。 */
   private pageLabel(): string {
-    const n: number = this.items.length;
-    if (n <= 0 || this.cur < 0) {
-      return '还没有图片';
-    }
-    const b: number = this.spreadRight();
-    if (b >= 0) {
-      return '第 ' + (this.cur + 1) + '–' + (b + 1) + ' / ' + n + ' 张';
-    }
-    return '第 ' + (this.cur + 1) + ' / ' + n + ' 张';
+    return spreadPageTextOf(this.cur, this.spreadRight(), this.items.length);
   }
 
   /** 点左栏某一行：按行的种类分发（图片 / 上级 / 子文件夹 / 文本 / 不支持预览的文件）。
@@ -6644,11 +6640,17 @@ struct Index {
   }
 
   /** 重算对开配对（第五十六轮）：**以左侧图片比例为准**。
-   *   · 左图 portrait（h>w）→ 只要还有下一张，就保留右侧预览图并显示在右侧；
+   *   · 左图 portrait（h>w）→ 只要还有可配对的另一张，就保留右侧预览图并显示在右侧；
    *     右图是 landscape / portrait / square 一律不参与判断。
    *   · 左图 landscape / square / 尺寸未知 → 不显示右页，仅将左图置于中间（单页居中）。
    *
-   *  真值源是 ViewPlan.spreadRightWantedOf()（签名刻意不接收右图形态参数）。
+   *  第八十七轮：右页下标改为**环形配对**（`spreadPairIndexOf`）——
+   *    · 最后一张与第一张配对（`cur = n-1` → 右页 `0`），边界处仍是完整并排，不空白、不塌成单页；
+   *    · 与 `go()` 的环形翻页 `((cur+delta)%n+n)%n` 同口径，翻页方向一直向前，不会在末尾「卡住」；
+   *    · 单张 / 两页同 uri（重复条目）/ 非法下标 ⇒ 判为无右页，退回单页（避免同一张图左右各画一次）。
+   *
+   *  真值源是 ViewPlan.spreadRightWantedOf()（签名刻意不接收右图形态参数）
+   *  与第八十七轮新增的 spreadPairIndexOf / spreadPairOkOf。
    *  本函数只负责取左图尺寸、维护 spreadB 与右页解码链；既有翻页步长 go(±1)、
    *  右页解码 / 重试、放大镜、文本预览、目录恢复全部不动。 */
   private refreshSpread(): void {
@@ -6665,10 +6667,16 @@ struct Index {
     }
     const seq: number = ++this.spreadSeq;
     const self: string = this.items[this.cur].uri;
-    const hasNext: boolean = (this.cur + 1) < this.items.length;
+    // 第八十七轮：右页下标改为**环形配对** —— 最后一张与第一张配对（与 go() 的环形翻页同口径）。
+    // 单张 / 同 uri 重复条目 / 非法下标由纯函数判为「没有可配对的右页」⇒ 退回单页，
+    // 绝不让「同一张图左右各画一次」这种衔接异常出现。
+    const pair: number = spreadPairIndexOf(this.cur, this.items.length);
+    const sameUri: boolean = pair >= 0 && this.items[pair].uri === self;
+    const paired: boolean = spreadPairOkOf(this.cur, pair, this.items.length, sameUri);
+    const hasNext: boolean = paired;
     const sz: Size2 = this.leftImageSize(self, seq);
     // 第七十六轮：自动模式原样沿用 R56 判据（零回归）；单张强制关右页；
-    // 并排只要有下一张就强制开右页（尺寸未知也能并排），三者由纯函数统一收口。
+    // 并排只要有可配对的另一张就强制开右页（尺寸未知也能并排），三者由纯函数统一收口。
     const wanted: boolean = pmSpreadWantedOf(this.previewMode, hasNext,
       spreadRightWantedOf(sz.w, sz.h, hasNext, SPREAD_PORTRAIT));
     if (!wanted) {
@@ -6676,7 +6684,7 @@ struct Index {
       this.clearRightPage();
       return;
     }
-    this.spreadB = this.cur + 1;
+    this.spreadB = pair;
     this.loadRightPage(this.items[this.spreadB].uri);
   }
 

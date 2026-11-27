@@ -273,6 +273,74 @@ export function spreadRightWantedOf(leftW: number, leftH: number,
   return imageOrientationOf(leftW, leftH) === ORIENT_PORTRAIT;
 }
 
+// ==================== 第八十七轮：并排边界「首尾相接」====================
+
+/** 没有可配对的右页（单张 / 下标非法）。 */
+export const SPREAD_PAIR_NONE: number = -1;
+
+/**
+ * 第八十七轮：并排右页的下标 —— **环形配对**。
+ *
+ *  用户规格：翻到最后一张时，把它与**第一张**配对，边界处仍要能看到完整并排，
+ *  不出现空白 / 错位 / 衔接异常。
+ *
+ *  预期行为（与既有环形翻页 `go()` 的口径一致：`((cur+delta)%n+n)%n`）：
+ *    · n ≥ 2 → 右页 = `(cur + 1) % n`；因此 `cur = n-1` 时右页 = `0`（首尾相接）；
+ *    · n = 1 → 返回 `SPREAD_PAIR_NONE`：**绝不与自身配对**（否则同一张图左右各画一次，
+ *      既是明显的错位，也会让放大镜 / 缩放百分比拿到两份互不同步的同一图源）；
+ *    · cur 非法（<0 或 ≥n）→ NONE。
+ *
+ *  注意：本函数只回答「下标是谁」，**是否真的并排**仍由 `spreadRightWantedOf`
+ *  （左图竖图 + 全局开关）与 `pmSpreadWantedOf`（预览模式）决定，两者语义不变。
+ */
+export function spreadPairIndexOf(cur: number, n: number): number {
+  if (!(n >= 2) || cur < 0 || cur >= n) {
+    return SPREAD_PAIR_NONE;
+  }
+  return (cur + 1) % n;
+}
+
+/**
+ * 第八十七轮：该配对是否可用 —— 最后一道去重护栏。
+ *
+ *  `n ≥ 2` 仍可能是「两个条目指向同一个 uri」（重复条目 / 同一文件被列两次）。
+ *  此时若照常并排，屏幕上会出现**左右两张一模一样的图**，用户看到的就是「循环衔接异常」。
+ *  故：下标非法 / 等于左页 / 同 uri 一律判不可用 ⇒ 退回单页。
+ */
+export function spreadPairOkOf(cur: number, right: number,
+  n: number, sameUri: boolean): boolean {
+  if (right === SPREAD_PAIR_NONE || right < 0 || right >= n) {
+    return false;
+  }
+  if (right === cur) {
+    return false;
+  }
+  return sameUri !== true;
+}
+
+/** 第八十七轮：该配对是否为「首尾相接」。
+ *  严格判据：**最后一张（cur = n-1）配第一张（right = 0）** —— 不用「right < cur」这种宽松比较，
+ *  那只会在非法配对下也误报，进而把普通页码错标成「首尾相接」。 */
+export function spreadIsWrappedOf(cur: number, right: number, n: number): boolean {
+  return n >= 2 && cur === (n - 1) && right === 0;
+}
+
+/**
+ * 第八十七轮：状态栏页码文案 —— 首尾相接时显式标注，避免用户把「第 N–1 张」
+ * 误读成翻页回退或排序错乱。纯函数，便于 Node 回归（含 n=1 / 非法下标）。
+ */
+export function spreadPageTextOf(cur: number, right: number, n: number): string {
+  if (n <= 0 || cur < 0 || cur >= n) {
+    return '还没有图片';
+  }
+  if (right < 0 || right >= n || right === cur) {
+    return '第 ' + (cur + 1) + ' / ' + n + ' 张';
+  }
+  const pair: string = '第 ' + (cur + 1) + '–' + (right + 1) + ' / ' + n + ' 张';
+  return spreadIsWrappedOf(cur, right, n) ? (pair + ' · 首尾相接') : pair;
+}
+
+
 /** 窗口级真全屏的步骤名（只喂 hilog 与静态契约测试，方便实机对照跑到哪一步）。
  *
  *  2026-11-11 ESC 修复：退出时不只要「恢复系统栏」，还得**撤销进入时设下的沉浸最大化形态**，
