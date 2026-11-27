@@ -29,7 +29,8 @@
  *     第七轮起**左键单击不再放大**，双击画布 = 进入 / 退出全屏
  *   · 全屏：F11 / 双击进入，Esc / F11 / 双击退出；隐藏应用两块栏 + 状态栏 +
  *     隐藏系统状态栏/导航栏，画布铺满屏幕（保留原行为，第九十四轮未改）
- *   · 键盘：← → 翻页，↑ ↓ 缩放，空格 幻灯片，R 旋转，F 1:1，0 复位，Esc 关闭应用
+ *   · 键盘：← → 翻页，空格 幻灯片，R 旋转，**F 切换全屏**，1 = 1:1，0 复位，Esc 关闭应用
+ *           （第九十五轮：F 从「1:1」改为「切换全屏」，1:1 移到数字键 1；F11 / 双击仍进全屏）
  *   · 快速：缩略图随 List 虚拟化懒加载，仅可见项参与解码
  *   · 后台预载：载入时把整库按「可直接显示」档位解码成 PixelMap 并缓存复用；
  *     解码数据按 uri 复用 + 在途合并（同一张不重复解），滚轮切图只查缓存、零解码
@@ -141,7 +142,8 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   loupePixelAlignOf, loupeResampleStableOf,
   LOUPE_AA_ENABLED, LOUPE_QA_HIGH, loupeDensityRatioOf, loupeQualityTierOf,
   loupeResampleEdge2Of, loupeResampleGainOf,
-  windowStatusIsFullscreen, shouldSyncFullFromWindow } from '../common/InteractionPlan';
+  windowStatusIsFullscreen, shouldSyncFullFromWindow,
+  fullKeyEligibleOf, fullToggleAllowedOf } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
 // 第二十三轮：多模输入服务按键订阅（系统级通道，不经 ArkUI 焦点 / 组件分发）。
 // InputKeyEvent 与 ArkUI 全局 KeyEvent 同名不同型，必须起别名，否则 Callback 类型不匹配。
@@ -256,7 +258,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R94';
+const ESC_BUILD_TAG: string = 'R95';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -382,6 +384,13 @@ const CANVAS_ROOT_TRUST_MS: number = 1500;
 const CANVAS_SHRINK_TOL_VP: number = 2;
 /** 第九十一轮：退出全屏后第二次画布采样的延迟（晚于 260ms 的落定、早于用户感知「稳定」）。 */
 const FULL_EXIT_SAMPLE_MS: number = 1500;
+/** 第九十五轮：F 键切换全屏的连按去抖窗口（ms）。
+ *  按住 F 时系统会连发 Down（每次都是新 KeyEvent 对象，跨通道同对象去重拦不住），
+ *  而 setFull 里的窗口 API 是异步的 —— 没有这层会把全屏刷成频闪、并出现
+ *  「状态位已翻、窗口还在过渡」的错位。250ms 既能吃掉连发与同帧双通道回声，
+ *  又不会挡掉用户有意的一下一按。注意：**只有 F 走这个去抖**，
+ *  ESC / F11 / 双击仍立即响应（ESC 最忌讳被吞）。 */
+const FULL_TOGGLE_GUARD_MS: number = 250;
 /** 第十四轮：预览图放大镜 —— 直径由 3cm 翻倍到 6cm（1vp = 1/160 inch，故约 378vp）、
  *  局部放大仍是 3 倍。直径取 InteractionPlan.LOUPE_CM_14 单一真值来源，避免魔数漂移。
  *  左右并排两页各挂一层、按 pane 独立判定；全屏态同样保留；模式切换时统一复位。
@@ -1424,6 +1433,8 @@ struct Index {
    *  （APP 靠自愈被动同步）时置位，由任意一次 ESC 消费后即清零。第十六轮用 400ms
    *  时间窗判「补发」会误吞用户主动的第二次 ESC，故改为按来源置位的一次性布尔。 */
   private pendingSystemEcho: boolean = false;
+  /** 第九十五轮：上一次「真正生效的 F」的时间戳（0 = 还没按过）。仅 F 用，ESC / F11 不共用。 */
+  private lastFullToggleAt: number = 0;
   /** 最近一次「全屏→普通」退出的时刻（仅日志 / 诊断；第十八轮起不再参与 ESC
    *  分派，避免时间冷却误吞用户主动按键），0 = 从未退出。 */
   private lastFullExitAt: number = 0;
@@ -8666,6 +8677,27 @@ struct Index {
     }
   }
 
+  /** 第九十五轮：此刻是否处于「不该被 F 抢键」的可编辑 / 文本区域。
+   *
+   *  本页**没有输入控件**（全工程零 TextInput / TextArea），唯一有文本、可框选、
+   *  可 Ctrl+C 复制的区域是「文本 / 源码预览态」，所以它在这里等价于「可编辑区域」。
+   *  `textSelDragging` 覆盖「正在拖选文字」的瞬间 —— 拖到一半被切全屏会丢选区。
+   *
+   *  ⚠️ 扩展点：将来若真的加入输入框，只需在该组件的 `.onFocus` / `.onBlur` 里
+   *  维护一个布尔（并入本方法的返回值）—— **按键分支本身不用改**。
+   *  为什么必须判：根容器用的是 onKeyEventDispatch（分发阶段，先于目标组件），
+   *  输入框里敲的 f 同样会先到这里，不判就会「打字打出全屏」。 */
+  private editableAreaOf(): boolean {
+    return this.textMode || this.textSelDragging;
+  }
+
+  /** 第九十五轮：是否有浮层 / 面板正开着。
+   *  全屏切换会整块重建布局（左栏 / 状态栏显隐、画布尺寸、chrome 偏移清零），
+   *  浮层里存的是旧坐标，切完会停在错位上 —— 与其事后纠正，不如这一刻不动。 */
+  private modalOpenOf(): boolean {
+    return this.exifPanelOn || this.ctxDetailOn || this.pmMenuOn;
+  }
+
   private onKey(event: KeyEvent): void {
     // 第二十四轮：ESC 与非 ESC 分开去重（详见字段注释）。核心是 ESC 的去重
     // 只活一次事件循环，绝不跨越到用户主动按下的第二次 ESC。
@@ -8773,7 +8805,31 @@ struct Index {
           this.toggleFlipV();
         }
         break;
-      case KeyCode.KEYCODE_F:
+      case KeyCode.KEYCODE_F: {
+        // 第九十五轮：F / Shift+F 切换全屏。大小写走的是**同一个** KeyCode.KEYCODE_F
+        // （Shift 只改 shiftDown），所以这里刻意不看 shiftDown —— 大小写都生效。
+        // 三道闸门全过才动手，任一不过就跳出：绝不半途改状态、绝不「切一半」。
+        //  ① Ctrl+F：组合键习惯（查找），不接管；
+        //  ② 可编辑区域 / 文本预览 / 浮层打开：不抢键（否则在输入区打个 f 就整屏切走）；
+        //  ③ 连按去抖：按住 F 的连发 Down 只算一次，避免频闪与异步窗口 API 错位。
+        const blocked: boolean = this.editableAreaOf() || this.modalOpenOf();
+        if (!fullKeyEligibleOf(this.ctrlDown, blocked)) {
+          break;
+        }
+        const nowMs: number = Date.now();
+        if (!fullToggleAllowedOf(nowMs, this.lastFullToggleAt, FULL_TOGGLE_GUARD_MS)) {
+          break;
+        }
+        this.lastFullToggleAt = nowMs;
+        // 与 F11 / 双击 / ESC 出口**完全同一个收口** toggleFull() → setFull()：
+        // 进入沿存 zoom/tx/ty + 窗口矩形快照，退出沿由 fullExitViewOf 原样恢复缩放、
+        // restorePreFullRect 还原窗口尺寸与位置 —— 所以「再按一次 F 回到进入前状态」是天然成立的。
+        this.toggleFull();
+        break;
+      }
+      case KeyCode.KEYCODE_1:
+        // 第九十五轮：F 让位给全屏后，**1:1 像素级查看改到数字键 1**（"1 → 1:1" 同形好记）。
+        // 原功能没有删除，只是换了按键；其余缩放入口（Ctrl+滚轮 / 双指捏合 / 0 复位）一律不动。
         this.zoomPixelPerfect();
         break;
       case KeyCode.KEYCODE_0:
@@ -9507,7 +9563,7 @@ struct Index {
                 .fontSize(13)
                 .fontColor('#5a6272')
                 .margin({ top: 12 })
-              Text('双击进入全屏 · 左键放大镜 · 右键相片菜单 · 拖拽平移')
+              Text('双击或 F 进入全屏 · 左键放大镜 · 右键相片菜单 · 拖拽平移')
                 .fontSize(11)
                 .fontColor('#454c5a')
                 .margin({ top: 6 })

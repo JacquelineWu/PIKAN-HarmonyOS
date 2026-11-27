@@ -630,3 +630,53 @@ export function windowStatusIsFullscreen(status: number): boolean {
 export function shouldSyncFullFromWindow(appFull: boolean, winStatusFull: boolean): boolean {
   return appFull && !winStatusFull;
 }
+
+// ==================================================================
+// 第九十五轮：F 键切换全屏 —— 三道闸门（可编辑区 / 修饰键 / 连按去抖）
+// ==================================================================
+
+/**
+ * F 键这一下**是否应该切换全屏**。
+ *
+ * 为什么需要它而不是直接 `toggleFull()`：
+ *  · 根容器用的是 `onKeyEventDispatch`（**分发阶段**，先于目标组件），
+ *    输入框 / 可编辑区域里敲的 `f` 也会先经过它 —— 若不判 `blocked`，
+ *    用户在任何可编辑区域打一个 f 就会整屏切走（本条正是用户明确要求避免的）；
+ *  · `Ctrl+F` 是「查找」的通用习惯，不能顺手把界面切全屏；
+ *  · 大小写 F 走的是**同一个** `KeyCode.KEYCODE_F`（Shift 只改 `shiftDown`），
+ *    所以这里**不看** shift —— F 与 Shift+F 都必须生效。
+ *
+ * @param ctrlDown Ctrl 是否按下（true = 属于组合键，不接管）
+ * @param blocked  可编辑区域 / 文本预览 / 浮层打开等「此刻不该动布局」的场景
+ */
+export function fullKeyEligibleOf(ctrlDown: boolean, blocked: boolean): boolean {
+  if (ctrlDown === true) {
+    return false;
+  }
+  return blocked !== true;
+}
+
+/**
+ * 连按去抖：两次「真正生效的 F」之间至少间隔 `minIntervalMs`。
+ *
+ * 为什么必须有：按住 F 不松时系统会连发 Down（每次都是**新的 KeyEvent 对象**，
+ * 跨通道的「同对象去重」拦不住），没有这层会把全屏开关刷成频闪；
+ * 而 `setFull()` 里的窗口 API 是异步的（maximize / 沉浸 / resize），
+ * 高频重入必然出现「状态位是 on、窗口还在过渡」的错位。
+ *
+ * 首按放行（`lastMs <= 0`）；`minIntervalMs <= 0` 视为不设限；
+ * 任一侧是 NaN 时放行 —— 宁可多切一次，也不要因为脏时间戳把功能锁死。
+ */
+export function fullToggleAllowedOf(nowMs: number, lastMs: number,
+  minIntervalMs: number): boolean {
+  if (minIntervalMs <= 0) {
+    return true;
+  }
+  if (nowMs !== nowMs || lastMs !== lastMs) {
+    return true;
+  }
+  if (lastMs <= 0) {
+    return true;
+  }
+  return (nowMs - lastMs) >= minIntervalMs;
+}
