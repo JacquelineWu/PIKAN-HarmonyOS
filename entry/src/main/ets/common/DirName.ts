@@ -226,6 +226,18 @@ export function parentDirOf(path: string): string {
   return stripTrailingSlash(parent);
 }
 
+/** 第八十三轮：标题栏里「目录名」右侧的父路径 —— 去掉末尾那一段，避免与左侧名称重复。
+ *  · 空串 / 已是根（`parentDirOf` 返回空）→ 返回空串，标题栏只显示名称；
+ *  · 父级与自身相同（极端形态）→ 同样返回空串，绝不显示重复内容。
+ *  零 SDK / 零 IO，纯字符串运算。 */
+export function titleParentOf(full: string): string {
+  if (full.length === 0) {
+    return '';
+  }
+  const p: string = parentDirOf(full);
+  return p.length > 0 && p !== full ? p : '';
+}
+
 /** 估算一段文本在给定字号下占的宽度（vp），用于「按档案名长度自适应列宽」。
  *  ArkUI 的 Text 在 layoutWeight(1) 下拿不到内容宽度，只能自己估：
  *    · CJK / 全角（>= U+2E80）按 1 个字宽；

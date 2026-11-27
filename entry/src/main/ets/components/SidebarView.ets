@@ -33,7 +33,7 @@ const LIST_ROW_GAP_VP: number = 1;
 @Component
 export struct SidebarView {
   // ---- Index 下传的状态快照（@Prop：父侧 @State 变化即同步重渲染）----
-  @Prop source: string = '';
+  // 第八十三轮：目录名已移到最顶部标题栏，本节不再接收 source（避免两处重复显示）。
   @Prop itemCount: number = 0;
   @Prop sortAsc: boolean = true;
   /** 第七十八轮：「APP 内上层xxx」提醒整体移除 —— 左栏不再接收 / 渲染 dirHint 提示条。
@@ -124,18 +124,16 @@ export struct SidebarView {
   build() {
     Column() {
       Row() {
-        Text(this.source)
-          .fontSize(13)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#dfe5ef')
-          .layoutWeight(1)
-        // 第十一轮：版本号只在最顶部标题栏（topBar 的 PIKAN 版本号）显示一次，
-        // 第二栏不再重复；这里只留档案张数，样式 / 位置都不变。
+        // 第八十三轮：目录名已移到最顶部标题栏，左栏不再重复显示。
+        // 这里只剩档案张数，并保持原来「靠右」的位置（旧版是目录名 layoutWeight(1) 把它推到右边）。
+        // 第十一轮：版本号只在最顶部标题栏（topBar 的 PIKAN 版本号）显示一次，第二栏不重复。
         // 第七十八轮：缩进按钮按下（紧凑态）只显示名称，隐藏「N 张」这类状态 / 辅助标签。
         if (!this.listCollapsed) {
           Text(this.itemCount > 0 ? this.itemCount + ' 张' : '')
             .fontSize(12)
             .fontColor('#7f88a3')
+            .layoutWeight(1)
+            .textAlign(TextAlign.End)
         }
       }
       .width('100%')

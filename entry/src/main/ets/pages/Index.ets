@@ -58,7 +58,7 @@ import { baseName, dirDisplayName, stripTrailingSlash, parentDirOf,
   volumeRootOf, dirLevelOf, upLevelOf, canGoUpFrom, upParentCandidates, sameDirPath,
   UP_NAV_NONE, UP_NAV_TOP, UP_NAV_UNKNOWN, upNavStateOf, upLooseParentOf,
   upContextBaseOf, upContextRawOf, pathChainOf,
-  realPathOf, hierPathOf,
+  realPathOf, hierPathOf, titleParentOf,
   isStrictParentOf, sameEntryNames,
   isUpListPseudoName, mergeUpListNames, rootFormParentOf,
   isSameOrUnderLevelOf, restoreBrowseLevelOf, rawBrowseFormOf,
@@ -246,7 +246,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R82';
+const ESC_BUILD_TAG: string = 'R83';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -3947,6 +3947,8 @@ struct Index {
 
   // 第五十五轮：spreadNames()（对开「左名 · 右名」拼接）随左上角信息浮层一并移除。
 
+  /** 第八十三轮起暂无调用点：标题栏已改为「目录名 + 父路径」，不再用当前图片名兜底。
+   *  保留实现（不删 `curItem()` 依赖）供后续诊断 / 降级复用，不是遗留笔误。 */
   private curName(): string {
     const it = this.curItem();
     return it ? it.name : '未打开';
@@ -9143,6 +9145,13 @@ struct Index {
   // 主构建
   // ------------------------------------------------------------------
 
+  /** 第八十三轮：标题栏里「目录名」右侧的父路径 —— 去掉末尾目录名，避免与左侧名称重复。
+   *  `titlePath` 为空（尚未打开）或已是卷根（父级等于自身）时返回空串，标题栏只显示名称。 */
+  private parentPathOf(): string {
+    // 判据收口在纯函数 `titleParentOf`（可 Node 回归），这里只负责取状态。
+    return titleParentOf(this.titlePath);
+  }
+
   /** 顶栏：非全屏时常驻；全屏时由 Stack 以绝对定位浮层复用同一份 Builder（见 build）。
    *  11-10 起「打开图库」「选择图片」「回到上次」三个按钮均已按用户要求取消，
    *  顶栏只剩「全屏 / 幻灯片」，其余按钮与事件保持不变。 */
@@ -9157,13 +9166,32 @@ struct Index {
         .fontSize(14)
         .fontColor('#4a5262')
         .margin({ left: 8, right: 8 })
-      // Win64 07c1eee / 3f92173：完整路径放标题栏，放不下时中间省略、保住末尾目录名
-      Text(ellipsizeMiddle(this.titlePath.length > 0 ? this.titlePath : this.curName(), 52))
-        .fontSize(13)
-        .fontColor('#9fb0c8')
+      // 第八十三轮：目录名从左侧边栏移到标题栏，作为主信息。
+      // maxLines(1) + Ellipsis + 限宽 45%：窄屏（移动端 / 平板）只省略不溢出、不错位；
+      // 宽屏且名字短时 layoutWeight 不生效，按内容自然展开，不会被无谓截断。
+      Text(this.source.length > 0 ? this.source : '尚未打开')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#dfe5ef')
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
+        .constraintSize({ maxWidth: '45%' })
+      // 第八十三轮：父路径作为次要信息，**去掉末尾目录名**（parentPathOf）避免与左侧名称重复；
+      // layoutWeight(1) 吸收剩余宽度，窄屏时自动省略成「…」，绝不把右侧工具区挤出屏幕。
+      if (this.parentPathOf().length > 0) {
+        Text('·')
+          .fontSize(14)
+          .fontColor('#4a5262')
+          .margin({ left: 8, right: 8 })
+        Text(ellipsizeMiddle(this.parentPathOf(), 44))
+          .fontSize(11)
+          .fontColor('#6b7385')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+      } else {
+        Blank()
+      }
 
       // 第十一轮：包含「全屏 / 幻灯片」的第二栏（工具区）默认隐藏。
       // Visibility.Hidden = 占位但不可见 → 隐藏时标题栏 / 下方主体布局零位移；
@@ -9209,7 +9237,6 @@ struct Index {
           // R40（Index.ets 拆分 Phase 3）：左栏整体迁至 components/SidebarView.ets；
           // 状态仍归 Index（@Prop 下传 / 回调上抛），UI 描述与拆分前逐行等价。
           SidebarView({
-            source: this.source,
             itemCount: this.itemCount,
             sortAsc: this.sortAsc,
             rowCount: this.rowCount,
