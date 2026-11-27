@@ -119,6 +119,10 @@ import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
   shouldRestoreMaximized, shouldScheduleWindowRestore } from '../common/SessionState';
 // 第七十七轮：adaptive column width 的唯一真值源（内容长度 + 容器尺寸，零固定宽度）。
 import { AcLayout, acLayoutOf, acWidthSafeOf } from '../common/AdaptiveColumn';
+// 第一百零八轮：左栏拖拽调宽的唯一真值源（夹取 / 拖动 / 恢复 / 写盘，全纯函数）。
+import { SPLIT_DIVIDER_W, SPLIT_HIT_EXTRA_VP,
+  splitDragWOf, splitSidebarWOf, splitRestoreWOf, splitPersistOf,
+  splitStatusOf, splitResetOf, splitActiveOf } from '../common/SidebarSplit';
 import { decodeEdgeOf, reuseEdgeOf, shouldReuseDecoded,
   decodeKeyOf } from '../common/DecodeCache';
 import { rawPrefetchWanted } from '../common/RawCache';
@@ -276,7 +280,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R107';
+const ESC_BUILD_TAG: string = 'R108';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -439,8 +443,10 @@ const LOUPE_RESAMPLE_MIN_GAIN: number = 96;
  *    listWidthForNames 固定开销 226 等一切预设 / 固定宽度限制；
  *  · 展开宽 / 收起宽 / 大小列 / 日期列都由 common/AdaptiveColumn.ts 的
  *    acLayoutOf(容器宽, 档案名内容, 大小列内容) 按「内容长度 + 容器尺寸」实时推出；
- *  · 窗口 resize（根 Stack 的 onAreaChange）会重算一次，列宽随容器动态伸缩。 */
-const SPLIT_W: number = 14;   // 分隔条宽度（不是档案列表列宽）
+ *  · 窗口 resize（根 Stack 的 onAreaChange）会重算一次，列宽随容器动态伸缩。
+ *  第一百零八轮：再叠一层「用户手工拖宽」—— 见 common/SidebarSplit.ts，
+ *  用户没拖过（sidebarUserW = 0）时仍逐字走上面的自适应。 */
+const SPLIT_W: number = SPLIT_DIVIDER_W;   // 分隔条宽度（不是档案列表列宽）
 
 const MIN_SCALE: number = 0.05;
 const MAX_SCALE: number = 16.0;
@@ -1114,6 +1120,9 @@ const WIN_KEY_COLLAPSED: string = 'listCollapsed'; // 1 = 收起；0 / 缺失 = 
 /** 第七轮：窗口形态小 key。1 = 退出前是最大化（含系统 FULL_SCREEN 形态）；
  *  0 / 缺失 = 自由窗口。与 winRect 分开存：最大化时不能被 rect 恢复打回普通尺寸。 */
 const WIN_KEY_MAXIMIZED: string = 'winMaximized';
+/** 第一百零八轮：用户拖拽设定的左栏展开宽（vp）。0 / 缺失 = 没拖过 → 走自适应。
+ *  与 winRect / listCollapsed 同批同步落盘，重启后先读回再交给 SidebarSplit 夹取。 */
+const WIN_KEY_SIDEBAR_W: string = 'sidebarW';
 const WIN_MIN_W: number = 320;
 const WIN_MIN_H: number = 240;
 const WIN_MAX_W: number = 16384;
@@ -1275,6 +1284,14 @@ struct Index {
   /** 第七十九轮：名称列是否改多行换行（内容超出「窗口可用宽」时为 true）。
    *  由 acLayoutOf 的同一套入参推出，与四个宽度量严格同源。 */
   @State nameWrap: boolean = acLayoutOf(0, ['选择文件夹'], ['12.34 MB']).nameWrap;
+  /** 第一百零八轮：用户拖拽设定的左栏展开宽（vp）。0 = 没设过 → 走 acLayoutOf 自适应。
+   *  这是**用户意图**，不随窗口大小改写：窗口变窄时只在算 listW 时临时夹取，
+   *  窗口放大后能回到原来的宽度。 */
+  @State sidebarUserW: number = 0;
+  /** 第一百零八轮：正在拖分隔条 —— 只驱动分隔条高亮与状态栏文案（不参与布局计算）。 */
+  @State sidebarDragging: boolean = false;
+  /** 第一百零八轮：鼠标悬停在分隔条上（提示「这里可以拖」）。 */
+  @State sidebarHover: boolean = false;
   /** 左栏排序方向：true = 升序（自然序） */
   @State sortAsc: boolean = true;
   /** 「当前路径是否仍有父级」——只作状态栏文案、诊断串与 browseUp 的行为判据。
@@ -1418,6 +1435,13 @@ struct Index {
   /** 真全屏：应用内三块栏 + 系统标题栏 / dock / 状态栏 / 导航栏全部不显示，画面只剩图片。
    *  2026-11-11 起 applyWindowFullScreen() 会调 window 最大化沉浸接口，详见该方法注释。 */
   @State fullscreen: boolean = false;
+
+  /** 第一百零八轮：本次拖拽是否真的在进行（PanGesture 的 start → update → end 三拍闸门）。
+   *  非 @State：它不参与渲染，只防「没按下就收到 update / 收起态误拖」。 */
+  private splitDragActive: boolean = false;
+  /** 本次拖拽的起始宽：PanGesture.offsetX 是「相对按下那一刻」的累计位移，
+   *  每帧都按 start + offset 算，绝不做增量累加（增量会随丢帧漂移）。 */
+  private splitStartW: number = 0;
 
   private timerId: number = -1;
   private baseZoom: number = 1;
@@ -2193,9 +2217,21 @@ struct Index {
       const rawRect = await p.get(WIN_KEY_RECT, '');
       const rawCollapsed = await p.get(WIN_KEY_COLLAPSED, 0);
       const rawMaximized = await p.get(WIN_KEY_MAXIMIZED, 0);
+      // 第一百零八轮：上次拖出来的左栏宽（0 / 缺失 = 没拖过，继续走自适应）。
+      const rawSidebarW = await p.get(WIN_KEY_SIDEBAR_W, 0);
       this.savedWindowRect = typeof rawRect === 'string' ? rawRect : '';
       this.listCollapsed = collapsedOf(typeof rawCollapsed === 'number' ? rawCollapsed : 0);
       this.savedWindowMaximized = typeof rawMaximized === 'number' ? rawMaximized : 0;
+      // 读回即生效：不等下一次布局。此刻 lastRootW 可能还是 0 —— splitRestoreWOf 对
+      // 「根宽未知」只按绝对上下限夹取，真正的窗口夹取留给 refreshAdaptiveLayout。
+      this.sidebarUserW = splitRestoreWOf(
+        typeof rawSidebarW === 'number' ? rawSidebarW : 0, this.lastRootW);
+      if (this.sidebarUserW > 0) {
+        // 只重算左栏宽（不动三列宽，也不新增 refreshAdaptiveLayout 调用点）：
+        // 首帧的 listW 是「根宽 0」时的内容宽，这里先按恢复值替换，布局回来后再精确夹一次。
+        this.listW = splitSidebarWOf(this.sidebarUserW, this.listW, this.lastRootW);
+        hilog.info(DOMAIN, TAG, 'sidebarW: restored %{public}d', this.sidebarUserW);
+      }
       // 排程放在所有提前 return 之前：即使没有完整 LastPos，窗口也要恢复。
       // 第七轮：只最大化过、从未存下自由窗口 rect 的用户也要排程（不能因 rect 为空短路）。
       this.scheduleRestoreWindowRect();
@@ -2964,6 +3000,9 @@ struct Index {
     let wrote: boolean = false;
     try {
       store.putSync(WIN_KEY_COLLAPSED, this.listCollapsed ? 1 : 0);
+      // 第一百零八轮：左栏拖拽宽同批落盘（0 = 没拖过 / 已复位为自适应）。
+      // 它是「用户意图」而不是当前显示宽 —— 窗口临时变窄不该把记忆改小。
+      store.putSync(WIN_KEY_SIDEBAR_W, splitPersistOf(this.sidebarUserW));
       wrote = true;
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'winRect: save collapsed failed');
@@ -3038,6 +3077,93 @@ struct Index {
       clearTimeout(this.winRectTimer);
       this.winRectTimer = -1;
     }
+  }
+
+  // ------------------------------------------------------------------
+  // 第一百零八轮：左栏拖拽调宽（分隔条 PanGesture 的三个收口 + 记忆）
+  // ------------------------------------------------------------------
+
+  /** 把当前「用户意图宽」同步写盘（拖完立刻写，不等 600ms 防抖 —— 拖完就退出也不丢）。
+   *  只写一个小 key：putSync + flushSync 毫秒级，绝不写快照。 */
+  private persistSidebarWNow(): void {
+    const store: preferences.Preferences | undefined = this.prefs;
+    if (store === undefined) {
+      return;
+    }
+    try {
+      store.putSync(WIN_KEY_SIDEBAR_W, splitPersistOf(this.sidebarUserW));
+      store.flushSync();
+      hilog.info(DOMAIN, TAG, 'sidebarW: saved %{public}d', this.sidebarUserW);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'sidebarW: save failed: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 按下分隔条：只记起始宽 + 亮起，不改宽度（用户可能只是点一下）。
+   *  收起态不参与拖拽 —— 此时分隔条贴着窗口最左，拖动语义不明确，交给 « 按钮展开。 */
+  private onSplitDragStart(): void {
+    if (this.listCollapsed) {
+      this.splitDragActive = false;
+      this.status = '左栏已收起：点 « 或按 Ctrl+B 展开后再拖宽度';
+      return;
+    }
+    this.splitDragActive = true;
+    this.splitStartW = this.listW;
+    this.sidebarDragging = true;
+    this.markUserActive();
+    this.status = splitStatusOf(this.listW, true);
+  }
+
+  /** 拖动中：**每帧都按「起始宽 + 累计位移」重算**（不做增量累加，丢帧也不会漂）。
+   *  位移由 SidebarSplit.splitDragWOf 夹进 [MIN, max(rootW)]，所以拖不出合法区间。 */
+  private onSplitDragUpdate(offsetX: number): void {
+    if (!this.splitDragActive) {
+      return;
+    }
+    const w: number = splitDragWOf(this.splitStartW, offsetX, this.lastRootW);
+    this.sidebarUserW = w;
+    this.listW = w;
+    this.status = splitStatusOf(w, true);
+  }
+
+  /** 松开（或手势被取消）：落盘 + 复位 chrome 基准 + 重算一次自适应。
+   *  · chromeW/H 置 -1：固定栏偏移（根宽 − 预览画布）已经变了，必须让预览回调重采一次，
+   *    与「收起 / 展开左栏」完全同一套处理（否则根回调会拿旧偏移反推画布）；
+   *  · 重算一次 refreshAdaptiveLayout：把 nameWrap（名称完整优先 → 拖窄改多行换行）
+   *    与三列宽按新的左栏宽对齐，分割线位置与内容排布保持一致。 */
+  private onSplitDragEnd(): void {
+    const active: boolean = this.splitDragActive;
+    this.splitDragActive = false;
+    this.sidebarDragging = false;
+    if (!active) {
+      return;
+    }
+    this.chromeW = -1;
+    this.chromeH = -1;
+    this.persistSidebarWNow();
+    const rowNames: Array<string> = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      rowNames.push(this.rows[i].name);
+    }
+    this.refreshAdaptiveLayout(rowNames);
+    this.status = splitStatusOf(this.listW, false);
+    hilog.info(DOMAIN, TAG, 'sidebarW: drag end w=%{public}d root=%{public}d',
+      this.listW, this.lastRootW);
+  }
+
+  /** 双击分隔条：清掉记忆，回到 acLayoutOf 的自适应宽（写 0 = 没设过）。 */
+  private resetSidebarW(): void {
+    if (this.listCollapsed) {
+      return;
+    }
+    this.sidebarUserW = splitResetOf();
+    this.persistSidebarWNow();
+    const rowNames: Array<string> = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      rowNames.push(this.rows[i].name);
+    }
+    this.refreshAdaptiveLayout(rowNames);
+    this.status = '左栏宽度已恢复自适应 · 双击 / 拖动分隔条可再调整';
   }
 
   /** 第三十六轮：零 IO 恢复「仅目录上下文」—— 退出前停在空 / 无图片目录时，
@@ -4213,12 +4339,18 @@ struct Index {
       sizeTexts.push(isFolder ? (label.length > 0 ? label : '…') : fmtBytes(r.size));
     }
     const a: AcLayout = acLayoutOf(this.lastRootW, rowNames, sizeTexts);
-    this.listW = acWidthSafeOf(a.sidebarW, a.collapsedW);
+    // 第一百零八轮：自适应宽是**默认值**；用户拖过就用他设定的宽（按当前窗口夹取）。
+    // 两者都从 SidebarSplit 走同一套钳制，保证「拖动 / 重启恢复 / 窗口缩放」三个入口一致。
+    const autoW: number = acWidthSafeOf(a.sidebarW, a.collapsedW);
+    this.listW = splitSidebarWOf(this.sidebarUserW, autoW, this.lastRootW);
     this.collapsedW = acWidthSafeOf(a.collapsedW, a.sidebarW);
     this.colSizeW = acWidthSafeOf(a.sizeW, a.dateW);
     this.colDateW = acWidthSafeOf(a.dateW, a.sizeW);
     // 第七十九轮：名称完整优先 —— 顶到「窗口可用宽」时整列改多行换行，不 Ellipsis。
     this.nameWrap = a.nameWrap;
+    // 第一百零八轮：用户把左栏拖得比「名称完整所需宽」更窄时，同样改多行换行 ——
+    // 否则文件名会被 Ellipsis 截断，与「名称完整优先」的既有原则冲突。
+    this.nameWrap = this.listW < autoW ? true : this.nameWrap;
   }
 
   private trySize(uri: string): number {
@@ -10053,6 +10185,8 @@ struct Index {
 
           // 分隔条正中的 « / »（Win64 45~49 行）：与 Ctrl+B 同效。
           // 收起后按钮仍在原地，再点一下展回来；全屏时随左栏一起整条隐藏。
+          // 第一百零八轮：整条分隔条 = 拖拽调宽手柄（见下方 gesture），按钮只占中间一段，
+          // 因此「拖」与「点收起」互不影响。
           Column() {
             Button(this.listCollapsed ? '»' : '«')
               .type(ButtonType.Normal)
@@ -10076,7 +10210,42 @@ struct Index {
           .height('100%')
           .justifyContent(FlexAlign.Center)
           .alignItems(HorizontalAlign.Center)
-          .backgroundColor('#1a1d23')
+          // 第一百零八轮：分隔条变成可拖拽的调宽手柄 —— 位置就是左栏的右边界，
+          // 因此「分割线位置」= listW，与拖拽结果天然一致，不需要额外同步坐标。
+          // 视觉三态：常态深灰底 / 悬停浅高亮（提示可拖）/ 拖动中蓝色高亮（交互状态可见）。
+          .backgroundColor(splitActiveOf(this.sidebarDragging, this.sidebarHover)
+            ? '#2f4159' : '#1a1d23')
+          .onHover((on: boolean) => {
+            this.sidebarHover = on;
+          })
+          // 命中区左右各外扩 6vp：可视仍 14vp，但手不用精确戳在那条细缝上。
+          .responseRegion({ x: -SPLIT_HIT_EXTRA_VP, y: 0,
+            width: SPLIT_W + SPLIT_HIT_EXTRA_VP * 2, height: '100%' })
+          // 横向平移 = 调宽（start 记起点 / update 实时改 listW / end 落盘）；
+          // 双击 = 清掉记忆回到自适应。两者互斥，避免「双击时先被判成拖动」。
+          .gesture(
+            GestureGroup(GestureMode.Exclusive,
+              PanGesture({ direction: PanDirection.Horizontal, distance: 2 })
+                .onActionStart(() => {
+                  this.onSplitDragStart();
+                })
+                .onActionUpdate((event: GestureEvent) => {
+                  this.onSplitDragUpdate(event.offsetX);
+                })
+                .onActionEnd(() => {
+                  this.onSplitDragEnd();
+                })
+                .onActionCancel(() => {
+                  this.onSplitDragEnd();
+                }),
+              TapGesture({ count: 2 })
+                .onAction(() => {
+                  this.resetSidebarW();
+                })
+            )
+          )
+          .accessibilityText('左栏与预览区之间的分隔条，左右拖动可调整左栏宽度，双击恢复自适应')
+          .accessibilityLevel('yes')
         }
 
         // ---------- 右侧：大图预览（GPU 合成渲染）----------
