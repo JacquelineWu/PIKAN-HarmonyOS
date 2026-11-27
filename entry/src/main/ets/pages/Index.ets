@@ -145,6 +145,8 @@ import { SCROLL_NONE, tapScrollAction, stepScrollAction, scrollAllowed,
   windowStatusIsFullscreen, shouldSyncFullFromWindow,
   fullKeyEligibleOf, fullToggleAllowedOf } from '../common/InteractionPlan';
 import { KeyCode } from '@ohos.multimodalInput.keyCode';
+import { CrossFade, SLIDE_FADE_STEPS, crossFadeStepOf, slideFadeReadyOf,
+  slideFadeTickMsOf } from '../common/SlideFade';
 // 第二十三轮：多模输入服务按键订阅（系统级通道，不经 ArkUI 焦点 / 组件分发）。
 // InputKeyEvent 与 ArkUI 全局 KeyEvent 同名不同型，必须起别名，否则 Callback 类型不匹配。
 import inputConsumer from '@ohos.multimodalInput.inputConsumer';
@@ -258,7 +260,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R95';
+const ESC_BUILD_TAG: string = 'R96';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -427,6 +429,15 @@ const SPLIT_W: number = 14;   // 分隔条宽度（不是档案列表列宽）
 const MIN_SCALE: number = 0.05;
 const MAX_SCALE: number = 16.0;
 const SLIDE_INTERVAL: number = 3000;
+/** 第九十六轮：幻灯片交叉淡化的总时长与每步间隔（步数真值源在 common/SlideFade.ts）。
+ *  420ms：短于 3s 间隔的 1/6，用户读完一张的时间不受影响；又足够长到「看得出是淡入淡出」
+ *  而不是「跳一下」。 */
+const SLIDE_FADE_MS: number = 420;
+const SLIDE_FADE_TICK_MS: number = slideFadeTickMsOf(SLIDE_FADE_MS, SLIDE_FADE_STEPS);
+/** 第九十六轮：等新图就绪的轮询间隔 / 上限（80ms × 16 ≈ 1.3s）。
+ *  超时**不淡化**（宁可停在旧图上继续等），因为淡到一半底下没图就是空白。 */
+const SLIDE_WAIT_POLL_MS: number = 80;
+const SLIDE_WAIT_POLL_MAX: number = 16;
 
 /** 图库选择器 maxSelectNumber 的系统上限（官方：最大 500，默认 50）。
  *  仅供已停用的 openPicker() 使用；「打开图库」按钮取消后不会再触发。 */
@@ -1304,6 +1315,28 @@ struct Index {
 
   // ---- 交互 ----
   @State playing: boolean = false;
+  /** 第九十六轮：幻灯片交叉淡化的四件套（都是 @State，透明度要驱动重建）。
+   *  · slideOutPx      —— 正在淡出的「上一张」，与当前张**同时存在、完全重叠**；
+   *  · slideOutOpacity —— 1 → 0（上一张）；
+   *  · slideInOpacity  —— 0 → 1（当前张，作用在主图那层）；
+   *  · slideBlendOn    —— 是否处于双层叠显期；false 时下面那层根本不渲染。
+   *  三者互补：任意时刻 out + in === 1（见 common/SlideFade.ts），所以过渡期间
+   *  画面永远被两张图之一完全覆盖 —— 这就是「不出现空白」的实现方式。 */
+  @State slideOutPx: image.PixelMap | undefined = undefined;
+  @State slideOutOpacity: number = 0;
+  @State slideInOpacity: number = 1;
+  @State slideBlendOn: boolean = false;
+  /** 淡出那张是否是「我们自己解码 / 自己精炼」的（结束时必须 release）；
+   *  命中预载缓存的那张归缓存所有，绝不能在这里释放。 */
+  private slideOutOwned: boolean = false;
+  /** 淡化代号：任何一次新的淡化 / 停止 / 手动翻页都 ++，在途的分步 tick 立即作废。
+   *  这是替代 animateTo 的关键 —— 可以「取消」。 */
+  private slideFadeSeq: number = 0;
+  private slideFadeTimer: number = -1;
+  private slideWaitTimer: number = -1;
+  /** 本次 go() 是否由幻灯片推进发起 —— 用于区分「自动推进」与「用户手动翻页」，
+   *  后者要立刻作废正在跑的淡化（否则旧图会盖在用户刚选的新图上 400ms）。 */
+  private slideAdvancing: boolean = false;
   @State status: string = '点左栏「选择文件夹」浏览目录';
   /** 第七十二轮：右键「详情」面板。只存面板自己要画的纯字符串字段，
    *  不碰 items / rows / cur / browseBase —— 关掉面板后一切浏览状态原样。 */
@@ -1985,6 +2018,7 @@ struct Index {
     this.releaseViewOwned();
     this.clearLoupeHiRes(); // 第十六轮：页面销毁时释放放大镜专用高清 PixelMap
     this.clearViewSysPx();  // 第六十八轮：页面销毁时释放主预览系统级 AA 精炼产物
+    this.endSlideFade(true); // 第九十六轮：页面销毁时清掉淡化计时器并释放叠显层那张图
     this.clearWheel();
     this.sizeSeq++; // 作废还在跑的体积补测任务
     if (this.resumeTimer !== -1) {
@@ -4084,8 +4118,13 @@ struct Index {
     return Math.min(boxW / this.imgW, boxH / this.imgH);
   }
 
-  /** 当前是否处于并排（对开）渲染：左页 builder 的 `half` 与它同义。 */
+  /** 当前是否处于并排（对开）渲染：左页 builder 的 `half` 与它同义。
+   *  第九十六轮：**幻灯片播放期间恒为单张**（用户要求「每次仅展示一张」）。
+   *  只在渲染判据上关掉，不动 previewMode —— 停止播放后用户原来的视图偏好原样回来。 */
   private spreadShown(): boolean {
+    if (this.playing) {
+      return false;
+    }
     return this.spreadB >= 0 && this.spreadB < this.items.length;
   }
 
@@ -5170,6 +5209,7 @@ struct Index {
   }
 
   private select(idx: number): void {
+    this.endSlideFade(true);   // 第九十六轮：用户点选新图 → 正在跑的淡化立即作废
     // 第三十七轮：点图片行即退出文本预览，图片态与文本态严格互斥。
     if (this.textMode) {
       this.closeTextMode();
@@ -5201,6 +5241,12 @@ struct Index {
 
   private go(delta: number): void {
     this.markUserActive();   // 第六十四轮：翻页 / 滚轮也算用户操作
+    // 第九十六轮：用户手动翻页（键盘 / 滚轮 / 方向键）时立刻收掉正在跑的交叉淡化，
+    // 免得「上一张还半透明盖在刚选中的那张上」。幻灯片自己的推进不算（否则刚建立的叠显层
+    // 会在同一次 go() 里被自己清掉）。
+    if (!this.slideAdvancing) {
+      this.endSlideFade(true);
+    }
     // 第三十七轮：文本预览态下方向键改为滚动文本，绝不偷偷翻动图片序列。
     if (this.textMode) {
       this.textScroller.scrollBy(0, delta * TEXT_WHEEL_LINES * TEXT_ROW_H_VP);
@@ -5309,9 +5355,12 @@ struct Index {
       return;
     }
     this.playing = true;
-    this.status = '幻灯片播放中（每 ' + (SLIDE_INTERVAL / 1000) + ' 秒切换）';
+    // 第九十六轮：单张播放 —— 立刻把并排收成单页（判据在 refreshSpread / spreadShown 两处，
+    // 这里主动重算一次，保证「按下播放」的那一刻右页就消失，而不是等下一次翻页）。
+    this.refreshSpread();
+    this.status = '幻灯片播放中（每 ' + (SLIDE_INTERVAL / 1000) + ' 秒切换 · 淡入淡出）';
     this.timerId = setInterval(() => {
-      this.go(1);
+      this.slideAdvance();
     }, SLIDE_INTERVAL);
   }
 
@@ -5322,7 +5371,163 @@ struct Index {
     }
     if (this.playing) {
       this.playing = false;
+      // 第九十六轮：停播必须收掉叠显层 —— 否则上一张的残影会一直盖在新图上，
+      // 而且那张若是自解码的还占着内存。收完再把并排判据恢复（还用户原来的视图偏好）。
+      this.endSlideFade(true);
+      this.refreshSpread();
       this.status = '幻灯片已暂停';
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 第九十六轮：幻灯片交叉淡化（单张 / 双层重叠 / 分步可取消）
+  // ------------------------------------------------------------------
+
+  /** 推进一张：**先把上一张的所有权交接好 → 再切图 → 等新图真能画了才开始淡化**。
+   *
+   *  为什么顺序这么严：
+   *   · 切图（showPreviewOf）第一步就是 `releaseViewOwned()` + `viewPixelMap = undefined`
+   *     + `clearViewSysPx()`；若不在切之前把上一张「接管」过来，它就当场被 release，
+   *     我们再拿它去画叠显层 = 用已释放对象（黑块 / 花屏 / 崩溃）；
+   *   · 新图没就绪就开始淡化 ⇒ 底下是空的 ⇒ 露中灰底，正是用户要求避免的「空白」。
+   *     所以：新图未就绪时**旧图保持满不透明**顶在前面（画面仍是上一张），轮询等它就绪。 */
+  private slideAdvance(): void {
+    if (!this.playing || this.items.length === 0) {
+      return;
+    }
+    // 上一拍的新图到现在还没解出来（屏幕此刻只有叠显层那张旧图）：**这一拍不推进**。
+    // 若照常往下走，第一步 endSlideFade 就会把旧图撤掉 ⇒ 当前张又没有图 ⇒ 露中灰底。
+    // 宁可晚一拍（用户只是看到这张多停 3 秒），也绝不出空白。
+    if (this.slideOutPx !== undefined && this.viewPixelMap === undefined) {
+      hilog.info(DOMAIN, TAG, 'slide advance skipped: current image pending');
+      return;
+    }
+    // 上一轮若还没收尾（极端：解码超慢），先收掉再开新的，避免两层叠显互相打架。
+    this.endSlideFade(true);
+    // ① 交接：取「屏幕上真正显示的那一张」——系统 AA 精炼产物优先，其次自解码 PixelMap。
+    const curUri: string = (this.cur >= 0 && this.cur < this.items.length) ? this.items[this.cur].uri : '';
+    let shown: image.PixelMap | undefined = undefined;
+    let owned: boolean = false;
+    if (this.viewSysPx !== undefined && this.viewSysUri === curUri) {
+      shown = this.viewSysPx;
+      owned = true;
+      // 手动接管系统产物：token 自增作废在途精炼回调，再把三个字段摘空，
+      // 让随后的 clearViewSysPx() 找不到它、不会替我们释放。
+      this.viewSysToken++;
+      this.viewSysPx = undefined;
+      this.viewSysUri = '';
+      this.viewSysEdge = 0;
+    } else if (this.viewPixelMap !== undefined) {
+      shown = this.viewPixelMap;
+      if (this.viewOwned !== undefined) {
+        owned = true;
+        this.viewOwned = undefined;   // 所有权移交给叠显层，结束淡化时由它 release
+      }
+    }
+    if (shown === undefined) {
+      // 连一张可画的旧图都没有（首次进入 / 刚清空）：无从淡化，直接切。
+      this.go(1);
+      return;
+    }
+    this.slideOutPx = shown;
+    this.slideOutOwned = owned;
+    this.slideOutOpacity = 1;
+    this.slideInOpacity = 0;
+    this.slideBlendOn = true;
+    // ② 切图（同步命中缓存时 viewPixelMap 立即就是新图）。
+    //    置标志让 go() 知道「这次不是用户手动翻页」，别把刚建好的叠显层清掉。
+    this.slideAdvancing = true;
+    this.go(1);
+    this.slideAdvancing = false;
+    // ③ 就绪判据收口在纯函数里；就绪 → 立刻开始；未就绪 → 旧图顶着，轮询等。
+    if (slideFadeReadyOf(this.viewPixelMap !== undefined, this.viewPixelMap === this.slideOutPx)) {
+      this.startSlideFade();
+    } else {
+      this.armSlideFadeWait(0);
+    }
+  }
+
+  /** 等新图就绪（最多 SLIDE_WAIT_POLL_MAX 轮）。
+   *  超时**不做淡化**：宁可这一张停在旧图上（用户看到的是「这一张没换」），
+   *  也不能淡到一半露出中灰底。下一轮 tick 会重新走一遍完整流程。 */
+  private armSlideFadeWait(round: number): void {
+    if (this.slideWaitTimer !== -1) {
+      clearTimeout(this.slideWaitTimer);
+      this.slideWaitTimer = -1;
+    }
+    const seq: number = this.slideFadeSeq;
+    this.slideWaitTimer = setTimeout(() => {
+      this.slideWaitTimer = -1;
+      if (seq !== this.slideFadeSeq || !this.playing || !this.slideBlendOn) {
+        return;   // 期间被停止 / 又推进了一张：这次等待作废
+      }
+      if (slideFadeReadyOf(this.viewPixelMap !== undefined, this.viewPixelMap === this.slideOutPx)) {
+        this.startSlideFade();
+        return;
+      }
+      if (round >= SLIDE_WAIT_POLL_MAX) {
+        hilog.info(DOMAIN, TAG, 'slide fade skipped: next image not ready, keep previous');
+        // 保持旧图可见（slideOutOpacity 仍为 1、slideInOpacity 仍为 0）——
+        // 画面就是「还是上一张」，不是空白。下一轮 tick 从 endSlideFade 重新开始。
+        return;
+      }
+      this.armSlideFadeWait(round + 1);
+    }, SLIDE_WAIT_POLL_MS);
+  }
+
+  /** 分步交叉淡化：每 SLIDE_FADE_TICK_MS 走一步，`out + in === 1` 恒成立。
+   *  用 setTimeout 分步而不是 animateTo：本工程的 animateTo 无法取消（见 finishFocus 注释），
+   *  而淡化的 420ms 里完全可能「停止播放 / 手动翻页 / 退出页面」——
+   *  分步链靠 slideFadeSeq 一 ++ 就整体作废，永不会把新图透明度再拉回去。 */
+  private startSlideFade(): void {
+    const seq: number = ++this.slideFadeSeq;
+    let step: number = 0;
+    const tick = (): void => {
+      if (seq !== this.slideFadeSeq) {
+        return;
+      }
+      step++;
+      const f: CrossFade = crossFadeStepOf(step, SLIDE_FADE_STEPS);
+      this.slideOutOpacity = f.out;
+      this.slideInOpacity = f.in;
+      if (step >= SLIDE_FADE_STEPS) {
+        this.endSlideFade(true);
+        return;
+      }
+      this.slideFadeTimer = setTimeout(tick, SLIDE_FADE_TICK_MS);
+    };
+    this.slideFadeTimer = setTimeout(tick, SLIDE_FADE_TICK_MS);
+  }
+
+  /** 收掉叠显层（幂等，任何时刻都能调）：
+   *  · 代号 ++ 让在途 tick / 轮询全部作废，计时器清掉；
+   *  · 先撤状态引用（`slideOutPx = undefined`）再 release —— 与 releaseViewOwned 同一口径，
+   *    保证组件下一帧就不再引用它，不会出现「还在画就被释放」；
+   *  · 只释放**自己拥有的**那张；缓存持有的那张归 LRU 管，碰它就等于把还在用的图废掉。 */
+  private endSlideFade(releaseOut: boolean): void {
+    this.slideFadeSeq++;
+    if (this.slideFadeTimer !== -1) {
+      clearTimeout(this.slideFadeTimer);
+      this.slideFadeTimer = -1;
+    }
+    if (this.slideWaitTimer !== -1) {
+      clearTimeout(this.slideWaitTimer);
+      this.slideWaitTimer = -1;
+    }
+    const px: image.PixelMap | undefined = this.slideOutPx;
+    const owned: boolean = this.slideOutOwned;
+    this.slideOutPx = undefined;
+    this.slideOutOwned = false;
+    this.slideBlendOn = false;
+    this.slideOutOpacity = 0;
+    this.slideInOpacity = 1;
+    // 极窄的窗口：若它此刻恰好就是主图（切图失败 / 同 uri），绝不能释放。
+    if (releaseOut && owned && px !== undefined && px !== this.viewPixelMap) {
+      try {
+        px.release();
+      } catch (e) {
+        hilog.warn(DOMAIN, TAG, 'slide fade release skipped');
+      }
     }
   }
 
@@ -6781,6 +6986,13 @@ struct Index {
    *  本函数只负责取左图尺寸、维护 spreadB 与右页解码链；既有翻页步长 go(±1)、
    *  右页解码 / 重试、放大镜、文本预览、目录恢复全部不动。 */
   private refreshSpread(): void {
+    // 第九十六轮：幻灯片播放期间**恒单张** —— 干脆不发起右页解码（省一次解码与内存），
+    // 渲染判据 spreadShown() 也返回 false。停止播放时会再调一次本函数恢复原并排形态。
+    if (this.playing) {
+      this.spreadB = -1;
+      this.clearRightPage();
+      return;
+    }
     // 只读名单态：不碰任何 uri（createImageSource / createPixelMap 都是跨进程 IO）。
     if (!bulkIoAllowed(this.restoreMode)) {
       this.spreadB = -1;
@@ -9288,6 +9500,9 @@ struct Index {
           .width(this.pageWLeft(half))
           .height(this.pageH(half))
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
+          // 第九十六轮：幻灯片淡入。非播放态恒为 1（完全不透明），零影响；
+          // 播放时与下面那层「淡出中的上一张」互补（out + in === 1），过渡期不留缝。
+          .opacity(this.slideInOpacity)
       } else if (this.viewFailed) {
         // 兜底：**只有自解码确认失败**才交给系统解码。
         // 不能在解码期间就画 Image(uri) —— 那正是「上一张还留在屏幕上」的来源。
@@ -9307,11 +9522,28 @@ struct Index {
               this.imgH = ev.height;
             }
           })
+          .opacity(this.slideInOpacity)
           .onError(() => {
             if (token === this.curToken) {
               this.status = '图片加载失败，当前镜像可能不支持该格式（HEIC 需系统 codec 支持）';
             }
           })
+      }
+
+      // 第九十六轮：幻灯片交叉淡化 —— 上一张**贴在上面淡出**，当前张在下面淡入。
+      // 两层用完全相同的 width / height / scale / objectFit ⇒ 逐点重叠、不位移、不变形；
+      // 任意时刻 out + in === 1 ⇒ 画面始终被一张图完全覆盖 ⇒ 过场期间绝无空白 / 中灰底。
+      // 只在 slideBlendOn 为真时渲染：非播放态这一层根本不存在（零结构变化、零布局位移）。
+      if (this.slideBlendOn && this.slideOutPx !== undefined) {
+        Image(this.slideOutPx!)
+          .objectFit(ImageFit.Contain)
+          .interpolation(this.previewInterpolation())
+          .antialiased(this.previewAntialias())
+          .draggable(false)
+          .width(this.pageWLeft(half))
+          .height(this.pageH(half))
+          .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
+          .opacity(this.slideOutOpacity)
       }
 
       // 过渡层：低清图 + 动态模糊，盖在清晰图之上，就绪后整层淡出 → 观感就是「由糊到清」。
