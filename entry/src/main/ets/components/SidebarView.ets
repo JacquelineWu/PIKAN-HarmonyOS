@@ -29,11 +29,17 @@ import { fcHitOf, fcStopPropagationOf } from '../common/FileContextMenu';
  *  动态下传（@Prop collapsedW）；展开宽 / 三列宽同样全部 adaptive，零预设固定宽度。 */
 /** List 行间距（第十三轮：两行缝压到 1vp）；原 Index.ets 同值迁入。 */
 const LIST_ROW_GAP_VP: number = 1;
+/** 第一百零二轮：左栏抬头原来那行「N 张」的高度（12fp 单行的近似行高）。
+ *  文字已按要求删除，但**行高必须留住** —— 否则下面「排序 / 往上层 / 选择文件夹」三按钮
+ *  会整体上移这么多，列表第一行的纵向位置也跟着变，那就不是「只删一处文字」了。 */
+const SIDE_HEAD_TEXT_LINE_VP: number = 14;
 
 @Component
 export struct SidebarView {
   // ---- Index 下传的状态快照（@Prop：父侧 @State 变化即同步重渲染）----
   // 第八十三轮：目录名已移到最顶部标题栏，本节不再接收 source（避免两处重复显示）。
+  /** 图片张数。第一百零二轮起抬头不再显示「N 张」，此值仅作状态快照保留
+   *  （父侧仍下传；删它要连带改 Index 的调用与既有契约，属无收益改动）。 */
   @Prop itemCount: number = 0;
   @Prop sortAsc: boolean = true;
   /** 第七十八轮：「APP 内上层xxx」提醒整体移除 —— 左栏不再接收 / 渲染 dirHint 提示条。
@@ -124,16 +130,14 @@ export struct SidebarView {
   build() {
     Column() {
       Row() {
-        // 第八十三轮：目录名已移到最顶部标题栏，左栏不再重复显示。
-        // 这里只剩档案张数，并保持原来「靠右」的位置（旧版是目录名 layoutWeight(1) 把它推到右边）。
-        // 第十一轮：版本号只在最顶部标题栏（topBar 的 PIKAN 版本号）显示一次，第二栏不重复。
-        // 第七十八轮：缩进按钮按下（紧凑态）只显示名称，隐藏「N 张」这类状态 / 辅助标签。
+        // 第一百零二轮：原「N 张」文本已按要求整段删除（这是本行唯一的文字标记）。
+        // 这里只留一个「同高、无内容」的占位：抬头行总高与改动前一致，
+        // 三按钮、列表首行的纵向位置一分不动，左栏其余结构零改动。
+        // 折起（紧凑态）时与改动前一样只剩上下内边距（10 + 8），也不额外占高。
+        // ⚠️ 不要改成 height(0)、也不要把整个 Row 删掉 —— 那会让下面内容整体上移 14vp。
         if (!this.listCollapsed) {
-          Text(this.itemCount > 0 ? this.itemCount + ' 张' : '')
-            .fontSize(12)
-            .fontColor('#7f88a3')
-            .layoutWeight(1)
-            .textAlign(TextAlign.End)
+          Row()
+            .height(SIDE_HEAD_TEXT_LINE_VP)
         }
       }
       .width('100%')
