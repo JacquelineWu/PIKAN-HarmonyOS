@@ -98,10 +98,12 @@ import { DIR_RESUME_CONTEXT, DIRCTX_EMPTY,
 import { PERSIST_SKIP, persistAction, persistPolicyUris,
   persistTimeoutSafe, persistOkHint, persistFailHint, persistLegacyHint } from '../common/PersistPlan';
 import { Size2, viewEdgeOf, preloadEdgeOf,
-  displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, fitOnFullExit, canvasFromRootOf,
+  displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, fullExitEdgeOf, canvasFromRootOf,
   isWideGamutOf, fullscreenStepsOf, spreadRightWantedOf,
   chromeSampleOf, canvasResizeAcceptOf,
   spreadPairIndexOf, spreadPairOkOf, spreadPageTextOf } from '../common/ViewPlan';
+// 第八十八轮：退出全屏恢复「进入前」缩放 / 平移的唯一真值源。
+import { FullExitView, fullExitViewOf } from '../common/ViewPlan';
 // 第八十六轮：并排（对开）等比适配的唯一真值源（统一高度 + 各自原始比例 + 中间零间隙）。
 import { SpreadFit, spreadFitOf, spreadAspectOf } from '../common/SpreadFit';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
@@ -249,7 +251,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R87';
+const ESC_BUILD_TAG: string = 'R88';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -6322,13 +6324,16 @@ struct Index {
     }
   }
 
-  /** 第八十二轮：退出全屏后的「确认式重新适配」。
+  /** 第八十八轮：退出全屏后的「布局落定确认」。
    *
-   *  为什么不能只靠 onAreaChange：它报的是布局中间态尺寸（三块栏刚回来、窗口退出沉浸的
-   *  动画还没停）；按那一刻重解会得到旧档位图，而 pendingReload 被消费后不会再来第二次。
-   *  这里在布局稳定后（FULL_EXIT_REFIT_MS）再确认一次：
-   *   · 恒 `fitToWindow()`（幂等：zoom 已是 1 时只保证 tx/ty 归零，不会抖动）；
-   *   · 只有画布与上次重解基准差 ≥ RESIZE_MIN_DELTA_PX 时才真正重解码，避免重复解大图。 */
+   *  ⚠️ 这里**绝不能再 `fitToWindow()`**（R82 的写法）：退出已经把 zoom/tx/ty 恢复成
+   *  进入全屏前的值，再 fit 一次就等于「恢复完又缩回去」，正是本轮要修的现象，
+   *  而且会表现为「先恢复、260ms 后再跳一下」的两段式缩放跳变。
+   *
+   *  只做两件事：
+   *   · 画布与上次重解基准差 ≥ RESIZE_MIN_DELTA_PX 时，按**当前**画布与倍率重解码（保清晰度）；
+   *   · 打一条恢复日志，真机核对「退出后是否真的保持倍率」时最直接的证据。
+   *  zoom / tx / ty 一律不碰。 */
   private armFullExitRefit(): void {
     if (this.fullExitRefitTimer !== -1) {
       clearTimeout(this.fullExitRefitTimer);
@@ -6338,19 +6343,15 @@ struct Index {
       if (!this.pageAlive || this.fullscreen) {
         return;
       }
-      // 幂等的「适配 + 居中」：即使 onAreaChange 已按新画布重解过，这一步也只补 tx/ty 归零。
-      this.fitToWindow();
       if (shouldReloadOnResize(this.lastReloadW, this.lastReloadH,
           this.canvasW, this.canvasH, RESIZE_MIN_DELTA_PX)) {
         this.pendingReload = false;
         this.clearCanvasReloadFallback();
         this.refreshForCanvasResize();
       }
-      // 顺手把进全屏前的视图存档打出来：真机核对「退出后是否真的重新适配」时最直接的证据
-      // （也避免 preFullZoom/Tx/Ty 变成只写不读的死字段）。
       hilog.info(DOMAIN, TAG,
-        'full exit refit: canvas=%{public}fx%{public}f wasZoom=%{public}f tx=%{public}f ty=%{public}f',
-        this.canvasW, this.canvasH, this.preFullZoom, this.preFullTx, this.preFullTy);
+        'full exit restore: canvas=%{public}fx%{public}f zoom=%{public}f tx=%{public}f ty=%{public}f',
+        this.canvasW, this.canvasH, this.zoom, this.tx, this.ty);
     }, FULL_EXIT_REFIT_MS);
   }
 
@@ -8259,8 +8260,9 @@ struct Index {
       return;
     }
     const prevFull: boolean = this.fullscreen;
-    // 第八十二轮：退出全屏是否需要「重新适配普通容器 + 居中」（纯判据，只有下降沿为 true）。
-    const needRefit: boolean = fitOnFullExit(prevFull, on);
+    // 第八十八轮：`onExit` 只表示「全屏 → 普通」这一个下降沿（纯判据）。
+    // 语义已从 R82 的「退出重新适配」改为「退出恢复进入前视图 + 布局落定后再确认一次」。
+    const onExit: boolean = fullExitEdgeOf(prevFull, on);
     // 第十六轮：上升沿抓「进入全屏前的窗口尺寸与位置」快照（须在任何窗口 API 之前）；
     //   下降沿标记「待精确恢复」。两者都由 InteractionPlan 纯函数判据收口。
     this.capturePreFullRect(prevFull, on);
@@ -8317,32 +8319,43 @@ struct Index {
       // 双击 / F11 进全屏：复位缩放与平移，objectFit(Contain) 会按放大后的画布
       // 把预览图铺满放大 —— 这就是「预览图案跟窗口大小一齐适配放大」。
       // 同时 refreshForCanvasResize() 按新画布重解（左右页都算），不发虚。
+      // 第八十八轮：上面存档的 preFullZoom/Tx/Ty 会在退出时**原样恢复**（不再一律 fit），
+      // 所以这里的 fit 只影响「全屏期间」的观感，不会改写用户进入前的倍率。
       this.fitToWindow();
       this.topbarVisible = false;
       this.status = '全屏 · Esc / F11 / 双击退出';
       } else {
-        // 第八十二轮：退出全屏**不再恢复进入前的缩放 / 平移**，改为「按普通容器重新适配 + 居中」
-        // （用户口径：进全屏 fit、退出也 fit，切换前后都是满屏适配态）。
-        // rot / flip 是用户手动设置的，仍逐项还原；status / topbar 属于界面形态，也必须还原。
+        // 第八十八轮：退出全屏**恢复进入前的缩放 / 平移**（R82 的「一律 fit」口径已被本轮推翻）。
+        // 根因：R82 在下降沿无条件 `fitToWindow()`（zoom=1、tx=ty=0），用户进全屏前若放大到 2×，
+        // 退出后立刻缩回 1×，观感就是「预览图被缩小」。
+        // 现在：有快照 → 原样恢复 zoom/tx/ty；无快照 → 保持当前，**绝不擅自 fit**。
+        // 恢复与 `this.fullscreen = on` 在同一个同步块内完成 ⇒ 布局变化与倍率变化合成一帧，
+        // 不会出现「先 fit 一次、260ms 后再跳回来」的两段式缩放跳变。
         this.fullCanvasW = 0;
         this.fullCanvasH = 0;
         this.fullEnterAt = 0;
-        if (needRefit) {
-          this.fitToWindow();
-        }
-        if (this.hasFullSnapshot) {
+        const hadSnapshot: boolean = this.hasFullSnapshot;
+        if (hadSnapshot) {
+          // rot / flip 是用户手动设置的，逐项还原；status / topbar 属界面形态，也必须还原。
           this.rot = this.preFullRot;
           this.flipH = this.preFullFlipH;
           this.flipV = this.preFullFlipV;
           this.status = this.preFullStatus;
           this.topbarVisible = this.preFullTopbar;
-          this.hasFullSnapshot = false;
         } else {
           this.topbarVisible = true;
           this.status = '已退出全屏 · Esc 关闭应用';
         }
-        // 布局重建 / 窗口退出沉浸是异步的：等普通模式画布真正落定后再确认一次「适配 + 重解」。
-        if (needRefit) {
+        // 视图恢复收口在纯函数里（含 clamp 与非法值兜底），且必须在 `hasFullSnapshot` 置 false 之前取值。
+        const view: FullExitView = fullExitViewOf(hadSnapshot,
+          this.preFullZoom, this.preFullTx, this.preFullTy,
+          this.zoom, this.tx, this.ty, MIN_SCALE, MAX_SCALE);
+        this.zoom = view.zoom;
+        this.tx = view.tx;
+        this.ty = view.ty;
+        this.hasFullSnapshot = false;
+        // 布局重建 / 窗口退出沉浸是异步的：等普通模式画布真正落定后再确认一次「视图未被改动 + 按新画布重解」。
+        if (onExit) {
           this.armFullExitRefit();
         }
     }

@@ -143,17 +143,69 @@ export function shouldReloadOnResize(oldW: number, oldH: number, newW: number,
   return Math.abs(newW - oldW) >= d || Math.abs(newH - oldH) >= d;
 }
 
-/** 第八十二轮：退出全屏时是否要「重新适配普通容器 + 居中」。
+/** 「全屏 → 普通」这一个下降沿判据（历史名 `fitOnFullExit` 保留为别名）。
  *
- *  用户口径（2026-11-27 确认）：从全屏切回普通模式，图片**再次按普通模式的容器尺寸
- *  自动缩放并居中**。即进全屏 `fitToWindow()`、退出全屏也 `fitToWindow()`，
- *  切换前后都呈「按容器铺满 + 居中」，不会因为恢复旧倍率而出现
- *  「退出后图片尺寸没跟上普通窗口」的观感。
- *
- *  纯判据，便于回归：只有「全屏 → 普通」这一个下降沿为 true。
- *  刻意不做「是否曾手动缩放」的分支 —— 用户要的是稳定的适配态，不是历史位置。 */
-export function fitOnFullExit(prevFull: boolean, on: boolean): boolean {
+ *  第八十二轮口径：退出全屏「重新适配普通容器 + 居中」。
+ *  第八十八轮口径已改为：退出全屏**恢复进入前的缩放 / 平移**（用户明确要求，
+ *  见 `fullExitViewOf`）。本判据仍然有用 —— 它标出**唯一的下降沿**，
+ *  用来触发「恢复进入前视图」与「布局落定后再确认一次」这条链，不做其它分支。 */
+export function fullExitEdgeOf(prevFull: boolean, on: boolean): boolean {
   return prevFull && !on;
+}
+
+/** 兼容旧名（R82 引入）。语义等价于 `fullExitEdgeOf`。 */
+export function fitOnFullExit(prevFull: boolean, on: boolean): boolean {
+  return fullExitEdgeOf(prevFull, on);
+}
+
+/** 第八十八轮：退出全屏要恢复的视图（缩放 + 平移）。 */
+export interface FullExitView {
+  zoom: number;
+  tx: number;
+  ty: number;
+  /** 是否真的用「进入前快照」恢复（false = 没有快照，保持当前值） */
+  restored: boolean;
+}
+
+/**
+ * 第八十八轮：退出全屏的缩放 / 平移恢复 —— 纯函数真值源。
+ *
+ *  用户口径：**退出全屏时回到进入前的缩放状态**，不是重置为默认（fit），也不是
+ *  「按普通容器重新适配」，并且不要出现明显的缩放跳变。
+ *
+ *  规则：
+ *   · 有快照（`hasSnapshot`）→ 用 `preZoom / preTx / preTy`，并把 zoom 夹到 `[min, max]`；
+ *   · 无快照（异常路径 / 状态丢失）→ 保持当前 zoom / tx / ty（**绝不擅自 fit**，
+ *     fit 会直接表现为「图被缩小」，正是本轮要修的现象）；
+ *   · 任何 NaN / 非正 zoom 一律退回「当前值 → 1」，保证不会把非法值写进 @State。
+ *
+ *  刻意不做「按新画布重算倍率」：`zoom` 本身就是相对适配尺寸的倍率，
+ *  画布变化时自动等比跟随；再乘一次反而会让「进入前后」倍率对不上。
+ */
+export function fullExitViewOf(hasSnapshot: boolean, preZoom: number, preTx: number, preTy: number,
+  curZoom: number, curTx: number, curTy: number, min: number, max: number): FullExitView {
+  const lo: number = min > 0 ? min : 0.01;
+  const hi: number = max > lo ? max : lo;
+  const clampZoom = (v: number, fallback: number): number => {
+    const base: number = (v === v && v > 0) ? v : fallback;
+    const safe: number = (base === base && base > 0) ? base : 1;
+    return safe < lo ? lo : (safe > hi ? hi : safe);
+  };
+  const numOf = (v: number): number => (v === v ? v : 0);
+  if (hasSnapshot) {
+    return {
+      zoom: clampZoom(preZoom, curZoom),
+      tx: numOf(preTx),
+      ty: numOf(preTy),
+      restored: true,
+    };
+  }
+  return {
+    zoom: clampZoom(curZoom, 1),
+    tx: numOf(curTx),
+    ty: numOf(curTy),
+    restored: false,
+  };
 }
 
 /** 全屏态下画布相对「全屏基准尺寸」明显缩小 → 判定系统已自行退出沉浸。
