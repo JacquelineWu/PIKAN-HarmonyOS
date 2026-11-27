@@ -101,6 +101,8 @@ import { Size2, viewEdgeOf, preloadEdgeOf,
   displayEdgeOf, shouldReloadOnResize, shouldExitFullOnResize, fitOnFullExit, canvasFromRootOf,
   isWideGamutOf, fullscreenStepsOf, spreadRightWantedOf,
   chromeSampleOf, canvasResizeAcceptOf } from '../common/ViewPlan';
+// 第八十六轮：并排（对开）等比适配的唯一真值源（统一高度 + 各自原始比例 + 中间零间隙）。
+import { SpreadFit, spreadFitOf, spreadAspectOf } from '../common/SpreadFit';
 import { ArchiveMeta, WindowRect, encodeMeta, decodeMeta, metaForUri,
   metaMergeOf, metasPaddedOf, metaChunkPaddedOf,
   packWindowRect, parseWindowRect, windowRectUsable,
@@ -246,7 +248,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R84';
+const ESC_BUILD_TAG: string = 'R86';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -1671,6 +1673,12 @@ struct Index {
   private rightOwned: image.PixelMap | undefined = undefined;
   private rightToken: number = 0;
   private rightRetryTimer: number = -1;   // 第四十七轮：右页解码失败的重试句柄
+  /** 第八十六轮：右页原图宽高（像素）。并排等比适配要按**各自**原始比例算，
+   *  只靠左图尺寸会让「一页竖图 + 一页横图」被按同一比例摆放。
+   *  与 `imgW/imgH`（左页）同一口径：都取自 PreviewEntry.w/h（原图像素，非解码后尺寸）。
+   *  0 = 未知，纯函数会按另一页比例估算，真实值到达后派生布局自动重算。 */
+  @State rightImgW: number = 0;
+  @State rightImgH: number = 0;
   @State viewFailed: boolean = false;                 // 自解码确认失败 → 才回退到 Image(uri)
   @State curToken: number = 0;                        // 当前显示图的代号（每切换一次自增）
 
@@ -3867,6 +3875,9 @@ struct Index {
     if (hit !== undefined && shouldReuseDecoded(hit.edge, reuseNeed)) {
       this.rightOwned = undefined;
       this.rightPixelMap = hit.px;
+      // 第八十六轮：并排适配需要右页原始宽高（缓存条目里就是原图像素尺寸）。
+      this.rightImgW = hit.w;
+      this.rightImgH = hit.h;
       return;
     }
     this.decodeTo(uri, need)
@@ -3908,6 +3919,9 @@ struct Index {
         this.rightPixelMap = undefined;  // 先撤旧引用，让 upgradePreview 安全 release
         const best: PreviewEntry = this.upgradePreview(e);
         this.rightPixelMap = best.px;
+        // 第八十六轮：右页原始宽高随解码结果更新，并排适配据此重算（派生值自动生效）。
+        this.rightImgW = best.w;
+        this.rightImgH = best.h;
         if (attempt > 0) {
           hilog.info(DOMAIN, TAG, 'loadRightPage: decoded ok on retry %{public}d uri=%{public}s', attempt, uri);
         }
@@ -3927,6 +3941,9 @@ struct Index {
     }
     this.releaseRightOwned();
     this.rightPixelMap = undefined;
+    // 第八十六轮：右页尺寸一并收掉 —— 留着上一对的宽高会把并排布局算成上一对的形状。
+    this.rightImgW = 0;
+    this.rightImgH = 0;
   }
 
   /** 丢弃尚未执行的合并跳转，并把滚轮状态复位 */
@@ -3982,12 +3999,62 @@ struct Index {
     return this.frameW() * (half ? 0.5 : 1);
   }
 
-  /** objectFit=Contain 时图片相对可用框的缩放比 */
+  // ------------------------------------------------------------------
+  // 第八十六轮：并排（对开）等比适配
+  // ------------------------------------------------------------------
+
+  /** 并排等比适配结果 —— **派生值，刻意不用 @State 缓存**。
+   *
+   *  每次读取都按当前 `frameW/H`（= canvasW/H + rot）、`imgW/H`、`rightImgW/H` 现算，
+   *  所以①窗口缩放 ②面板分隔条拖动 ③换图 / 翻页 ④旋转 ⑤进出全屏
+   *  全都会在下一次 build 中自动生效，**不需要任何「重算触发点」**，也就不可能出现
+   *  「缓存值没跟上真实布局」这类漂移（第八十五轮把布局尺寸改成 @State 镜像后翻车的教训）。
+   *
+   *  规则见 `common/SpreadFit.ts`：统一高度 + 各自原始比例 + 中间零间隙 + 整组居中。 */
+  private spreadFit(): SpreadFit {
+    return spreadFitOf(this.frameW(), this.frameH(),
+      spreadAspectOf(this.imgW, this.imgH, this.rot),
+      spreadAspectOf(this.rightImgW, this.rightImgH, this.rot));
+  }
+
+  /** 该页渲染框宽。并排时左右可能不同（各自原始比例），单页时就是整幅画布宽。
+   *  ⚠️ 渲染框一旦改动，**坐标基准必须同步改**：放大镜（loupeContentW / loupeOffX）
+   *  与 fitFactor 已全部改用本组方法，禁止再拿 `viewBoxW(half)` 当坐标基准。 */
+  private pageBoxW(pane: number, half: boolean): number {
+    if (!half) {
+      return this.viewBoxW(false);
+    }
+    return pane === LOUPE_PANE_RIGHT ? this.spreadFit().wR : this.spreadFit().wL;
+  }
+
+  private pageWLeft(half: boolean): number {
+    return this.pageBoxW(LOUPE_PANE_LEFT, half);
+  }
+
+  private pageWRight(half: boolean): number {
+    return this.pageBoxW(LOUPE_PANE_RIGHT, half);
+  }
+
+  /** 两页统一渲染框高（并排时为适配高度 h；单页时仍是整幅画布高） */
+  private pageH(half: boolean): number {
+    return half ? this.spreadFit().h : this.frameH();
+  }
+
+  /** objectFit=Contain 时图片相对**该页真实渲染框**的缩放比。
+   *  第八十六轮：并排时渲染框不再是「半幅画布」，必须用 pageWLeft / pageH，
+   *  否则「1:1」与缩放百分比都会按错误的框算（图明明铺满却显示 87%）。 */
   private fitFactor(): number {
     if (this.imgW <= 0 || this.imgH <= 0) {
       return 0;
     }
-    return Math.min(this.frameW() / this.imgW, this.frameH() / this.imgH);
+    const boxW: number = this.pageWLeft(this.spreadShown());
+    const boxH: number = this.pageH(this.spreadShown());
+    return Math.min(boxW / this.imgW, boxH / this.imgH);
+  }
+
+  /** 当前是否处于并排（对开）渲染：左页 builder 的 `half` 与它同义。 */
+  private spreadShown(): boolean {
+    return this.spreadB >= 0 && this.spreadB < this.items.length;
   }
 
   /** 用 fileIo 取体积；图库 URI 不一定可读，失败返回 -1 */
@@ -4648,8 +4715,9 @@ struct Index {
     }
     const x: number = Number(event.x);
     const y: number = Number(event.y);
+    // 第八十六轮：命中框 = **该页真实渲染框**（并排两页宽度可能不同）。
     const inside: boolean = x === x && y === y &&
-      loupeInFrame(x, y, this.viewBoxW(half), this.frameH());
+      loupeInFrame(x, y, this.pageBoxW(pane, half), this.pageH(half));
     const on: boolean = loupeEligibleOf(inside, this.hasLoupeImage(pane));
     const nextPane: number = on ? pane : loupePaneAfterHover(this.loupePane, pane, false);
     if (nextPane !== this.loupePane) {
@@ -4668,23 +4736,26 @@ struct Index {
 
   /** 放大镜圆内放大图的尺寸：主预览显示框整体等比放大 LOUPE_ZOOM 倍。
    *  第十六轮：全部收敛到整像素 —— 浮点尺寸会让 GPU 落在子像素上采样，
-   *  产生边缘粗糙 / 错位；取整后每个显示像素与源像素严格对齐。 */
-  private loupeContentW(half: boolean): number {
-    return loupePixelAlignOf(this.viewBoxW(half) * LOUPE_ZOOM);
+   *  产生边缘粗糙 / 错位；取整后每个显示像素与源像素严格对齐。
+   *  第八十六轮：改成按 **该页的真实渲染框**（pageWLeft / pageWRight / pageH）取基准。
+   *  并排两页宽度可能不同（各自原始比例），所以必须区分 pane —— 只用 half 会把
+   *  右页按左页宽度放大，圆内取景与光标处不对应。 */
+  private loupeContentW(pane: number, half: boolean): number {
+    return loupePixelAlignOf(this.pageBoxW(pane, half) * LOUPE_ZOOM);
   }
 
-  private loupeContentH(): number {
-    return loupePixelAlignOf(this.frameH() * LOUPE_ZOOM);
+  private loupeContentH(half: boolean): number {
+    return loupePixelAlignOf(this.pageH(half) * LOUPE_ZOOM);
   }
 
   /** 圆内放大图偏移（夹界版）：把光标处的图像点对齐圆心，边缘不空白。
    *  取整至多带来 1px 误差，圆本身有 2vp 边框覆盖，圆内始终被放大图铺满。 */
-  private loupeOffX(half: boolean): number {
-    return loupePixelAlignOf(loupeClampedOffset(this.loupeX, this.viewBoxW(half), LOUPE_D_VP, LOUPE_ZOOM));
+  private loupeOffX(pane: number, half: boolean): number {
+    return loupePixelAlignOf(loupeClampedOffset(this.loupeX, this.pageBoxW(pane, half), LOUPE_D_VP, LOUPE_ZOOM));
   }
 
-  private loupeOffY(): number {
-    return loupePixelAlignOf(loupeClampedOffset(this.loupeY, this.frameH(), LOUPE_D_VP, LOUPE_ZOOM));
+  private loupeOffY(half: boolean): number {
+    return loupePixelAlignOf(loupeClampedOffset(this.loupeY, this.pageH(half), LOUPE_D_VP, LOUPE_ZOOM));
   }
 
   /** 圆形放大镜左上角：圆心严格落在光标处（实时跟随）。 */
@@ -8973,9 +9044,9 @@ struct Index {
             .interpolation(this.loupeInterpolation())
             .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
-            .width(this.loupeContentW(half))
-            .height(this.loupeContentH())
-            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+            .width(this.loupeContentW(pane, half))
+            .height(this.loupeContentH(half))
+            .position({ x: this.loupeOffX(pane, half), y: this.loupeOffY(half) })
         } else if (pane === LOUPE_PANE_RIGHT) {
           // 并排右页：只认 rightPixelMap（与右页主图同源，逐点对应）。
           // 刻意不画 uri 兜底，也不加主画质属性 —— 那三处画质契约要求全源码恰好 3 处，
@@ -8986,9 +9057,9 @@ struct Index {
               .interpolation(this.loupeInterpolation())
               .antialiased(LOUPE_AA_ENABLED)
               .draggable(false)
-              .width(this.loupeContentW(half))
-              .height(this.loupeContentH())
-              .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+              .width(this.loupeContentW(pane, half))
+              .height(this.loupeContentH(half))
+              .position({ x: this.loupeOffX(pane, half), y: this.loupeOffY(half) })
           }
         } else if (this.viewPixelMap !== undefined) {
           Image(this.viewPixelMap!)
@@ -8998,27 +9069,27 @@ struct Index {
             .interpolation(this.loupeInterpolation())
             .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
-            .width(this.loupeContentW(half))
-            .height(this.loupeContentH())
-            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+            .width(this.loupeContentW(pane, half))
+            .height(this.loupeContentH(half))
+            .position({ x: this.loupeOffX(pane, half), y: this.loupeOffY(half) })
         } else if (this.lowPixelMap !== undefined) {
           Image(this.lowPixelMap!)
             .objectFit(ImageFit.Contain)
             .interpolation(this.loupeInterpolation())
             .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
-            .width(this.loupeContentW(half))
-            .height(this.loupeContentH())
-            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+            .width(this.loupeContentW(pane, half))
+            .height(this.loupeContentH(half))
+            .position({ x: this.loupeOffX(pane, half), y: this.loupeOffY(half) })
         } else {
           Image(uri)
             .objectFit(ImageFit.Contain)
             .interpolation(this.loupeInterpolation())
             .antialiased(LOUPE_AA_ENABLED)
             .draggable(false)
-            .width(this.loupeContentW(half))
-            .height(this.loupeContentH())
-            .position({ x: this.loupeOffX(half), y: this.loupeOffY() })
+            .width(this.loupeContentW(pane, half))
+            .height(this.loupeContentH(half))
+            .position({ x: this.loupeOffX(pane, half), y: this.loupeOffY(half) })
         }
       }
       .width(LOUPE_D_VP)
@@ -9052,8 +9123,8 @@ struct Index {
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
-          .width(this.viewBoxW(half))
-          .height(this.frameH())
+          .width(this.pageWLeft(half))
+          .height(this.pageH(half))
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
       } else if (this.viewFailed) {
         // 兜底：**只有自解码确认失败**才交给系统解码。
@@ -9065,8 +9136,8 @@ struct Index {
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
-          .width(this.viewBoxW(half))
-          .height(this.frameH())
+          .width(this.pageWLeft(half))
+          .height(this.pageH(half))
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
           .onComplete((ev) => {
             if (ev && token === this.curToken) {
@@ -9089,8 +9160,8 @@ struct Index {
           .interpolation(ImageInterpolation.Medium)
           .antialiased(this.previewAntialias())
           .draggable(false)
-          .width(this.viewBoxW(half))
-          .height(this.frameH())
+          .width(this.pageWLeft(half))
+          .height(this.pageH(half))
           .scale({
             x: this.zoom * (this.flipH ? -1 : 1) * this.focusZoom(),
             y: this.zoom * (this.flipV ? -1 : 1) * this.focusZoom()
@@ -9102,8 +9173,8 @@ struct Index {
       // 第十四轮：放大镜浮层排在最后一层（z 序最高），按左页 pane 独立判定。
       this.loupeLayer(LOUPE_PANE_LEFT, uri, half);
     }
-    .width(this.viewBoxW(half))
-    .height(this.frameH())
+    .width(this.pageWLeft(half))
+    .height(this.pageH(half))
     .onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_LEFT))
     .onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_LEFT, half))
   }
@@ -9127,15 +9198,15 @@ struct Index {
           .autoResize(false)
           .dynamicRangeMode(this.viewHdrWanted ? DynamicRangeMode.HIGH : DynamicRangeMode.STANDARD)
           .draggable(false)
-          .width(this.viewBoxW(half))
-          .height(this.frameH())
+          .width(this.pageWRight(half))
+          .height(this.pageH(half))
           .scale({ x: this.zoom * (this.flipH ? -1 : 1), y: this.zoom * (this.flipV ? -1 : 1) })
       } else {
         // 右页还在解码：只占住这一半画布，不触发任何原图解码。
         // 底色与主预览区一致，视觉上就是「这一页还没到」，不会有上一对的残影。
         Column()
-          .width(this.viewBoxW(half))
-          .height(this.frameH())
+          .width(this.pageWRight(half))
+          .height(this.pageH(half))
           .backgroundColor(CANVAS_BG)
       }
 
@@ -9143,8 +9214,8 @@ struct Index {
       // 与左页各用各的局部坐标与图源，同一时刻只会命中被悬停的那一页。
       this.loupeLayer(LOUPE_PANE_RIGHT, uri, half);
     }
-    .width(this.viewBoxW(half))
-    .height(this.frameH())
+    .width(this.pageWRight(half))
+    .height(this.pageH(half))
     .onHover((on: boolean) => this.onLoupeHover(on, LOUPE_PANE_RIGHT))
     .onMouse((event: MouseEvent) => this.onLoupeMouse(event, LOUPE_PANE_RIGHT, half))
   }
@@ -9359,7 +9430,15 @@ struct Index {
             this.textPreview();
           } else if (this.cur >= 0) {
             // 外层 Column：拖拽 + 旋转；内层 Image：缩放 + 镜像。
-            // 对开时两页各占一半宽、等高并排（Win64 6347756）；翻页步长仍恒为一格。
+            // 第八十六轮：对开两页改为**等比填满**（此前各占半幅画布、各自居中，
+            // 两页之间会留下半幅空白的中缝）。规则由 SpreadFit 统一给出：
+            //   · 统一高度 h：两页缩放到同一高度，再按各自原始宽高比取宽
+            //     （wL = h×arL、wR = h×arR）⇒ 各自等比、绝不拉伸；
+            //   · h = min(可用高, 可用宽 / (arL + arR)) ⇒ 两页尽可能大；
+            //   · 两页左右相邻、**中间零间隙**，整组由外层 Column 居中；
+            //   · 高度受限 → 只在左右留白；宽度受限 → 只在上下留白（只空一个轴）。
+            // Row 不设宽度：让它按两页实际宽度收缩，居中交给外层 Column，
+            // 这样「中间零间隙」不依赖任何空格 / padding 常量。
             Column() {
               if (this.spreadB >= 0 && this.spreadB < this.items.length) {
                 Row() {
