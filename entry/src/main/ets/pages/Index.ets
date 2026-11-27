@@ -251,7 +251,7 @@ const ROOT_FOCUS_ID: string = 'heicRootKeys';
  *  太早时根组件还没挂上新 id，requestFocus 会静默失败。 */
 const ESC_REFOCUS_DELAY_MS: number = 120;
 /** 第二十一轮：常显在右下角缩放角标的构建标记 —— 从截图一眼确认装的是不是新包。 */
-const ESC_BUILD_TAG: string = 'R89';
+const ESC_BUILD_TAG: string = 'R90';
 /** 第二十三轮订正：**恢复 true**。
  *  R22 实机关掉本开关后截图变成 `full=T · win=T · keys=0` —— 连「第一次 ESC
  *  返回普通模式」都消失了；对比 R21（本开关 true）的 `full=F` 可证：系统消费首次
@@ -4436,6 +4436,24 @@ struct Index {
     return (pct < 10 ? pct.toFixed(1) : Math.round(pct).toString()) + ' %';
   }
 
+  /** 第九十轮：把视图数值拼成**字符串**再交给 hilog。
+   *
+   *  ⚠️ 本机 hilog 不支持 `%{public}f`：R88/R89 那两行实测被打成
+   *  「canvas=}fx}f zoom=}f tx=}f ty=}f」—— 数值全丢，诊断等于没有。
+   *  统一改成「先拼字符串 + `%{public}s`」，浮点收敛到 3 位小数，并顺带带上
+   *  canvas / img / fit / p / pre，一条日志就能判定「是倍率还是画布」。 */
+  private viewDiagOf(): string {
+    const r3 = (v: number): string => (Math.round(v * 1000) / 1000).toString();
+    return 'zoom=' + r3(this.zoom) +
+      ' tx=' + Math.round(this.tx) + ' ty=' + Math.round(this.ty) +
+      ' canvas=' + Math.round(this.canvasW) + 'x' + Math.round(this.canvasH) +
+      ' img=' + Math.round(this.imgW) + 'x' + Math.round(this.imgH) +
+      ' fit=' + r3(this.fitFactor()) +
+      ' p=' + this.zoomPercentText() +
+      ' pre=' + (this.preFullViewValid ? r3(this.preFullZoom) : 'none') +
+      ' spread=' + (this.spreadShown() ? 'T' : 'F');
+  }
+
   private zoomBy(factor: number): void {
     this.zoom = clamp(this.zoom * factor, MIN_SCALE, MAX_SCALE);
     this.status = '缩放 ' + this.zoomPercentText();
@@ -6371,9 +6389,7 @@ struct Index {
         const drift: boolean = (this.zoom !== this.exitViewZoom) ||
           (this.tx !== this.exitViewTx) || (this.ty !== this.exitViewTy);
         if (drift) {
-          hilog.info(DOMAIN, TAG,
-            'full exit restore: drift fixed zoom %{public}f->%{public}f tx %{public}f->%{public}f ty %{public}f->%{public}f',
-            this.zoom, this.exitViewZoom, this.tx, this.exitViewTx, this.ty, this.exitViewTy);
+          hilog.info(DOMAIN, TAG, 'full exit drift fixed: %{public}s', this.viewDiagOf());
           this.zoom = this.exitViewZoom;
           this.tx = this.exitViewTx;
           this.ty = this.exitViewTy;
@@ -6385,9 +6401,7 @@ struct Index {
         this.exitViewNoted = true;
         this.status = this.status + ' · 缩放 ' + this.zoomPercentText();
       }
-      hilog.info(DOMAIN, TAG,
-        'full exit restore: canvas=%{public}fx%{public}f zoom=%{public}f tx=%{public}f ty=%{public}f',
-        this.canvasW, this.canvasH, this.zoom, this.tx, this.ty);
+      hilog.info(DOMAIN, TAG, 'full exit settle: %{public}s', this.viewDiagOf());
     }, FULL_EXIT_REFIT_MS);
   }
 
@@ -8346,6 +8360,8 @@ struct Index {
       this.preFullViewValid = true;
       this.exitViewValid = false;
       this.exitViewNoted = false;
+      // 第九十轮：进入时把「冻结下来的视图」打一次，退出时那条才有对照。
+      hilog.info(DOMAIN, TAG, 'full enter snapshot: %{public}s', this.viewDiagOf());
       this.preFullRot = this.rot;
       this.preFullFlipH = this.flipH;
       this.preFullFlipV = this.flipV;
